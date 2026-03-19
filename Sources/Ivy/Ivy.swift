@@ -243,12 +243,13 @@ public actor Ivy {
     }
 
     private func startListener() async throws {
+        let ivyBox = UnsafeMutableTransferBox<Ivy>(self)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
             .childChannelInitializer { channel in
-                channel.pipeline.addHandlers([
-                    MessageFrameDecoder(),
-                ])
+                let decoder = MessageFrameDecoder()
+                let acceptor = InboundConnectionAcceptor(ivy: ivyBox.value)
+                return channel.pipeline.addHandlers([decoder, acceptor])
             }
 
         let channel = try await bootstrap
@@ -259,12 +260,16 @@ public actor Ivy {
     }
 
     func handleNewInboundChannel(_ channel: Channel) {
-        let unknownID = PeerID(publicKey: "pending-\(UUID().uuidString)")
-        let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: "unknown", port: 0)
+        let unknownID = PeerID(publicKey: "inbound-\(UUID().uuidString)")
+        let remoteAddr = channel.remoteAddress
+        let host = remoteAddr?.ipAddress ?? "unknown"
+        let port = UInt16(remoteAddr?.port ?? 0)
+        let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: host, port: port)
         let conn = PeerConnection(id: unknownID, endpoint: endpoint, channel: channel)
         let handler = PeerChannelHandler(connection: conn)
         _ = channel.pipeline.addHandler(handler)
         connections[unknownID] = conn
+        delegate?.ivy(self, didConnect: unknownID)
         Task { await handleInbound(conn) }
     }
 

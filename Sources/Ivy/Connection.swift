@@ -119,3 +119,23 @@ final class UnsafeMutableTransferBox<T>: @unchecked Sendable {
     var value: T
     init(_ value: T) { self.value = value }
 }
+
+final class InboundConnectionAcceptor: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Message
+
+    let ivy: Ivy
+    private var registered = false
+
+    init(ivy: Ivy) {
+        self.ivy = ivy
+    }
+
+    func channelActive(context: ChannelHandlerContext) {
+        if !registered {
+            registered = true
+            let channel = context.channel
+            Task { await ivy.handleNewInboundChannel(channel) }
+        }
+        context.fireChannelActive()
+    }
+}
