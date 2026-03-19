@@ -1,5 +1,6 @@
-@preconcurrency import Network
 import Foundation
+import NIOCore
+import NIOPosix
 import Acorn
 import Tally
 
@@ -8,21 +9,25 @@ public actor Ivy {
     public let tally: Tally
     public let router: Router
     public let localID: PeerID
+    public let group: EventLoopGroup
 
     public weak var delegate: IvyDelegate?
 
     private var connections: [PeerID: PeerConnection] = [:]
     private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
     private var _worker: NetworkCASWorker?
-    private nonisolated(unsafe) var listener: NWListener?
+    private var serverChannel: Channel?
+    #if canImport(Network)
     private var discovery: LocalDiscovery?
+    #endif
     private var running = false
 
-    public init(config: IvyConfig) {
+    public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
         self.localID = PeerID(publicKey: config.publicKey)
         self.tally = Tally(config: config.tallyConfig)
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
+        self.group = group
     }
 
     public func worker() -> NetworkCASWorker {
@@ -37,21 +42,25 @@ public actor Ivy {
     public func start() async throws {
         guard !running else { return }
         running = true
-        try startListener()
+        try await startListener()
+        #if canImport(Network)
         if config.enableLocalDiscovery {
             startLocalDiscovery()
         }
+        #endif
         for bootstrap in config.bootstrapPeers {
             Task { try? await connect(to: bootstrap) }
         }
     }
 
-    public func stop() {
+    public func stop() async {
         running = false
-        listener?.cancel()
-        listener = nil
+        try? await serverChannel?.close().get()
+        serverChannel = nil
+        #if canImport(Network)
         discovery?.stop()
         discovery = nil
+        #endif
         for (_, conn) in connections {
             conn.cancel()
         }
@@ -63,9 +72,8 @@ public actor Ivy {
     public func connect(to endpoint: PeerEndpoint) async throws {
         let peer = PeerID(publicKey: endpoint.publicKey)
         guard connections[peer] == nil else { return }
-        let conn = PeerConnection.dial(endpoint: endpoint)
+        let conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
         connections[peer] = conn
-        conn.start()
         router.addPeer(peer, endpoint: endpoint, tally: tally)
         delegate?.ivy(self, didConnect: peer)
         Task { await handleInbound(conn) }
@@ -234,25 +242,33 @@ public actor Ivy {
         }
     }
 
-    private func startListener() throws {
-        let l = try NWListener(using: .tcp, on: NWEndpoint.Port(rawValue: config.listenPort)!)
-        l.newConnectionHandler = { [weak self] nwConn in
-            guard let self else { return }
-            Task { await self.handleNewConnection(nwConn) }
-        }
-        l.start(queue: DispatchQueue(label: "ivy.listener"))
-        self.listener = l
+    private func startListener() async throws {
+        let bootstrap = ServerBootstrap(group: group)
+            .serverChannelOption(.backlog, value: 256)
+            .childChannelInitializer { channel in
+                channel.pipeline.addHandlers([
+                    MessageFrameDecoder(),
+                ])
+            }
+
+        let channel = try await bootstrap
+            .bind(host: "0.0.0.0", port: Int(config.listenPort))
+            .get()
+
+        self.serverChannel = channel
     }
 
-    private func handleNewConnection(_ nwConn: NWConnection) {
+    func handleNewInboundChannel(_ channel: Channel) {
         let unknownID = PeerID(publicKey: "pending-\(UUID().uuidString)")
         let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: "unknown", port: 0)
-        let conn = PeerConnection(id: unknownID, endpoint: endpoint, connection: nwConn)
+        let conn = PeerConnection(id: unknownID, endpoint: endpoint, channel: channel)
+        let handler = PeerChannelHandler(connection: conn)
+        _ = channel.pipeline.addHandler(handler)
         connections[unknownID] = conn
-        conn.start()
         Task { await handleInbound(conn) }
     }
 
+    #if canImport(Network)
     private func startLocalDiscovery() {
         let d = LocalDiscovery(
             serviceType: config.serviceType,
@@ -266,4 +282,5 @@ public actor Ivy {
         d.startBrowsing()
         self.discovery = d
     }
+    #endif
 }

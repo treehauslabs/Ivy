@@ -1,3 +1,4 @@
+#if canImport(Network)
 @preconcurrency import Network
 import Foundation
 
@@ -57,3 +58,4 @@ final class LocalDiscovery: Sendable {
         listener = nil
     }
 }
+#endif

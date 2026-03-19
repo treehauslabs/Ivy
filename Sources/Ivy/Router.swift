@@ -1,19 +1,21 @@
 import Foundation
 import Crypto
 import Tally
+#if canImport(os)
 import os
+#endif
 
 public struct Router: Sendable {
     public let localID: PeerID
     public let localHash: [UInt8]
     private let k: Int
-    private let _state: OSAllocatedUnfairLock<State>
+    private let _state: LockedState<State>
 
     public init(localID: PeerID, k: Int = 20) {
         self.localID = localID
         self.localHash = Self.hash(localID.publicKey)
         self.k = k
-        self._state = OSAllocatedUnfairLock(initialState: State())
+        self._state = LockedState(initialState: State())
     }
 
     struct State: Sendable {
@@ -107,7 +109,7 @@ public struct Router: Sendable {
         return cpl
     }
 
-    static func xorDistance(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
+    public static func xorDistance(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
         zip(a, b).map { $0 ^ $1 }
     }
 }

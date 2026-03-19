@@ -1,98 +1,121 @@
-@preconcurrency import Network
 import Foundation
+import NIOCore
+import NIOPosix
 import Tally
 
-public final class PeerConnection: Sendable {
+public final class PeerConnection: @unchecked Sendable {
     public let id: PeerID
     public let endpoint: PeerEndpoint
-    public let connection: NWConnection
-    private let queue: DispatchQueue
+    let channel: Channel
     private let inbound: AsyncStream<Message>
     private let inboundContinuation: AsyncStream<Message>.Continuation
 
-    public init(id: PeerID, endpoint: PeerEndpoint, connection: NWConnection) {
+    init(id: PeerID, endpoint: PeerEndpoint, channel: Channel) {
         self.id = id
         self.endpoint = endpoint
-        self.connection = connection
-        self.queue = DispatchQueue(label: "ivy.conn.\(id.publicKey.prefix(8))")
+        self.channel = channel
         let (stream, continuation) = AsyncStream<Message>.makeStream()
         self.inbound = stream
         self.inboundContinuation = continuation
     }
 
-    public static func dial(endpoint: PeerEndpoint) -> PeerConnection {
-        let nw = NWConnection(
-            host: NWEndpoint.Host(endpoint.host),
-            port: NWEndpoint.Port(rawValue: endpoint.port)!,
-            using: .tcp
-        )
+    public static func dial(endpoint: PeerEndpoint, group: EventLoopGroup) async throws -> PeerConnection {
         let id = PeerID(publicKey: endpoint.publicKey)
-        return PeerConnection(id: id, endpoint: endpoint, connection: nw)
-    }
 
-    public func start() {
-        connection.stateUpdateHandler = { [weak self] state in
-            switch state {
-            case .ready:
-                self?.receiveLoop()
-            case .failed, .cancelled:
-                self?.inboundContinuation.finish()
-            default:
-                break
+        let bootstrap = ClientBootstrap(group: group)
+            .channelInitializer { channel in
+                let handler = MessageFrameDecoder()
+                return channel.pipeline.addHandler(handler)
             }
-        }
-        connection.start(queue: queue)
+
+        let channel = try await bootstrap.connect(
+            host: endpoint.host,
+            port: Int(endpoint.port)
+        ).get()
+
+        let peerConn = PeerConnection(id: id, endpoint: endpoint, channel: channel)
+        let peerHandler = PeerChannelHandler(connection: peerConn)
+        try await channel.pipeline.addHandler(peerHandler).get()
+
+        return peerConn
     }
 
     public func send(_ message: Message) async throws {
-        let frame = Message.frame(message)
-        try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            connection.send(content: frame, completion: .contentProcessed { error in
-                if let error {
-                    cont.resume(throwing: error)
-                } else {
-                    cont.resume()
-                }
-            })
-        }
+        let payload = message.serialize()
+        var buf = channel.allocator.buffer(capacity: 4 + payload.count)
+        buf.writeInteger(UInt32(payload.count), endianness: .big)
+        buf.writeBytes(payload)
+        try await channel.writeAndFlush(buf).get()
     }
 
     public var messages: AsyncStream<Message> { inbound }
 
-    public func cancel() {
-        connection.cancel()
+    func feedMessage(_ message: Message) {
+        inboundContinuation.yield(message)
+    }
+
+    func connectionClosed() {
         inboundContinuation.finish()
     }
 
-    private func receiveLoop() {
-        readFrame { [weak self] message in
-            guard let self, let message else {
-                self?.inboundContinuation.finish()
+    public func cancel() {
+        channel.close(promise: nil)
+        inboundContinuation.finish()
+    }
+}
+
+final class MessageFrameDecoder: ChannelInboundHandler, RemovableChannelHandler, @unchecked Sendable {
+    typealias InboundIn = ByteBuffer
+    typealias InboundOut = Message
+
+    private var buffer: ByteBuffer = ByteBuffer()
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        var incoming = unwrapInboundIn(data)
+        buffer.writeBuffer(&incoming)
+
+        while buffer.readableBytes >= 4 {
+            guard let length = buffer.getInteger(at: buffer.readerIndex, endianness: .big, as: UInt32.self) else { break }
+            guard length > 0, length < 64 * 1024 * 1024 else {
+                context.close(promise: nil)
                 return
             }
-            self.inboundContinuation.yield(message)
-            self.receiveLoop()
+            guard buffer.readableBytes >= 4 + Int(length) else { break }
+            buffer.moveReaderIndex(forwardBy: 4)
+            guard let bytes = buffer.readBytes(length: Int(length)) else { break }
+            if let message = Message.deserialize(Data(bytes)) {
+                context.fireChannelRead(wrapInboundOut(message))
+            }
         }
+
+        buffer.discardReadBytes()
+    }
+}
+
+final class PeerChannelHandler: ChannelInboundHandler, @unchecked Sendable {
+    typealias InboundIn = Message
+
+    let connection: PeerConnection
+
+    init(connection: PeerConnection) {
+        self.connection = connection
     }
 
-    private func readFrame(completion: @escaping @Sendable (Message?) -> Void) {
-        connection.receive(minimumIncompleteLength: 4, maximumLength: 4) { [weak self] header, _, _, error in
-            guard let self, let header, error == nil, header.count == 4 else {
-                completion(nil)
-                return
-            }
-            let length = header.withUnsafeBytes { $0.load(as: UInt32.self).bigEndian }
-            guard length > 0, length < 64 * 1024 * 1024 else {
-                completion(nil)
-                return
-            }
-            self.connection.receive(minimumIncompleteLength: Int(length), maximumLength: Int(length)) { body, _, _, error in
-                guard let body, error == nil else {
-                    completion(nil)
-                    return
-                }
-                completion(Message.deserialize(body))
-            }
-        }
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let message = unwrapInboundIn(data)
+        connection.feedMessage(message)
     }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        connection.connectionClosed()
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        context.close(promise: nil)
+    }
+}
+
+final class UnsafeMutableTransferBox<T>: @unchecked Sendable {
+    var value: T
+    init(_ value: T) { self.value = value }
 }
