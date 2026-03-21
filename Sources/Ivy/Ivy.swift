@@ -21,7 +21,6 @@ public actor Ivy {
     private var connections: [PeerID: PeerConnection] = [:]
     private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
     private var _worker: NetworkCASWorker?
-    private var _reticulumWorker: ReticulumNetwork?
     private var serverChannel: Channel?
     #if canImport(Network)
     private var discovery: LocalDiscovery?
@@ -1023,19 +1022,7 @@ public actor Ivy {
     private func handleChainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data, announcePayload: Data, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
-        if let reticulum = _reticulumWorker {
-            await reticulum.processChainAnnounce(
-                destinationHash: destinationHash,
-                hops: hops,
-                chainData: chainData,
-                announcePayload: announcePayload,
-                from: peer
-            )
-        }
-
-        if let announceData = ChainAnnounceData.deserialize(chainData) {
-            delegate?.ivy(self, didReceiveChainAnnounce: announceData, destinationHash: destinationHash, hops: hops, from: peer)
-        }
+        delegate?.ivy(self, didReceiveChainAnnounce: chainData, destinationHash: destinationHash, hops: hops, from: peer)
 
         if await transport.isTransportEnabled {
             let fwdPayload = Message.chainAnnounce(
@@ -1197,10 +1184,7 @@ public actor Ivy {
     }
 
     public func reticulumWorker() -> ReticulumNetwork {
-        if let existing = _reticulumWorker { return existing }
-        let w = ReticulumNetwork(node: self, transport: transport, announceService: announceService)
-        _reticulumWorker = w
-        return w
+        ReticulumNetwork(node: self, transport: transport, announceService: announceService)
     }
 
     private func listenOnInterface(_ iface: any NetworkInterface) async {
