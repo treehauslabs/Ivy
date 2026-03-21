@@ -23,6 +23,7 @@ public struct IvyConfig: Sendable {
     public let udpPort: UInt16
     public let enableUDP: Bool
     public let signingKey: Data
+    public let defaultTTL: UInt8
     public let healthConfig: PeerHealthConfig
     public let logger: any IvyLogger
 
@@ -47,6 +48,7 @@ public struct IvyConfig: Sendable {
         udpPort: UInt16 = 4002,
         enableUDP: Bool = false,
         signingKey: Data = Data(),
+        defaultTTL: UInt8 = 7,
         healthConfig: PeerHealthConfig = .default,
         logger: any IvyLogger = NullLogger()
     ) {
@@ -70,6 +72,7 @@ public struct IvyConfig: Sendable {
         self.udpPort = udpPort
         self.enableUDP = enableUDP
         self.signingKey = signingKey
+        self.defaultTTL = defaultTTL
         self.healthConfig = healthConfig
         self.logger = logger
     }

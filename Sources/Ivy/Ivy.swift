@@ -260,19 +260,21 @@ public actor Ivy {
         return await withCheckedContinuation { continuation in
             pendingRequests[cid] = [continuation]
 
-            let peers = selectPeersForRequest(cid: cid)
-            if !peers.isEmpty {
-                for peer in peers {
-                    fireToPeer(peer, .wantBlock(cid: cid))
+            let cidHash = Router.hash(cid)
+            let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
+            var sent = 0
+            for entry in closest {
+                let reachable = connections[entry.id] != nil || relayedPeers[entry.id] != nil || localPeers[entry.id] != nil
+                guard reachable else { continue }
+                fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL))
+                tally.recordRequest(peer: entry.id)
+                sent += 1
+            }
+
+            if sent == 0 {
+                for (peer, _) in connections.prefix(3) {
+                    fireToPeer(peer, .dhtForward(cid: cid, ttl: config.defaultTTL))
                     tally.recordRequest(peer: peer)
-                }
-            } else {
-                let cidHash = Router.hash(cid)
-                let closest = router.closestPeers(to: cidHash, count: 3)
-                for entry in closest {
-                    let reachable = connections[entry.id] != nil || relayedPeers[entry.id] != nil
-                    guard reachable else { continue }
-                    fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 3))
                 }
             }
 
@@ -894,6 +896,15 @@ public actor Ivy {
             firePayloadToPeer(requester, payload)
             tally.recordSent(peer: requester, bytes: data.count, cpl: cpl)
         }
+
+        if let w = _worker {
+            let cidObj = ContentIdentifier(rawValue: cid)
+            Task {
+                if let near = await w.near {
+                    await near.storeLocal(cid: cidObj, data: data)
+                }
+            }
+        }
     }
 
     // MARK: - Announce & Transport
@@ -1202,15 +1213,8 @@ public actor Ivy {
 
     // MARK: - Private Helpers
 
-    private func selectPeersForRequest(cid: String) -> [PeerID] {
-        let cidHash = Router.hash(cid)
-        let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests * 2)
-        var candidates = closest
-            .filter { connections[$0.id] != nil || relayedPeers[$0.id] != nil }
-            .map { (id: $0.id, rep: tally.reputation(for: $0.id)) }
-        candidates.sort { $0.rep > $1.rep }
-        return Array(candidates.prefix(config.maxConcurrentRequests).map(\.id))
-    }
+
+
 
     private func handleGetCIDs(cids: [String], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
