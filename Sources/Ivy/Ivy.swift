@@ -774,6 +774,16 @@ public actor Ivy {
             recentBlockSenders[cid] = peer
             resolvePending(cid: cid, data: data)
             resolveForwards(cid: cid, data: data, from: peer)
+
+            if let w = _worker {
+                let cidObj = ContentIdentifier(rawValue: cid)
+                Task {
+                    if let near = await w.near {
+                        await near.storeLocal(cid: cidObj, data: data)
+                    }
+                }
+            }
+
             delegate?.ivy(self, didReceiveBlock: cid, data: data, from: peer)
 
         case .dontHave:
@@ -796,6 +806,11 @@ public actor Ivy {
             if !haveSet.contains(cid) {
                 haveSet.insert(cid)
                 fireToPeer(peer, .wantBlock(cid: cid))
+                let payload = Message.announceBlock(cid: cid).serialize()
+                for (otherPeer, conn) in connections where otherPeer != peer {
+                    guard tally.shouldAllow(peer: otherPeer) else { continue }
+                    conn.fireAndForget(payload)
+                }
             }
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
 
@@ -897,7 +912,10 @@ public actor Ivy {
         }
 
         var data: Data?
-        if let w = _worker {
+        if haveSet.contains(cid) {
+            data = await getLocalBlock(cid: cid)
+        }
+        if data == nil, let w = _worker {
             let near = await w.near
             if let near {
                 data = await near.getLocal(cid: ContentIdentifier(rawValue: cid))
