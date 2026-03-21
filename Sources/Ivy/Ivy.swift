@@ -283,6 +283,40 @@ public actor Ivy {
         }
     }
 
+    public func publishBlock(cid: String, data: Data) async {
+        if let w = _worker, let near = await w.near {
+            await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
+        }
+        haveSet.insert(cid)
+        let payload = Message.announceBlock(cid: cid).serialize()
+        for (peer, conn) in connections {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            conn.fireAndForget(payload)
+        }
+        for (_, local) in localPeers {
+            local.send(.announceBlock(cid: cid))
+        }
+    }
+
+    public func publishBlock(cid: String, data: Data, referencedContent: [(String, Data)]) async {
+        if let w = _worker, let near = await w.near {
+            await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
+            for (refCID, refData) in referencedContent {
+                await near.storeLocal(cid: ContentIdentifier(rawValue: refCID), data: refData)
+            }
+        }
+        haveSet.insert(cid)
+        for (refCID, _) in referencedContent { haveSet.insert(refCID) }
+        let payload = Message.announceBlock(cid: cid).serialize()
+        for (peer, conn) in connections {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            conn.fireAndForget(payload)
+        }
+        for (_, local) in localPeers {
+            local.send(.announceBlock(cid: cid))
+        }
+    }
+
     public func announceBlock(cid: String) {
         let payload = Message.announceBlock(cid: cid).serialize()
         haveSet.insert(cid)
