@@ -11,6 +11,7 @@ public actor VerifiedDistanceStore: AcornCASWorker {
     private let nodeHash: [UInt8]
     private var storedCIDs: BoundedSet<String>
     private var cidDistances: BoundedDictionary<String, [UInt8]>
+    private var pinnedCIDs: Set<String> = []
     private let maxEntries: Int
 
     public init(inner: any AcornCASWorker, nodePublicKey: String, maxEntries: Int = 100_000) {
@@ -19,6 +20,22 @@ public actor VerifiedDistanceStore: AcornCASWorker {
         self.maxEntries = maxEntries
         self.storedCIDs = BoundedSet(capacity: maxEntries)
         self.cidDistances = BoundedDictionary(capacity: maxEntries)
+    }
+
+    public func pin(_ cid: String) {
+        pinnedCIDs.insert(cid)
+    }
+
+    public func pinAll(_ cids: [String]) {
+        for cid in cids { pinnedCIDs.insert(cid) }
+    }
+
+    public func unpin(_ cid: String) {
+        pinnedCIDs.remove(cid)
+    }
+
+    public func isPinned(_ cid: String) -> Bool {
+        pinnedCIDs.contains(cid)
     }
 
     public func has(cid: ContentIdentifier) async -> Bool {
@@ -36,6 +53,12 @@ public actor VerifiedDistanceStore: AcornCASWorker {
         let computed = ContentIdentifier(for: data)
         guard computed.rawValue == cid.rawValue else { return }
 
+        if pinnedCIDs.contains(cid.rawValue) {
+            storedCIDs.insert(cid.rawValue)
+            await inner.storeLocal(cid: cid, data: data)
+            return
+        }
+
         let cidHash = Router.hash(cid.rawValue)
         let distance = Router.xorDistance(nodeHash, cidHash)
 
@@ -43,12 +66,20 @@ public actor VerifiedDistanceStore: AcornCASWorker {
             if let mostDistant = findMostDistant(), mostDistant.distance > distance {
                 storedCIDs.insert(cid.rawValue)
                 cidDistances[cid.rawValue] = distance
+                await inner.storeLocal(cid: cid, data: data)
             }
         } else {
             storedCIDs.insert(cid.rawValue)
             cidDistances[cid.rawValue] = distance
+            await inner.storeLocal(cid: cid, data: data)
         }
+    }
 
+    public func storePinned(cid: ContentIdentifier, data: Data) async {
+        let computed = ContentIdentifier(for: data)
+        guard computed.rawValue == cid.rawValue else { return }
+        pinnedCIDs.insert(cid.rawValue)
+        storedCIDs.insert(cid.rawValue)
         await inner.storeLocal(cid: cid, data: data)
     }
 
@@ -61,6 +92,7 @@ public actor VerifiedDistanceStore: AcornCASWorker {
     }
 
     public var entryCount: Int { storedCIDs.count }
+    public var pinnedCount: Int { pinnedCIDs.count }
 
     private struct DistantEntry {
         let cid: String
@@ -69,7 +101,7 @@ public actor VerifiedDistanceStore: AcornCASWorker {
 
     private func findMostDistant() -> DistantEntry? {
         var worst: DistantEntry?
-        let sample = cidDistances.filter { _, _ in true }
+        let sample = cidDistances.filter { key, _ in !pinnedCIDs.contains(key) }
         let subset = sample.prefix(16)
         for (cid, distance) in subset {
             if let current = worst {

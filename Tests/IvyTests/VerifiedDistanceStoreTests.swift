@@ -144,4 +144,83 @@ struct VerifiedDistanceStoreTests {
             #expect(has)
         }
     }
+
+    @Test("Pinned content is never evicted")
+    func testPinnedNeverEvicted() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "pin-node", maxEntries: 5)
+
+        let pinnedData = Data("my-mined-block".utf8)
+        let pinnedCID = ContentIdentifier(for: pinnedData)
+        await store.storePinned(cid: pinnedCID, data: pinnedData)
+
+        for i in 0..<20 {
+            let data = Data("foreign-block-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let stillHas = await mem.getLocal(cid: pinnedCID)
+        #expect(stillHas == pinnedData)
+        #expect(await store.isPinned(pinnedCID.rawValue))
+    }
+
+    @Test("storePinned verifies data")
+    func testStorePinnedVerifies() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "pin-verify")
+
+        let data = Data("legit".utf8)
+        let fakeCID = ContentIdentifier(rawValue: "wrong-hash")
+        await store.storePinned(cid: fakeCID, data: data)
+
+        let has = await mem.has(cid: fakeCID)
+        #expect(!has)
+        #expect(await store.pinnedCount == 0)
+    }
+
+    @Test("storePinned bypasses distance check")
+    func testStorePinnedBypassesDistance() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "pin-bypass", maxEntries: 2)
+
+        for i in 0..<2 {
+            let data = Data("fill-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let farData = Data("far-away-pinned-content".utf8)
+        let farCID = ContentIdentifier(for: farData)
+        await store.storePinned(cid: farCID, data: farData)
+
+        let has = await mem.getLocal(cid: farCID)
+        #expect(has == farData)
+    }
+
+    @Test("Pinned count tracks pins")
+    func testPinnedCount() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "count-pins")
+
+        for i in 0..<3 {
+            let data = Data("pin-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storePinned(cid: cid, data: data)
+        }
+
+        #expect(await store.pinnedCount == 3)
+    }
+
+    @Test("Unpin allows future eviction")
+    func testUnpin() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "unpin-node")
+
+        let data = Data("pinnable".utf8)
+        let cid = ContentIdentifier(for: data)
+        await store.storePinned(cid: cid, data: data)
+        #expect(await store.isPinned(cid.rawValue))
+
+        await store.unpin(cid.rawValue)
+        #expect(!(await store.isPinned(cid.rawValue)))
+    }
 }
