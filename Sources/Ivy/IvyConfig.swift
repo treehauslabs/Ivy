@@ -10,6 +10,7 @@ public struct IvyConfig: Sendable {
     public let kBucketSize: Int
     public let maxConcurrentRequests: Int
     public let requestTimeout: Duration
+    public let relayTimeout: Duration
     public let serviceType: String
     public let enableRelay: Bool
     public let enableAutoNAT: Bool
@@ -36,6 +37,7 @@ public struct IvyConfig: Sendable {
         kBucketSize: Int = 20,
         maxConcurrentRequests: Int = 6,
         requestTimeout: Duration = .seconds(15),
+        relayTimeout: Duration = .seconds(5),
         serviceType: String = "_ivy._tcp",
         enableRelay: Bool = true,
         enableAutoNAT: Bool = true,
@@ -60,6 +62,7 @@ public struct IvyConfig: Sendable {
         self.kBucketSize = kBucketSize
         self.maxConcurrentRequests = maxConcurrentRequests
         self.requestTimeout = requestTimeout
+        self.relayTimeout = relayTimeout
         self.serviceType = serviceType
         self.enableRelay = enableRelay
         self.enableAutoNAT = enableAutoNAT

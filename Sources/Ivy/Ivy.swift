@@ -257,7 +257,14 @@ public actor Ivy {
             }
         }
 
-        return await withCheckedContinuation { continuation in
+        let data = await fetchViaRelay(cid: cid)
+        if data != nil { return data }
+
+        return await fetchDirect(cid: cid)
+    }
+
+    private func fetchViaRelay(cid: String) async -> Data? {
+        await withCheckedContinuation { continuation in
             pendingRequests[cid] = [continuation]
 
             let cidHash = Router.hash(cid)
@@ -276,6 +283,38 @@ public actor Ivy {
                     fireToPeer(peer, .dhtForward(cid: cid, ttl: config.defaultTTL))
                     tally.recordRequest(peer: peer)
                 }
+            }
+
+            Task {
+                try? await Task.sleep(for: config.relayTimeout)
+                self.resolvePending(cid: cid, data: nil)
+            }
+        }
+    }
+
+    private func fetchDirect(cid: String) async -> Data? {
+        let cidHash = Router.hash(cid)
+        let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests * 2)
+
+        for entry in closest {
+            if connections[entry.id] != nil || relayedPeers[entry.id] != nil {
+                continue
+            }
+            do {
+                try await connect(to: entry.endpoint)
+            } catch {
+                continue
+            }
+        }
+
+        return await withCheckedContinuation { continuation in
+            pendingRequests[cid] = [continuation]
+
+            for entry in closest {
+                let reachable = connections[entry.id] != nil || relayedPeers[entry.id] != nil
+                guard reachable else { continue }
+                fireToPeer(entry.id, .wantBlock(cid: cid))
+                tally.recordRequest(peer: entry.id)
             }
 
             Task {
