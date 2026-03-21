@@ -223,4 +223,84 @@ struct VerifiedDistanceStoreTests {
         await store.unpin(cid.rawValue)
         #expect(!(await store.isPinned(cid.rawValue)))
     }
+
+    @Test("Chain tip content is protected from eviction")
+    func testChainTipProtected() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "tip-node", maxEntries: 5)
+
+        let tipData = Data("nexus-tip-block".utf8)
+        let tipCID = ContentIdentifier(for: tipData)
+        let refData = Data("tip-transaction".utf8)
+        let refCID = ContentIdentifier(for: refData)
+
+        await store.setChainTip(chain: "Nexus", tipCID: tipCID.rawValue, referencedCIDs: [refCID.rawValue])
+        await store.storeLocal(cid: tipCID, data: tipData)
+        await store.storeLocal(cid: refCID, data: refData)
+
+        for i in 0..<20 {
+            let data = Data("filler-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let tipStillThere = await mem.getLocal(cid: tipCID)
+        let refStillThere = await mem.getLocal(cid: refCID)
+        #expect(tipStillThere == tipData)
+        #expect(refStillThere == refData)
+    }
+
+    @Test("setChainTip replaces old tip for same chain")
+    func testChainTipReplacement() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "replace-tip")
+
+        let old = ContentIdentifier(for: Data("old-tip".utf8))
+        let new = ContentIdentifier(for: Data("new-tip".utf8))
+
+        await store.setChainTip(chain: "Nexus", tipCID: old.rawValue, referencedCIDs: [])
+        #expect(await store.isChainTip(old.rawValue))
+
+        await store.setChainTip(chain: "Nexus", tipCID: new.rawValue, referencedCIDs: [])
+        #expect(await store.isChainTip(new.rawValue))
+        #expect(!(await store.isChainTip(old.rawValue)))
+    }
+
+    @Test("clearChainTip removes protection")
+    func testClearChainTip() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "clear-tip")
+
+        let tip = ContentIdentifier(for: Data("tip".utf8))
+        await store.setChainTip(chain: "Nexus", tipCID: tip.rawValue, referencedCIDs: [])
+        #expect(await store.isChainTip(tip.rawValue))
+
+        await store.clearChainTip(chain: "Nexus")
+        #expect(!(await store.isChainTip(tip.rawValue)))
+    }
+
+    @Test("Multiple chain tips coexist")
+    func testMultipleChainTips() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "multi-tip")
+
+        let nexusTip = ContentIdentifier(for: Data("nexus".utf8))
+        let payTip = ContentIdentifier(for: Data("payments".utf8))
+
+        await store.setChainTip(chain: "Nexus", tipCID: nexusTip.rawValue, referencedCIDs: [])
+        await store.setChainTip(chain: "Nexus/Payments", tipCID: payTip.rawValue, referencedCIDs: [])
+
+        #expect(await store.isChainTip(nexusTip.rawValue))
+        #expect(await store.isChainTip(payTip.rawValue))
+        #expect(await store.chainTipCount >= 2)
+    }
+
+    @Test("Chain tip count tracks referenced CIDs")
+    func testChainTipCountIncludesRefs() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "ref-count")
+
+        let tip = ContentIdentifier(for: Data("tip".utf8))
+        let ref1 = ContentIdentifier(for: Data("ref1".utf8))
+        let ref2 = ContentIdentifier(for: Data("ref2".utf8))
+
+        await store.setChainTip(chain: "Nexus", tipCID: tip.rawValue, referencedCIDs: [ref1.rawValue, ref2.rawValue])
+        #expect(await store.chainTipCount == 3)
+    }
 }
