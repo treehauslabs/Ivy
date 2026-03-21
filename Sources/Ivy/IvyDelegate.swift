@@ -16,6 +16,14 @@ public protocol IvyDelegate: AnyObject, Sendable {
     func ivy(_ ivy: Ivy, didReceiveCompactBlock headerCID: String, txCIDs: [String], chainHash: Data, from peer: PeerID)
     func ivy(_ ivy: Ivy, didReceiveBlockTxns headerCID: String, transactions: [(String, Data)], chainHash: Data, from peer: PeerID)
     func ivy(_ ivy: Ivy, didRequestBlockTxns headerCID: String, missingTxCIDs: [String], chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveNewTxHashes txHashes: [String], chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didRequestTxns txHashes: [String], chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveTxns transactions: [(String, Data)], chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didRequestBlockRange startIndex: UInt64, count: UInt16, chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveBlockRange startIndex: UInt64, blocks: [(String, Data)], chainHash: Data, from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveBlockManifest blockCID: String, referencedCIDs: [String], from peer: PeerID)
+    func ivy(_ ivy: Ivy, didRequestCIDs cids: [String], from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveCIDData items: [(String, Data)], from peer: PeerID)
 }
 
 public extension IvyDelegate {
@@ -33,4 +41,12 @@ public extension IvyDelegate {
     func ivy(_ ivy: Ivy, didReceiveCompactBlock headerCID: String, txCIDs: [String], chainHash: Data, from peer: PeerID) {}
     func ivy(_ ivy: Ivy, didReceiveBlockTxns headerCID: String, transactions: [(String, Data)], chainHash: Data, from peer: PeerID) {}
     func ivy(_ ivy: Ivy, didRequestBlockTxns headerCID: String, missingTxCIDs: [String], chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveNewTxHashes txHashes: [String], chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didRequestTxns txHashes: [String], chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveTxns transactions: [(String, Data)], chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didRequestBlockRange startIndex: UInt64, count: UInt16, chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveBlockRange startIndex: UInt64, blocks: [(String, Data)], chainHash: Data, from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveBlockManifest blockCID: String, referencedCIDs: [String], from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didRequestCIDs cids: [String], from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveCIDData items: [(String, Data)], from peer: PeerID) {}
 }

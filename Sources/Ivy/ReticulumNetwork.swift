@@ -69,7 +69,7 @@ public actor ReticulumNetwork: AcornCASWorker {
         }
 
         for peer in targetPeers {
-            try? await node.sendToPeer(peer, .wantBlock(cid: cid.rawValue))
+            await node.fireToPeer(peer, .wantBlock(cid: cid.rawValue))
         }
 
         return await node.fetchBlock(cid: cid.rawValue)
@@ -154,7 +154,7 @@ public actor ReticulumNetwork: AcornCASWorker {
         await withDiscardingTaskGroup { group in
             for chainPeer in peers {
                 guard node.tally.shouldAllow(peer: chainPeer.peerID) else { continue }
-                group.addTask { try? await self.node.sendToPeer(chainPeer.peerID, msg) }
+                group.addTask { await self.node.fireToPeer(chainPeer.peerID, msg) }
             }
         }
     }
@@ -172,13 +172,13 @@ public actor ReticulumNetwork: AcornCASWorker {
                 context: 0x0B,
                 payload: proofRequest
             )
-            try? await node.sendTransportPacket(packet, via: path)
+            await node.sendTransportPacket(packet, via: path)
         }
 
         let peers = await subscriptions.peersWithCapability(.fullNode, for: fromChain.destinationHash)
         for peer in peers.prefix(3) {
             guard node.tally.shouldAllow(peer: peer.peerID) else { continue }
-            try? await node.sendToPeer(peer.peerID, .transportPacket(data: proofRequest))
+            await node.fireToPeer(peer.peerID, .transportPacket(data: proofRequest))
         }
 
         return nil

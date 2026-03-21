@@ -20,6 +20,7 @@ public struct Router: Sendable {
 
     struct State: Sendable {
         var buckets: [[BucketEntry]] = Array(repeating: [], count: 256)
+        var hashCache: [String: [UInt8]] = [:]
     }
 
     public struct BucketEntry: Sendable {
@@ -30,7 +31,18 @@ public struct Router: Sendable {
     }
 
     public func addPeer(_ id: PeerID, endpoint: PeerEndpoint, tally: Tally) {
-        addPeer(id, hash: Self.hash(id.publicKey), endpoint: endpoint, tally: tally)
+        addPeer(id, hash: cachedHash(id.publicKey), endpoint: endpoint, tally: tally)
+    }
+
+    public func cachedHash(_ key: String) -> [UInt8] {
+        _state.withLock { state in
+            if let cached = state.hashCache[key] { return cached }
+            let h = Self.hash(key)
+            if state.hashCache.count < 10_000 {
+                state.hashCache[key] = h
+            }
+            return h
+        }
     }
 
     public func addPeer(_ id: PeerID, hash peerHash: [UInt8], endpoint: PeerEndpoint, tally: Tally) {

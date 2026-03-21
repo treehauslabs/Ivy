@@ -44,6 +44,11 @@ public actor Ivy {
     private var pendingForwards: [String: [PeerID]] = [:]
     private var announceTask: Task<Void, Never>?
     private var healthMonitor: PeerHealthMonitor?
+    private var haveSet = InventorySet()
+    private var recentBlockSenders: BoundedDictionary<String, PeerID> = BoundedDictionary(capacity: 4096)
+    private var localPeers: [PeerID: LocalPeerConnection] = [:]
+    private var _casBridge: CASBridge?
+    private var _serviceBus: LocalServiceBus?
 
     public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
@@ -122,7 +127,7 @@ public actor Ivy {
         self.healthMonitor = monitor
         await monitor.startMonitoring { [weak self] peer, nonce in
             guard let self else { return }
-            try? await self.sendToPeer(peer, .ping(nonce: nonce))
+            await self.fireToPeer(peer, .ping(nonce: nonce))
         }
     }
 
@@ -169,7 +174,7 @@ public actor Ivy {
             if let monitor = healthMonitor { await monitor.trackPeer(peer) }
             delegate?.ivy(self, didConnect: peer)
             Task { await handleInbound(conn) }
-            await sendIdentify(to: conn)
+            sendIdentify(to: conn)
         } catch {
             guard config.enableRelay else { throw error }
             try await connectViaRelay(to: endpoint)
@@ -177,8 +182,16 @@ public actor Ivy {
     }
 
     public var connectedPeers: [PeerID] {
-        Array(connections.keys) + Array(relayedPeers.keys)
+        var peers = [PeerID]()
+        peers.reserveCapacity(connections.count + relayedPeers.count + localPeers.count)
+        peers.append(contentsOf: connections.keys)
+        peers.append(contentsOf: relayedPeers.keys)
+        peers.append(contentsOf: localPeers.keys)
+        return peers
     }
+
+    public var directPeerCount: Int { connections.count }
+    public var relayedPeerCount: Int { relayedPeers.count }
 
     public func disconnect(_ peer: PeerID) {
         if let conn = connections.removeValue(forKey: peer) {
@@ -214,6 +227,27 @@ public actor Ivy {
         }
     }
 
+    func fireToPeer(_ peer: PeerID, _ message: Message) {
+        if let local = localPeers[peer] {
+            local.send(message)
+        } else if let conn = connections[peer] {
+            conn.fireAndForgetMessage(message)
+        } else if let relayPeer = relayedPeers[peer], let relayConn = connections[relayPeer] {
+            let data = message.serialize()
+            relayConn.fireAndForgetMessage(.relayData(peerKey: peer.publicKey, data: data))
+        }
+    }
+
+    func firePayloadToPeer(_ peer: PeerID, _ payload: Data) {
+        if let local = localPeers[peer] {
+            if let msg = Message.deserialize(payload) { local.send(msg) }
+        } else if let conn = connections[peer] {
+            conn.fireAndForget(payload)
+        } else if let relayPeer = relayedPeers[peer], let relayConn = connections[relayPeer] {
+            relayConn.fireAndForgetMessage(.relayData(peerKey: peer.publicKey, data: payload))
+        }
+    }
+
     // MARK: - Content Fetching
 
     func fetchBlock(cid: String) async -> Data? {
@@ -229,14 +263,8 @@ public actor Ivy {
             let peers = selectPeersForRequest(cid: cid)
             if !peers.isEmpty {
                 for peer in peers {
-                    Task {
-                        let start = ContinuousClock.now
-                        try? await self.sendToPeer(peer, .wantBlock(cid: cid))
-                        self.tally.recordRequest(peer: peer)
-                        let micros = Double(start.duration(to: .now).components.attoseconds) / 1e12
-                            + Double(start.duration(to: .now).components.seconds) * 1e6
-                        self.tally.recordLatency(peer: peer, microseconds: micros)
-                    }
+                    fireToPeer(peer, .wantBlock(cid: cid))
+                    tally.recordRequest(peer: peer)
                 }
             } else {
                 let cidHash = Router.hash(cid)
@@ -244,7 +272,7 @@ public actor Ivy {
                 for entry in closest {
                     let reachable = connections[entry.id] != nil || relayedPeers[entry.id] != nil
                     guard reachable else { continue }
-                    Task { try? await self.sendToPeer(entry.id, .dhtForward(cid: cid, ttl: 3)) }
+                    fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 3))
                 }
             }
 
@@ -255,23 +283,21 @@ public actor Ivy {
         }
     }
 
-    public func announceBlock(cid: String) async {
-        let allPeers = connectedPeers.filter { tally.shouldAllow(peer: $0) }
+    public func announceBlock(cid: String) {
         let payload = Message.announceBlock(cid: cid).serialize()
-        await withDiscardingTaskGroup { group in
-            for peer in allPeers {
-                group.addTask { try? await self.sendPreSerialized(peer, payload) }
-            }
+        haveSet.insert(cid)
+        for (peer, conn) in connections {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            conn.fireAndForget(payload)
         }
     }
 
-    public func broadcastBlock(cid: String, data: Data) async {
+    public func broadcastBlock(cid: String, data: Data) {
         let payload = Message.block(cid: cid, data: data).serialize()
-        let peers = connectedPeers
-        await withDiscardingTaskGroup { group in
-            for peer in peers {
-                group.addTask { try? await self.sendPreSerialized(peer, payload) }
-            }
+        haveSet.insert(cid)
+        for (peer, conn) in connections {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            conn.fireAndForget(payload)
         }
     }
 
@@ -292,7 +318,7 @@ public actor Ivy {
 
             for entry in toQuery {
                 queried.insert(entry.id.publicKey)
-                try? await sendToPeer(entry.id, .findNode(target: Data(targetHash)))
+                fireToPeer(entry.id, .findNode(target: Data(targetHash)))
             }
 
             try? await Task.sleep(for: .milliseconds(500))
@@ -305,7 +331,7 @@ public actor Ivy {
 
     public func handleBlockRequest(cid: String, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else {
-            try? await sendToPeer(peer, .dontHave(cid: cid))
+            fireToPeer(peer, .dontHave(cid: cid))
             return
         }
 
@@ -319,25 +345,24 @@ public actor Ivy {
         }
 
         if let data {
-            try? await sendToPeer(peer, .block(cid: cid, data: data))
-            let dataHash = Router.hash(cid)
-            let cpl = Router.commonPrefixLength(Router.hash(localID.publicKey), dataHash)
+            fireToPeer(peer, .block(cid: cid, data: data))
+            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
         } else {
-            try? await sendToPeer(peer, .dontHave(cid: cid))
+            fireToPeer(peer, .dontHave(cid: cid))
         }
     }
 
     // MARK: - Identify Protocol
 
-    private func sendIdentify(to conn: PeerConnection) async {
+    private func sendIdentify(to conn: PeerConnection) {
         let observedHost = conn.endpoint.host
         let observedPort = conn.endpoint.port
         var listenAddrs: [(String, UInt16)] = [("0.0.0.0", config.listenPort)]
         if let pub = publicAddress {
             listenAddrs.append((pub.host, pub.port))
         }
-        try? await conn.send(.identify(
+        conn.fireAndForgetMessage(.identify(
             publicKey: config.publicKey,
             observedHost: observedHost,
             observedPort: observedPort,
@@ -451,7 +476,7 @@ public actor Ivy {
                 router.addPeer(targetPeer, endpoint: endpoint, tally: tally)
                 delegate?.ivy(self, didConnect: targetPeer)
 
-                Task { await sendIdentifyViaRelay(to: targetPeer) }
+                Task { self.sendIdentifyViaRelay(to: targetPeer) }
 
                 if config.enableHolePunch {
                     Task { await attemptHolePunchUpgrade(target: targetPeer, relay: relayPeerID) }
@@ -463,12 +488,12 @@ public actor Ivy {
         throw IvyError.noRelayAvailable
     }
 
-    private func sendIdentifyViaRelay(to peer: PeerID) async {
+    private func sendIdentifyViaRelay(to peer: PeerID) {
         var listenAddrs: [(String, UInt16)] = [("0.0.0.0", config.listenPort)]
         if let pub = publicAddress {
             listenAddrs.append((pub.host, pub.port))
         }
-        try? await sendToPeer(peer, .identify(
+        fireToPeer(peer, .identify(
             publicKey: config.publicKey,
             observedHost: "relay",
             observedPort: 0,
@@ -483,7 +508,7 @@ public actor Ivy {
             let endpoint = PeerEndpoint(publicKey: srcKey, host: "relay", port: 0)
             router.addPeer(srcPeer, endpoint: endpoint, tally: tally)
             delegate?.ivy(self, didConnect: srcPeer)
-            Task { await sendIdentifyViaRelay(to: srcPeer) }
+            Task { self.sendIdentifyViaRelay(to: srcPeer) }
         } else if config.enableRelay {
             let targetPeer = PeerID(publicKey: dstKey)
             let srcPeer = PeerID(publicKey: srcKey)
@@ -563,7 +588,7 @@ public actor Ivy {
                 relayedPeers.removeValue(forKey: target)
                 connections[target] = conn
                 Task { await handleInbound(conn) }
-                await sendIdentify(to: conn)
+                sendIdentify(to: conn)
                 delegate?.ivy(self, didUpgradeToDirectConnection: target)
                 return
             } catch {
@@ -638,7 +663,7 @@ public actor Ivy {
         }
         switch message {
         case .ping(let nonce):
-            try? await sendToPeer(peer, .pong(nonce: nonce))
+            fireToPeer(peer, .pong(nonce: nonce))
 
         case .pong(let nonce):
             tally.recordSuccess(peer: peer)
@@ -647,16 +672,32 @@ public actor Ivy {
             }
 
         case .wantBlock(let cid):
-            await handleBlockRequest(cid: cid, from: peer)
+            if haveSet.contains(cid), let data = await getLocalBlock(cid: cid) {
+                fireToPeer(peer, .block(cid: cid, data: data))
+                tally.recordSent(peer: peer, bytes: data.count, cpl: 0)
+            } else {
+                await handleBlockRequest(cid: cid, from: peer)
+            }
+
+        case .haveBlock(let cid):
+            haveSet.insert(cid)
+
+        case .wantBlocks(let cids):
+            for cid in cids {
+                await handleBlockRequest(cid: cid, from: peer)
+            }
 
         case .block(let cid, let data):
-            let peerHash = Router.hash(peer.publicKey)
-            let dataHash = Router.hash(cid)
-            let cpl = Router.commonPrefixLength(peerHash, dataHash)
-            tally.recordReceived(peer: peer, bytes: data.count, cpl: cpl)
+            tally.recordReceived(peer: peer, bytes: data.count, cpl: 0)
             tally.recordSuccess(peer: peer)
+            if haveSet.contains(cid) {
+                resolvePending(cid: cid, data: data)
+                break
+            }
+            haveSet.insert(cid)
+            recentBlockSenders[cid] = peer
             resolvePending(cid: cid, data: data)
-            await resolveForwards(cid: cid, data: data, from: peer)
+            resolveForwards(cid: cid, data: data, from: peer)
             delegate?.ivy(self, didReceiveBlock: cid, data: data, from: peer)
 
         case .dontHave:
@@ -665,7 +706,7 @@ public actor Ivy {
         case .findNode(let target):
             let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
             let endpoints = closest.map { $0.endpoint }
-            try? await sendToPeer(peer, .neighbors(endpoints))
+            fireToPeer(peer, .neighbors(endpoints))
 
         case .neighbors(let endpoints):
             for ep in endpoints {
@@ -684,7 +725,7 @@ public actor Ivy {
         case .dialBack(let nonce, let host, let port):
             Task {
                 let success = await Self.probeAddress(host: host, port: Int(port), group: group)
-                try? await self.sendToPeer(peer, .dialBackResult(nonce: nonce, success: success))
+                self.fireToPeer(peer, .dialBackResult(nonce: nonce, success: success))
             }
 
         case .dialBackResult(let nonce, let success):
@@ -735,6 +776,35 @@ public actor Ivy {
 
         case .blockTxns(let chainHash, let headerCID, let transactions):
             delegate?.ivy(self, didReceiveBlockTxns: headerCID, transactions: transactions, chainHash: chainHash, from: peer)
+
+        case .newTxHashes(let chainHash, let txHashes):
+            delegate?.ivy(self, didReceiveNewTxHashes: txHashes, chainHash: chainHash, from: peer)
+
+        case .getTxns(let chainHash, let txHashes):
+            delegate?.ivy(self, didRequestTxns: txHashes, chainHash: chainHash, from: peer)
+
+        case .txns(let chainHash, let transactions):
+            delegate?.ivy(self, didReceiveTxns: transactions, chainHash: chainHash, from: peer)
+
+        case .getBlockRange(let chainHash, let startIndex, let count):
+            delegate?.ivy(self, didRequestBlockRange: startIndex, count: count, chainHash: chainHash, from: peer)
+
+        case .blockRange(let chainHash, let startIndex, let blocks):
+            delegate?.ivy(self, didReceiveBlockRange: startIndex, blocks: blocks, chainHash: chainHash, from: peer)
+
+        case .blockManifest(let blockCID, let referencedCIDs):
+            haveSet.insert(blockCID)
+            delegate?.ivy(self, didReceiveBlockManifest: blockCID, referencedCIDs: referencedCIDs, from: peer)
+
+        case .getCIDs(let cids):
+            await handleGetCIDs(cids: cids, from: peer)
+
+        case .cidData(let items):
+            for (cid, data) in items {
+                haveSet.insert(cid)
+                resolvePending(cid: cid, data: data)
+            }
+            delegate?.ivy(self, didReceiveCIDData: items, from: peer)
         }
     }
 
@@ -742,7 +812,7 @@ public actor Ivy {
 
     private func handleDHTForward(cid: String, ttl: UInt8, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else {
-            try? await sendToPeer(peer, .dontHave(cid: cid))
+            fireToPeer(peer, .dontHave(cid: cid))
             return
         }
 
@@ -755,9 +825,8 @@ public actor Ivy {
         }
 
         if let data {
-            try? await sendToPeer(peer, .block(cid: cid, data: data))
-            let dataHash = Router.hash(cid)
-            let cpl = Router.commonPrefixLength(Router.hash(localID.publicKey), dataHash)
+            fireToPeer(peer, .block(cid: cid, data: data))
+            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
         } else if ttl > 0 {
             pendingForwards[cid, default: []].append(peer)
@@ -767,23 +836,23 @@ public actor Ivy {
                 guard entry.id != peer, entry.id != localID else { continue }
                 let reachable = connections[entry.id] != nil || relayedPeers[entry.id] != nil
                 guard reachable else { continue }
-                try? await sendToPeer(entry.id, .dhtForward(cid: cid, ttl: ttl - 1))
+                fireToPeer(entry.id, .dhtForward(cid: cid, ttl: ttl - 1))
             }
             Task {
                 try? await Task.sleep(for: config.requestTimeout)
                 self.pendingForwards.removeValue(forKey: cid)
             }
         } else {
-            try? await sendToPeer(peer, .dontHave(cid: cid))
+            fireToPeer(peer, .dontHave(cid: cid))
         }
     }
 
-    private func resolveForwards(cid: String, data: Data, from peer: PeerID) async {
+    private func resolveForwards(cid: String, data: Data, from peer: PeerID) {
         guard let requesters = pendingForwards.removeValue(forKey: cid) else { return }
+        let payload = Message.block(cid: cid, data: data).serialize()
+        let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
         for requester in requesters {
-            try? await sendToPeer(requester, .block(cid: cid, data: data))
-            let dataHash = Router.hash(cid)
-            let cpl = Router.commonPrefixLength(Router.hash(localID.publicKey), dataHash)
+            firePayloadToPeer(requester, payload)
             tally.recordSent(peer: requester, bytes: data.count, cpl: cpl)
         }
     }
@@ -807,14 +876,14 @@ public actor Ivy {
             signingKey: config.signingKey,
             appData: nil
         )
-        let msg = Message.announce(
+        let payload = Message.announce(
             destinationHash: packet.destinationHash,
             hops: packet.hops,
             payload: packet.payload
-        )
-        for (peer, _) in connections {
+        ).serialize()
+        for (peer, conn) in connections {
             guard tally.shouldAllow(peer: peer) else { continue }
-            try? await sendToPeer(peer, msg)
+            conn.fireAndForget(payload)
         }
     }
 
@@ -825,22 +894,22 @@ public actor Ivy {
             signingKey: config.signingKey,
             appData: appData
         )
-        let msg = Message.announce(
+        let payload = Message.announce(
             destinationHash: packet.destinationHash,
             hops: packet.hops,
             payload: packet.payload
-        )
-        for (peer, _) in connections {
+        ).serialize()
+        for (peer, conn) in connections {
             guard tally.shouldAllow(peer: peer) else { continue }
-            try? await sendToPeer(peer, msg)
+            conn.fireAndForget(payload)
         }
     }
 
-    public func requestPath(destinationHash: Data) async {
-        let msg = Message.pathRequest(destinationHash: destinationHash)
-        for (peer, _) in connections {
+    public func requestPath(destinationHash: Data) {
+        let payload = Message.pathRequest(destinationHash: destinationHash).serialize()
+        for (peer, conn) in connections {
             guard tally.shouldAllow(peer: peer) else { continue }
-            try? await sendToPeer(peer, msg)
+            conn.fireAndForget(payload)
         }
     }
 
@@ -862,29 +931,29 @@ public actor Ivy {
         }
 
         if await transport.isTransportEnabled {
-            let forwardMsg = Message.chainAnnounce(
+            let fwdPayload = Message.chainAnnounce(
                 destinationHash: destinationHash,
                 hops: hops + 1,
                 chainData: chainData,
                 announcePayload: announcePayload
-            )
-            for (otherPeer, _) in connections where otherPeer != peer {
+            ).serialize()
+            for (otherPeer, conn) in connections where otherPeer != peer {
                 guard tally.shouldAllow(peer: otherPeer) else { continue }
-                try? await sendToPeer(otherPeer, forwardMsg)
+                conn.fireAndForget(fwdPayload)
             }
         }
     }
 
-    public func broadcastChainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data, announcePayload: Data) async {
-        let msg = Message.chainAnnounce(
+    public func broadcastChainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data, announcePayload: Data) {
+        let payload = Message.chainAnnounce(
             destinationHash: destinationHash,
             hops: hops,
             chainData: chainData,
             announcePayload: announcePayload
-        )
-        for (peer, _) in connections {
+        ).serialize()
+        for (peer, conn) in connections {
             guard tally.shouldAllow(peer: peer) else { continue }
-            try? await sendToPeer(peer, msg)
+            conn.fireAndForget(payload)
         }
     }
 
@@ -912,14 +981,14 @@ public actor Ivy {
         }
 
         if await transport.isTransportEnabled {
-            let forwardMsg = Message.announce(
+            let fwdPayload = Message.announce(
                 destinationHash: destinationHash,
                 hops: hops + 1,
                 payload: payload
-            )
-            for (otherPeer, _) in connections where otherPeer != peer {
+            ).serialize()
+            for (otherPeer, conn) in connections where otherPeer != peer {
                 guard tally.shouldAllow(peer: otherPeer) else { continue }
-                try? await sendToPeer(otherPeer, forwardMsg)
+                conn.fireAndForget(fwdPayload)
             }
         }
     }
@@ -928,16 +997,17 @@ public actor Ivy {
         guard tally.shouldAllow(peer: peer) else { return }
 
         if let path = await transport.lookupPath(destinationHash) {
-            try? await sendToPeer(peer, .pathResponse(
+            fireToPeer(peer, .pathResponse(
                 destinationHash: destinationHash,
                 hops: path.hops,
                 announcePayload: Data()
             ))
             delegate?.ivy(self, didDiscoverPath: destinationHash, hops: path.hops, via: peer)
         } else if await transport.isTransportEnabled {
-            for (otherPeer, _) in connections where otherPeer != peer {
+            let payload = Message.pathRequest(destinationHash: destinationHash).serialize()
+            for (otherPeer, conn) in connections where otherPeer != peer {
                 guard tally.shouldAllow(peer: otherPeer) else { continue }
-                try? await sendToPeer(otherPeer, .pathRequest(destinationHash: destinationHash))
+                conn.fireAndForget(payload)
             }
         }
     }
@@ -965,15 +1035,17 @@ public actor Ivy {
             delegate?.ivy(self, didReceiveTransportPacket: p, from: peer)
 
         case .forwardTo(let nextPeer, _, let p):
-            let msg = Message.transportPacket(data: p.serialize())
-            try? await sendToPeer(nextPeer, msg)
-            tally.recordSent(peer: nextPeer, bytes: data.count, cpl: 0)
+            let fwdPayload = Message.transportPacket(data: p.serialize()).serialize()
+            if let conn = connections[nextPeer] {
+                conn.fireAndForget(fwdPayload)
+                tally.recordSent(peer: nextPeer, bytes: data.count, cpl: 0)
+            }
 
         case .forwardOnAllExcept(_, let p):
-            let msg = Message.transportPacket(data: p.serialize())
-            for (otherPeer, _) in connections where otherPeer != peer {
+            let fwdPayload = Message.transportPacket(data: p.serialize()).serialize()
+            for (otherPeer, conn) in connections where otherPeer != peer {
                 guard tally.shouldAllow(peer: otherPeer) else { continue }
-                try? await sendToPeer(otherPeer, msg)
+                conn.fireAndForget(fwdPayload)
                 tally.recordSent(peer: otherPeer, bytes: data.count, cpl: 0)
             }
 
@@ -982,10 +1054,39 @@ public actor Ivy {
         }
     }
 
-    public func sendTransportPacket(_ packet: TransportPacket, via path: Transport.PathEntry) async throws {
-        let msg = Message.transportPacket(data: packet.serialize())
-        try await sendToPeer(path.receivedFrom, msg)
+    public func sendTransportPacket(_ packet: TransportPacket, via path: Transport.PathEntry) {
+        fireToPeer(path.receivedFrom, .transportPacket(data: packet.serialize()))
         tally.recordSent(peer: path.receivedFrom, bytes: packet.payload.count, cpl: 0)
+    }
+
+    public func serviceBus() -> LocalServiceBus {
+        if let existing = _serviceBus { return existing }
+        let bus = LocalServiceBus(node: self)
+        _serviceBus = bus
+        return bus
+    }
+
+    public func casBridge(localCAS: any AcornCASWorker) -> CASBridge {
+        if let existing = _casBridge { return existing }
+        let bridge = CASBridge(node: self, localCAS: localCAS)
+        _casBridge = bridge
+        return bridge
+    }
+
+    func registerLocalPeer(_ conn: LocalPeerConnection, as peerID: PeerID) {
+        localPeers[peerID] = conn
+        Task { await handleLocalInbound(conn, from: peerID) }
+    }
+
+    func unregisterLocalPeer(_ peerID: PeerID) {
+        localPeers.removeValue(forKey: peerID)
+    }
+
+    private func handleLocalInbound(_ conn: LocalPeerConnection, from peer: PeerID) async {
+        for await message in conn.messages {
+            await handleMessage(message, from: peer)
+        }
+        localPeers.removeValue(forKey: peer)
     }
 
     public func reticulumWorker() -> ReticulumNetwork {
@@ -1003,16 +1104,15 @@ public actor Ivy {
             case .deliver(let p):
                 delegate?.ivy(self, didReceiveTransportPacket: p, from: unknownPeer)
             case .forwardTo(let nextPeer, _, let p):
-                let msg = Message.transportPacket(data: p.serialize())
-                try? await sendToPeer(nextPeer, msg)
+                fireToPeer(nextPeer, .transportPacket(data: p.serialize()))
             case .forwardOnAllExcept(let excludeIface, let p):
                 for otherIface in interfaces where otherIface.name != excludeIface {
                     try? await otherIface.send(p, to: nil)
                 }
-                let msg = Message.transportPacket(data: p.serialize())
-                for (peer, _) in connections {
+                let payload = Message.transportPacket(data: p.serialize()).serialize()
+                for (peer, conn) in connections {
                     guard tally.shouldAllow(peer: peer) else { continue }
-                    try? await sendToPeer(peer, msg)
+                    conn.fireAndForget(payload)
                 }
             case .drop:
                 break
@@ -1073,6 +1173,43 @@ public actor Ivy {
         return Array(candidates.prefix(config.maxConcurrentRequests).map(\.id))
     }
 
+    private func handleGetCIDs(cids: [String], from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+        var found: [(String, Data)] = []
+        for cid in cids {
+            if let data = await getLocalBlock(cid: cid) {
+                found.append((cid, data))
+            }
+        }
+        if !found.isEmpty {
+            fireToPeer(peer, .cidData(items: found))
+            let totalBytes = found.reduce(0) { $0 + $1.1.count }
+            tally.recordSent(peer: peer, bytes: totalBytes, cpl: 0)
+        }
+    }
+
+    public func sendBlockManifest(blockCID: String, referencedCIDs: [String]) {
+        haveSet.insert(blockCID)
+        let payload = Message.blockManifest(blockCID: blockCID, referencedCIDs: referencedCIDs).serialize()
+        for (peer, conn) in connections {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            conn.fireAndForget(payload)
+        }
+        for (peer, local) in localPeers {
+            local.send(.blockManifest(blockCID: blockCID, referencedCIDs: referencedCIDs))
+            _ = peer
+        }
+    }
+
+    public func requestCIDs(_ cids: [String], from peer: PeerID) {
+        fireToPeer(peer, .getCIDs(cids: cids))
+    }
+
+    private func getLocalBlock(cid: String) async -> Data? {
+        guard let w = _worker, let near = await w.near else { return nil }
+        return await near.getLocal(cid: ContentIdentifier(rawValue: cid))
+    }
+
     private func resolvePending(cid: String, data: Data?) {
         guard let continuations = pendingRequests.removeValue(forKey: cid) else { return }
         for cont in continuations {
@@ -1109,7 +1246,7 @@ public actor Ivy {
         connections[unknownID] = conn
         delegate?.ivy(self, didConnect: unknownID)
         Task {
-            await sendIdentify(to: conn)
+            sendIdentify(to: conn)
             await handleInbound(conn)
         }
     }

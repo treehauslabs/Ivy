@@ -30,6 +30,20 @@ public enum Message: Sendable {
     case getBlockTxns(chainHash: Data, headerCID: String, missingTxCIDs: [String])
     case blockTxns(chainHash: Data, headerCID: String, transactions: [(String, Data)])
 
+    case haveBlock(cid: String)
+    case wantBlocks(cids: [String])
+
+    case newTxHashes(chainHash: Data, txHashes: [String])
+    case getTxns(chainHash: Data, txHashes: [String])
+    case txns(chainHash: Data, transactions: [(String, Data)])
+
+    case getBlockRange(chainHash: Data, startIndex: UInt64, count: UInt16)
+    case blockRange(chainHash: Data, startIndex: UInt64, blocks: [(String, Data)])
+
+    case blockManifest(blockCID: String, referencedCIDs: [String])
+    case getCIDs(cids: [String])
+    case cidData(items: [(String, Data)])
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
@@ -56,6 +70,16 @@ public enum Message: Sendable {
         case compactBlock = 22
         case getBlockTxns = 23
         case blockTxns = 24
+        case haveBlock = 25
+        case wantBlocks = 26
+        case newTxHashes = 27
+        case getTxns = 28
+        case txns = 29
+        case getBlockRange = 30
+        case blockRange = 31
+        case blockManifest = 32
+        case getCIDs = 33
+        case cidData = 34
     }
 
     public func estimatedSize() -> Int {
@@ -192,6 +216,63 @@ public enum Message: Sendable {
             buf.appendLengthPrefixedString(headerCID)
             buf.appendUInt16(UInt16(transactions.count))
             for (cid, data) in transactions {
+                buf.appendLengthPrefixedString(cid)
+                buf.appendLengthPrefixedData(data)
+            }
+        case .haveBlock(let cid):
+            buf.append(Tag.haveBlock.rawValue)
+            buf.appendLengthPrefixedString(cid)
+        case .wantBlocks(let cids):
+            buf.append(Tag.wantBlocks.rawValue)
+            buf.appendUInt16(UInt16(cids.count))
+            for cid in cids {
+                buf.appendLengthPrefixedString(cid)
+            }
+        case .newTxHashes(let chainHash, let txHashes):
+            buf.append(Tag.newTxHashes.rawValue)
+            buf.appendLengthPrefixedData(chainHash)
+            buf.appendUInt16(UInt16(txHashes.count))
+            for h in txHashes { buf.appendLengthPrefixedString(h) }
+        case .getTxns(let chainHash, let txHashes):
+            buf.append(Tag.getTxns.rawValue)
+            buf.appendLengthPrefixedData(chainHash)
+            buf.appendUInt16(UInt16(txHashes.count))
+            for h in txHashes { buf.appendLengthPrefixedString(h) }
+        case .txns(let chainHash, let transactions):
+            buf.append(Tag.txns.rawValue)
+            buf.appendLengthPrefixedData(chainHash)
+            buf.appendUInt16(UInt16(transactions.count))
+            for (h, d) in transactions {
+                buf.appendLengthPrefixedString(h)
+                buf.appendLengthPrefixedData(d)
+            }
+        case .getBlockRange(let chainHash, let startIndex, let count):
+            buf.append(Tag.getBlockRange.rawValue)
+            buf.appendLengthPrefixedData(chainHash)
+            buf.appendUInt64(startIndex)
+            buf.appendUInt16(count)
+        case .blockRange(let chainHash, let startIndex, let blocks):
+            buf.append(Tag.blockRange.rawValue)
+            buf.appendLengthPrefixedData(chainHash)
+            buf.appendUInt64(startIndex)
+            buf.appendUInt16(UInt16(blocks.count))
+            for (cid, data) in blocks {
+                buf.appendLengthPrefixedString(cid)
+                buf.appendLengthPrefixedData(data)
+            }
+        case .blockManifest(let blockCID, let referencedCIDs):
+            buf.append(Tag.blockManifest.rawValue)
+            buf.appendLengthPrefixedString(blockCID)
+            buf.appendUInt16(UInt16(referencedCIDs.count))
+            for cid in referencedCIDs { buf.appendLengthPrefixedString(cid) }
+        case .getCIDs(let cids):
+            buf.append(Tag.getCIDs.rawValue)
+            buf.appendUInt16(UInt16(cids.count))
+            for cid in cids { buf.appendLengthPrefixedString(cid) }
+        case .cidData(let items):
+            buf.append(Tag.cidData.rawValue)
+            buf.appendUInt16(UInt16(items.count))
+            for (cid, data) in items {
                 buf.appendLengthPrefixedString(cid)
                 buf.appendLengthPrefixedData(data)
             }
@@ -342,6 +423,92 @@ public enum Message: Sendable {
                 txns.append((cid, data))
             }
             return .blockTxns(chainHash: chainHash, headerCID: headerCID, transactions: txns)
+        case .haveBlock:
+            guard let cid = reader.readString() else { return nil }
+            return .haveBlock(cid: cid)
+        case .wantBlocks:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .wantBlocks(cids: cids)
+        case .newTxHashes:
+            guard let chainHash = reader.readData(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var hashes = [String]()
+            hashes.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let h = reader.readString() else { return nil }
+                hashes.append(h)
+            }
+            return .newTxHashes(chainHash: chainHash, txHashes: hashes)
+        case .getTxns:
+            guard let chainHash = reader.readData(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var hashes = [String]()
+            hashes.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let h = reader.readString() else { return nil }
+                hashes.append(h)
+            }
+            return .getTxns(chainHash: chainHash, txHashes: hashes)
+        case .txns:
+            guard let chainHash = reader.readData(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var txs = [(String, Data)]()
+            txs.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let h = reader.readString(), let d = reader.readData() else { return nil }
+                txs.append((h, d))
+            }
+            return .txns(chainHash: chainHash, transactions: txs)
+        case .getBlockRange:
+            guard let chainHash = reader.readData(),
+                  let startIndex = reader.readUInt64(),
+                  let count = reader.readUInt16() else { return nil }
+            return .getBlockRange(chainHash: chainHash, startIndex: startIndex, count: count)
+        case .blockRange:
+            guard let chainHash = reader.readData(),
+                  let startIndex = reader.readUInt64(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var blocks = [(String, Data)]()
+            blocks.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString(), let data = reader.readData() else { return nil }
+                blocks.append((cid, data))
+            }
+            return .blockRange(chainHash: chainHash, startIndex: startIndex, blocks: blocks)
+        case .blockManifest:
+            guard let blockCID = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .blockManifest(blockCID: blockCID, referencedCIDs: cids)
+        case .getCIDs:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .getCIDs(cids: cids)
+        case .cidData:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var items = [(String, Data)]()
+            items.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString(), let data = reader.readData() else { return nil }
+                items.append((cid, data))
+            }
+            return .cidData(items: items)
         }
     }
 
@@ -367,26 +534,29 @@ public struct PeerEndpoint: Sendable, Equatable, Hashable {
 }
 
 extension Data {
+    @inline(__always)
     mutating func appendUInt8(_ value: UInt8) {
         append(value)
     }
+    @inline(__always)
     mutating func appendUInt16(_ value: UInt16) {
-        var v = value.bigEndian
-        append(Data(bytes: &v, count: 2))
+        Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
+    @inline(__always)
     mutating func appendUInt32(_ value: UInt32) {
-        var v = value.bigEndian
-        append(Data(bytes: &v, count: 4))
+        Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
+    @inline(__always)
     mutating func appendUInt64(_ value: UInt64) {
-        var v = value.bigEndian
-        append(Data(bytes: &v, count: 8))
+        Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
+    @inline(__always)
     mutating func appendLengthPrefixedString(_ string: String) {
-        let bytes = Data(string.utf8)
-        appendUInt16(UInt16(bytes.count))
-        append(bytes)
+        let utf8 = string.utf8
+        appendUInt16(UInt16(utf8.count))
+        append(contentsOf: utf8)
     }
+    @inline(__always)
     mutating func appendLengthPrefixedData(_ data: Data) {
         appendUInt32(UInt32(data.count))
         append(data)
