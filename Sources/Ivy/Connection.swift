@@ -1,10 +1,11 @@
 import Foundation
 import NIOCore
 import NIOPosix
+import NIOFoundationCompat
 import Tally
 
 public final class PeerConnection: @unchecked Sendable {
-    public let id: PeerID
+    public internal(set) var id: PeerID
     public let endpoint: PeerEndpoint
     let channel: Channel
     private let inbound: AsyncStream<Message>
@@ -23,6 +24,7 @@ public final class PeerConnection: @unchecked Sendable {
         let id = PeerID(publicKey: endpoint.publicKey)
 
         let bootstrap = ClientBootstrap(group: group)
+            .connectTimeout(.seconds(5))
             .channelInitializer { channel in
                 let handler = MessageFrameDecoder()
                 return channel.pipeline.addHandler(handler)
@@ -42,6 +44,13 @@ public final class PeerConnection: @unchecked Sendable {
 
     public func send(_ message: Message) async throws {
         let payload = message.serialize()
+        var buf = channel.allocator.buffer(capacity: 4 + payload.count)
+        buf.writeInteger(UInt32(payload.count), endianness: .big)
+        buf.writeBytes(payload)
+        try await channel.writeAndFlush(buf).get()
+    }
+
+    public func sendPreSerialized(_ payload: Data) async throws {
         var buf = channel.allocator.buffer(capacity: 4 + payload.count)
         buf.writeInteger(UInt32(payload.count), endianness: .big)
         buf.writeBytes(payload)
@@ -76,14 +85,14 @@ final class MessageFrameDecoder: ChannelInboundHandler, RemovableChannelHandler,
 
         while buffer.readableBytes >= 4 {
             guard let length = buffer.getInteger(at: buffer.readerIndex, endianness: .big, as: UInt32.self) else { break }
-            guard length > 0, length < 64 * 1024 * 1024 else {
+            guard length > 0, length <= MessageLimits.maxFrameSize else {
                 context.close(promise: nil)
                 return
             }
             guard buffer.readableBytes >= 4 + Int(length) else { break }
             buffer.moveReaderIndex(forwardBy: 4)
-            guard let bytes = buffer.readBytes(length: Int(length)) else { break }
-            if let message = Message.deserialize(Data(bytes)) {
+            guard let data = buffer.readData(length: Int(length)) else { break }
+            if let message = Message.deserialize(data) {
                 context.fireChannelRead(wrapInboundOut(message))
             }
         }

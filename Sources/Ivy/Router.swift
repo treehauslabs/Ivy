@@ -30,44 +30,67 @@ public struct Router: Sendable {
     }
 
     public func addPeer(_ id: PeerID, endpoint: PeerEndpoint, tally: Tally) {
-        let peerHash = Self.hash(id.publicKey)
-        let bucket = Self.commonPrefixLength(localHash, peerHash)
-        let entry = BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now)
+        addPeer(id, hash: Self.hash(id.publicKey), endpoint: endpoint, tally: tally)
+    }
+
+    public func addPeer(_ id: PeerID, hash peerHash: [UInt8], endpoint: PeerEndpoint, tally: Tally) {
+        let idx = min(Self.commonPrefixLength(localHash, peerHash), 255)
 
         _state.withLock { state in
-            let idx = min(bucket, 255)
-            if let existing = state.buckets[idx].firstIndex(where: { $0.id == id }) {
-                state.buckets[idx][existing].lastSeen = .now
+            let bucket = state.buckets[idx]
+            for i in 0..<bucket.count {
+                if bucket[i].id == id {
+                    state.buckets[idx][i].lastSeen = .now
+                    return
+                }
+            }
+            if bucket.count < k {
+                state.buckets[idx].append(BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now))
                 return
             }
-            if state.buckets[idx].count < k {
-                state.buckets[idx].append(entry)
-                return
-            }
+            let newRep = tally.reputation(for: id)
             var worstIdx = 0
-            var worstRep = Double.infinity
-            for i in 0..<state.buckets[idx].count {
-                let rep = tally.reputation(for: state.buckets[idx][i].id)
+            var worstRep = tally.reputation(for: bucket[0].id)
+            for i in 1..<bucket.count {
+                let rep = tally.reputation(for: bucket[i].id)
                 if rep < worstRep {
                     worstRep = rep
                     worstIdx = i
                 }
             }
-            let newRep = tally.reputation(for: id)
             if newRep > worstRep {
-                state.buckets[idx][worstIdx] = entry
+                state.buckets[idx][worstIdx] = BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now)
             }
         }
     }
 
     public func closestPeers(to target: [UInt8], count: Int) -> [BucketEntry] {
         _state.withLock { state in
-            var all: [BucketEntry] = []
-            for bucket in state.buckets {
-                all.append(contentsOf: bucket)
+            let targetBucket = min(Self.commonPrefixLength(localHash, target), 255)
+
+            var candidates: [BucketEntry] = []
+            candidates.reserveCapacity(count * 2)
+
+            candidates.append(contentsOf: state.buckets[targetBucket])
+
+            var lo = targetBucket - 1
+            var hi = targetBucket + 1
+            while candidates.count < count && (lo >= 0 || hi < 256) {
+                if hi < 256 {
+                    candidates.append(contentsOf: state.buckets[hi])
+                    hi += 1
+                }
+                if lo >= 0 {
+                    candidates.append(contentsOf: state.buckets[lo])
+                    lo -= 1
+                }
             }
-            all.sort { Self.xorDistance($0.hash, target) < Self.xorDistance($1.hash, target) }
-            return Array(all.prefix(count))
+
+            if candidates.count <= count {
+                return candidates
+            }
+            candidates.sort { Self.isCloser($0.hash, than: $1.hash, to: target) }
+            return Array(candidates.prefix(count))
         }
     }
 
@@ -111,6 +134,16 @@ public struct Router: Sendable {
 
     public static func xorDistance(_ a: [UInt8], _ b: [UInt8]) -> [UInt8] {
         zip(a, b).map { $0 ^ $1 }
+    }
+
+    @inline(__always)
+    public static func isCloser(_ a: [UInt8], than b: [UInt8], to target: [UInt8]) -> Bool {
+        for i in 0..<min(a.count, min(b.count, target.count)) {
+            let da = a[i] ^ target[i]
+            let db = b[i] ^ target[i]
+            if da != db { return da < db }
+        }
+        return false
     }
 }
 
