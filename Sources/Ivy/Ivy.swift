@@ -292,6 +292,7 @@ public actor Ivy {
         }
     }
 
+    @available(*, deprecated, message: "Use announceBlock(cid:) — peers pull via CAS")
     public func broadcastBlock(cid: String, data: Data) {
         let payload = Message.block(cid: cid, data: data).serialize()
         haveSet.insert(cid)
@@ -625,7 +626,7 @@ public actor Ivy {
                     self.relayedPeers.removeValue(forKey: peer)
                     self.connections[peer] = conn
                     Task { await self.handleInbound(conn) }
-                    await self.sendIdentify(to: conn)
+                    self.sendIdentify(to: conn)
                     self.delegate?.ivy(self, didUpgradeToDirectConnection: peer)
                     return
                 } catch {
@@ -717,6 +718,10 @@ public actor Ivy {
             }
 
         case .announceBlock(let cid):
+            if !haveSet.contains(cid) {
+                haveSet.insert(cid)
+                fireToPeer(peer, .wantBlock(cid: cid))
+            }
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
 
         case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs):
@@ -1185,19 +1190,6 @@ public actor Ivy {
             fireToPeer(peer, .cidData(items: found))
             let totalBytes = found.reduce(0) { $0 + $1.1.count }
             tally.recordSent(peer: peer, bytes: totalBytes, cpl: 0)
-        }
-    }
-
-    public func sendBlockManifest(blockCID: String, referencedCIDs: [String]) {
-        haveSet.insert(blockCID)
-        let payload = Message.blockManifest(blockCID: blockCID, referencedCIDs: referencedCIDs).serialize()
-        for (peer, conn) in connections {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(payload)
-        }
-        for (peer, local) in localPeers {
-            local.send(.blockManifest(blockCID: blockCID, referencedCIDs: referencedCIDs))
-            _ = peer
         }
     }
 
