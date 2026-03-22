@@ -44,6 +44,9 @@ public enum Message: Sendable {
     case getCIDs(cids: [String])
     case cidData(items: [(String, Data)])
 
+    case miningChallenge(hashPrefix: Data, blockTargetDifficulty: Data, noncePrefix: Data)
+    case miningChallengeSolution(nonce: UInt64, hash: Data, blockNonce: UInt64?)
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
@@ -80,6 +83,8 @@ public enum Message: Sendable {
         case blockManifest = 32
         case getCIDs = 33
         case cidData = 34
+        case miningChallenge = 35
+        case miningChallengeSolution = 36
     }
 
     public func estimatedSize() -> Int {
@@ -276,6 +281,17 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(cid)
                 buf.appendLengthPrefixedData(data)
             }
+        case .miningChallenge(let hashPrefix, let blockTarget, let noncePrefix):
+            buf.append(Tag.miningChallenge.rawValue)
+            buf.appendLengthPrefixedData(hashPrefix)
+            buf.appendLengthPrefixedData(blockTarget)
+            buf.appendLengthPrefixedData(noncePrefix)
+        case .miningChallengeSolution(let nonce, let hash, let blockNonce):
+            buf.append(Tag.miningChallengeSolution.rawValue)
+            buf.appendUInt64(nonce)
+            buf.appendLengthPrefixedData(hash)
+            buf.appendUInt8(blockNonce != nil ? 1 : 0)
+            if let bn = blockNonce { buf.appendUInt64(bn) }
         }
         return buf
     }
@@ -509,6 +525,17 @@ public enum Message: Sendable {
                 items.append((cid, data))
             }
             return .cidData(items: items)
+        case .miningChallenge:
+            guard let hashPrefix = reader.readData(),
+                  let blockTarget = reader.readData(),
+                  let noncePrefix = reader.readData() else { return nil }
+            return .miningChallenge(hashPrefix: hashPrefix, blockTargetDifficulty: blockTarget, noncePrefix: noncePrefix)
+        case .miningChallengeSolution:
+            guard let nonce = reader.readUInt64(),
+                  let hash = reader.readData(),
+                  let hasBlockNonce = reader.readUInt8() else { return nil }
+            let blockNonce: UInt64? = hasBlockNonce == 1 ? reader.readUInt64() : nil
+            return .miningChallengeSolution(nonce: nonce, hash: hash, blockNonce: blockNonce)
         }
     }
 

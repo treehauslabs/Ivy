@@ -899,6 +899,9 @@ public actor Ivy {
                 resolvePending(cid: cid, data: data)
             }
             delegate?.ivy(self, didReceiveCIDData: items, from: peer)
+
+        case .miningChallenge, .miningChallengeSolution:
+            delegate?.ivy(self, didReceiveRawMessage: message, from: peer)
         }
     }
 

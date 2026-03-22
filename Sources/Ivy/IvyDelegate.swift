@@ -24,6 +24,7 @@ public protocol IvyDelegate: AnyObject, Sendable {
     func ivy(_ ivy: Ivy, didReceiveBlockManifest blockCID: String, referencedCIDs: [String], from peer: PeerID)
     func ivy(_ ivy: Ivy, didRequestCIDs cids: [String], from peer: PeerID)
     func ivy(_ ivy: Ivy, didReceiveCIDData items: [(String, Data)], from peer: PeerID)
+    func ivy(_ ivy: Ivy, didReceiveRawMessage message: Message, from peer: PeerID)
 }
 
 public extension IvyDelegate {
@@ -49,4 +50,5 @@ public extension IvyDelegate {
     func ivy(_ ivy: Ivy, didReceiveBlockManifest blockCID: String, referencedCIDs: [String], from peer: PeerID) {}
     func ivy(_ ivy: Ivy, didRequestCIDs cids: [String], from peer: PeerID) {}
     func ivy(_ ivy: Ivy, didReceiveCIDData items: [(String, Data)], from peer: PeerID) {}
+    func ivy(_ ivy: Ivy, didReceiveRawMessage message: Message, from peer: PeerID) {}
 }
