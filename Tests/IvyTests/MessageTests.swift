@@ -138,4 +138,50 @@ struct MessageTests {
             Issue.record("Expected block")
         }
     }
+
+    @Test("PexRequest roundtrip")
+    func testPexRequestRoundtrip() {
+        let msg = Message.pexRequest(nonce: 12345)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .pexRequest(let nonce) = decoded {
+            #expect(nonce == 12345)
+        } else {
+            Issue.record("Expected pexRequest")
+        }
+    }
+
+    @Test("PexResponse roundtrip")
+    func testPexResponseRoundtrip() {
+        let peers = [
+            PeerEndpoint(publicKey: "pex-key1", host: "10.0.0.1", port: 4001),
+            PeerEndpoint(publicKey: "pex-key2", host: "10.0.0.2", port: 4002),
+            PeerEndpoint(publicKey: "pex-key3", host: "192.168.1.5", port: 4003),
+        ]
+        let msg = Message.pexResponse(nonce: 99999, peers: peers)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .pexResponse(let nonce, let p) = decoded {
+            #expect(nonce == 99999)
+            #expect(p.count == 3)
+            #expect(p[0].publicKey == "pex-key1")
+            #expect(p[0].host == "10.0.0.1")
+            #expect(p[0].port == 4001)
+            #expect(p[1].publicKey == "pex-key2")
+            #expect(p[2].host == "192.168.1.5")
+            #expect(p[2].port == 4003)
+        } else {
+            Issue.record("Expected pexResponse")
+        }
+    }
+
+    @Test("PexResponse with empty peers roundtrip")
+    func testPexResponseEmpty() {
+        let msg = Message.pexResponse(nonce: 1, peers: [])
+        let decoded = Message.deserialize(msg.serialize())
+        if case .pexResponse(let nonce, let p) = decoded {
+            #expect(nonce == 1)
+            #expect(p.isEmpty)
+        } else {
+            Issue.record("Expected pexResponse")
+        }
+    }
 }

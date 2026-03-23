@@ -42,6 +42,8 @@ public actor Ivy {
     private var pendingHolePunches: [UInt64: CheckedContinuation<[(String, UInt16)], Never>] = [:]
     private var pendingForwards: [String: [PeerID]] = [:]
     private var announceTask: Task<Void, Never>?
+    private var pexTask: Task<Void, Never>?
+    private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
     private var healthMonitor: PeerHealthMonitor?
     private var haveSet = InventorySet()
     private var recentBlockSenders: BoundedDictionary<String, PeerID> = BoundedDictionary(capacity: 4096)
@@ -128,6 +130,10 @@ public actor Ivy {
             guard let self else { return }
             await self.fireToPeer(peer, .ping(nonce: nonce))
         }
+
+        if config.enablePEX {
+            startPEX()
+        }
     }
 
     public func stop() async {
@@ -135,6 +141,8 @@ public actor Ivy {
         running = false
         announceTask?.cancel()
         announceTask = nil
+        pexTask?.cancel()
+        pexTask = nil
         await transport.stopAutoPruning()
         if let monitor = healthMonitor { await monitor.stopMonitoring() }
 
@@ -900,6 +908,12 @@ public actor Ivy {
             }
             delegate?.ivy(self, didReceiveCIDData: items, from: peer)
 
+        case .pexRequest(let nonce):
+            handlePEXRequest(nonce: nonce, from: peer)
+
+        case .pexResponse(let nonce, let peers):
+            handlePEXResponse(nonce: nonce, peers: peers, from: peer)
+
         case .miningChallenge, .miningChallengeSolution:
             delegate?.ivy(self, didReceiveRawMessage: message, from: peer)
         }
@@ -1214,6 +1228,82 @@ public actor Ivy {
         }
     }
 
+    // MARK: - Peer Exchange (PEX)
+
+    private func startPEX() {
+        pexTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: .seconds(30))
+            while !Task.isCancelled {
+                await self.runPEXRound()
+                try? await Task.sleep(for: self.config.pexInterval)
+            }
+        }
+    }
+
+    private func runPEXRound() async {
+        let peerList = Array(connections.keys)
+        guard !peerList.isEmpty else { return }
+
+        let target = peerList.randomElement()!
+        let nonce = UInt64.random(in: 0...UInt64.max)
+
+        let discovered: [PeerEndpoint] = await withCheckedContinuation { cont in
+            pendingPEX[nonce] = cont
+            fireToPeer(target, .pexRequest(nonce: nonce))
+
+            Task {
+                try? await Task.sleep(for: .seconds(10))
+                if let pending = self.pendingPEX.removeValue(forKey: nonce) {
+                    pending.resume(returning: [])
+                }
+            }
+        }
+
+        for ep in discovered {
+            let peer = PeerID(publicKey: ep.publicKey)
+            guard peer != localID,
+                  connections[peer] == nil,
+                  relayedPeers[peer] == nil else { continue }
+            router.addPeer(peer, endpoint: ep, tally: tally)
+            Task { try? await connect(to: ep) }
+        }
+    }
+
+    private func handlePEXRequest(nonce: UInt64, from peer: PeerID) {
+        guard tally.shouldAllow(peer: peer) else { return }
+
+        let peerHash = router.cachedHash(peer.publicKey)
+        let maxPeers = config.pexMaxPeers
+
+        let allPeers = router.closestPeers(to: peerHash, count: maxPeers * 2)
+
+        var selected = [PeerEndpoint]()
+        selected.reserveCapacity(maxPeers)
+        for entry in allPeers {
+            if entry.id == peer || entry.id == localID { continue }
+            if entry.endpoint.host == "relay" || entry.endpoint.host == "0.0.0.0" || entry.endpoint.host == "unknown" { continue }
+            selected.append(entry.endpoint)
+            if selected.count >= maxPeers { break }
+        }
+
+        fireToPeer(peer, .pexResponse(nonce: nonce, peers: selected))
+    }
+
+    private func handlePEXResponse(nonce: UInt64, peers: [PeerEndpoint], from peer: PeerID) {
+        tally.recordSuccess(peer: peer)
+        if let cont = pendingPEX.removeValue(forKey: nonce) {
+            cont.resume(returning: peers)
+        } else {
+            for ep in peers {
+                let newPeer = PeerID(publicKey: ep.publicKey)
+                if connections[newPeer] == nil && newPeer != localID {
+                    router.addPeer(newPeer, endpoint: ep, tally: tally)
+                }
+            }
+        }
+    }
+
     // MARK: - Cleanup
 
     private func cleanupPendingForPeer(_ peer: PeerID) {
@@ -1247,6 +1337,11 @@ public actor Ivy {
             cont.resume(returning: [])
         }
         pendingHolePunches.removeAll()
+
+        for (_, cont) in pendingPEX {
+            cont.resume(returning: [])
+        }
+        pendingPEX.removeAll()
 
         for (cid, _) in pendingRequests {
             resolvePending(cid: cid, data: nil)

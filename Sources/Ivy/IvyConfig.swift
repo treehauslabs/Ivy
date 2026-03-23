@@ -26,6 +26,9 @@ public struct IvyConfig: Sendable {
     public let signingKey: Data
     public let defaultTTL: UInt8
     public let healthConfig: PeerHealthConfig
+    public let enablePEX: Bool
+    public let pexInterval: Duration
+    public let pexMaxPeers: Int
     public let logger: any IvyLogger
 
     public init(
@@ -52,6 +55,9 @@ public struct IvyConfig: Sendable {
         signingKey: Data = Data(),
         defaultTTL: UInt8 = 7,
         healthConfig: PeerHealthConfig = .default,
+        enablePEX: Bool = true,
+        pexInterval: Duration = .seconds(120),
+        pexMaxPeers: Int = 16,
         logger: any IvyLogger = NullLogger()
     ) {
         self.publicKey = publicKey
@@ -77,6 +83,9 @@ public struct IvyConfig: Sendable {
         self.signingKey = signingKey
         self.defaultTTL = defaultTTL
         self.healthConfig = healthConfig
+        self.enablePEX = enablePEX
+        self.pexInterval = pexInterval
+        self.pexMaxPeers = pexMaxPeers
         self.logger = logger
     }
 }

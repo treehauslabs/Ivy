@@ -47,6 +47,9 @@ public enum Message: Sendable {
     case miningChallenge(hashPrefix: Data, blockTargetDifficulty: Data, noncePrefix: Data)
     case miningChallengeSolution(nonce: UInt64, hash: Data, blockNonce: UInt64?)
 
+    case pexRequest(nonce: UInt64)
+    case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
@@ -85,6 +88,8 @@ public enum Message: Sendable {
         case cidData = 34
         case miningChallenge = 35
         case miningChallengeSolution = 36
+        case pexRequest = 37
+        case pexResponse = 38
     }
 
     public func estimatedSize() -> Int {
@@ -292,6 +297,18 @@ public enum Message: Sendable {
             buf.appendLengthPrefixedData(hash)
             buf.appendUInt8(blockNonce != nil ? 1 : 0)
             if let bn = blockNonce { buf.appendUInt64(bn) }
+        case .pexRequest(let nonce):
+            buf.append(Tag.pexRequest.rawValue)
+            buf.appendUInt64(nonce)
+        case .pexResponse(let nonce, let peers):
+            buf.append(Tag.pexResponse.rawValue)
+            buf.appendUInt64(nonce)
+            buf.appendUInt16(UInt16(peers.count))
+            for peer in peers {
+                buf.appendLengthPrefixedString(peer.publicKey)
+                buf.appendLengthPrefixedString(peer.host)
+                buf.appendUInt16(peer.port)
+            }
         }
         return buf
     }
@@ -536,6 +553,21 @@ public enum Message: Sendable {
                   let hasBlockNonce = reader.readUInt8() else { return nil }
             let blockNonce: UInt64? = hasBlockNonce == 1 ? reader.readUInt64() : nil
             return .miningChallengeSolution(nonce: nonce, hash: hash, blockNonce: blockNonce)
+        case .pexRequest:
+            guard let nonce = reader.readUInt64() else { return nil }
+            return .pexRequest(nonce: nonce)
+        case .pexResponse:
+            guard let nonce = reader.readUInt64(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxPexPeerCount else { return nil }
+            var peers = [PeerEndpoint]()
+            peers.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let key = reader.readString(),
+                      let host = reader.readString(),
+                      let port = reader.readUInt16() else { return nil }
+                peers.append(PeerEndpoint(publicKey: key, host: host, port: port))
+            }
+            return .pexResponse(nonce: nonce, peers: peers)
         }
     }
 
