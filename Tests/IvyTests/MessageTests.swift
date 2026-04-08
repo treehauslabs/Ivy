@@ -59,7 +59,7 @@ struct MessageTests {
         let target = Data(repeating: 0xAB, count: 32)
         let msg = Message.findNode(target: target)
         let decoded = Message.deserialize(msg.serialize())
-        if case .findNode(let t) = decoded {
+        if case .findNode(let t, _) = decoded {
             #expect(t == target)
         } else {
             Issue.record("Expected findNode")

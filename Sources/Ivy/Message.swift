@@ -5,7 +5,7 @@ public enum Message: Sendable {
     case pong(nonce: UInt64)
     case block(cid: String, data: Data)
     case dontHave(cid: String)
-    case findNode(target: Data)
+    case findNode(target: Data, fee: UInt64 = 0)
     case neighbors([PeerEndpoint])
     case announceBlock(cid: String)
 
@@ -48,6 +48,8 @@ public enum Message: Sendable {
     case balanceCheck(sequence: UInt64, balance: Int64)
     case balanceLog(fromSequence: UInt64, operations: [(sequence: UInt64, amount: Int64, requestId: UInt64)])
     case peerMessage(topic: String, payload: Data)
+    case blocks(rootCID: String, items: [(cid: String, data: Data)])
+    case settlementProof(txHash: String, amount: UInt64, chainId: String)
 
     private enum Tag: UInt8 {
         case ping = 0
@@ -91,6 +93,8 @@ public enum Message: Sendable {
         case balanceCheck = 47
         case balanceLog = 48
         case peerMessage = 49
+        case blocks = 50
+        case settlementProof = 51
     }
 
     public func estimatedSize() -> Int {
@@ -120,9 +124,10 @@ public enum Message: Sendable {
         case .dontHave(let cid):
             buf.append(Tag.dontHave.rawValue)
             buf.appendLengthPrefixedString(cid)
-        case .findNode(let target):
+        case .findNode(let target, let fee):
             buf.append(Tag.findNode.rawValue)
             buf.appendLengthPrefixedData(target)
+            buf.appendUInt64(fee)
         case .neighbors(let peers):
             buf.append(Tag.neighbors.rawValue)
             buf.appendUInt16(UInt16(peers.count))
@@ -315,6 +320,19 @@ public enum Message: Sendable {
             buf.append(Tag.peerMessage.rawValue)
             buf.appendLengthPrefixedString(topic)
             buf.appendLengthPrefixedData(payload)
+        case .blocks(let rootCID, let items):
+            buf.append(Tag.blocks.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+            buf.appendUInt16(UInt16(items.count))
+            for item in items {
+                buf.appendLengthPrefixedString(item.cid)
+                buf.appendLengthPrefixedData(item.data)
+            }
+        case .settlementProof(let txHash, let amount, let chainId):
+            buf.append(Tag.settlementProof.rawValue)
+            buf.appendLengthPrefixedString(txHash)
+            buf.appendUInt64(amount)
+            buf.appendLengthPrefixedString(chainId)
         }
         return buf
     }
@@ -339,7 +357,8 @@ public enum Message: Sendable {
             return .dontHave(cid: cid)
         case .findNode:
             guard let target = reader.readData() else { return nil }
-            return .findNode(target: target)
+            let fee = reader.readUInt64() ?? 0
+            return .findNode(target: target, fee: fee)
         case .neighbors:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
             var peers = [PeerEndpoint]()
@@ -584,6 +603,22 @@ public enum Message: Sendable {
             guard let topic = reader.readString(),
                   let payload = reader.readData() else { return nil }
             return .peerMessage(topic: topic, payload: payload)
+        case .blocks:
+            guard let rootCID = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var items = [(cid: String, data: Data)]()
+            items.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString(),
+                      let data = reader.readData() else { return nil }
+                items.append((cid: cid, data: data))
+            }
+            return .blocks(rootCID: rootCID, items: items)
+        case .settlementProof:
+            guard let txHash = reader.readString(),
+                  let amount = reader.readUInt64(),
+                  let chainId = reader.readString() else { return nil }
+            return .settlementProof(txHash: txHash, amount: amount, chainId: chainId)
         }
     }
 

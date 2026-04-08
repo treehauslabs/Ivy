@@ -505,12 +505,23 @@ public actor Ivy {
         case .dontHave:
             tally.recordFailure(peer: peer)
 
-        case .findNode(let target):
-            let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
-            let endpoints = closest.map { $0.endpoint }
-            fireToPeer(peer, .neighbors(endpoints))
+        case .findNode(let target, let fee):
+            if fee > 0 {
+                await handleFeeNode(target: target, fee: fee, from: peer)
+            } else {
+                let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
+                let endpoints = closest.map { $0.endpoint }
+                fireToPeer(peer, .neighbors(endpoints))
+            }
 
         case .neighbors(let endpoints):
+            // Check if this is a response to a fee-forwarded findNode
+            let fnKey = pendingFeeForwards.keys.first { $0.hasPrefix("fn-") }
+            if let key = fnKey, let pending = pendingFeeForwards.removeValue(forKey: key) {
+                // Relay response upstream, earn fee
+                fireToPeer(pending.upstream, .neighbors(endpoints))
+                await ledger.earnFromRelay(peer: pending.upstream, amount: Int64(pending.feeClaimed))
+            }
             for ep in endpoints {
                 let newPeer = PeerID(publicKey: ep.publicKey)
                 if connections[newPeer] == nil && newPeer != localID {
@@ -562,10 +573,16 @@ public actor Ivy {
             handlePEXResponse(nonce: nonce, peers: peers, from: peer)
 
         // Ivy economic layer
-        case .findPins(let cid, _):
-            handleFindPins(cid: cid, from: peer)
+        case .findPins(let cid, let fee):
+            await handleFindPins(cid: cid, fee: fee, from: peer)
 
         case .pins:
+            // Check if this is a response to a fee-forwarded findPins
+            let fpKey = pendingFeeForwards.keys.first { $0.hasPrefix("fp-") }
+            if let key = fpKey, let pending = pendingFeeForwards.removeValue(forKey: key) {
+                fireToPeer(pending.upstream, message)
+                await ledger.earnFromRelay(peer: pending.upstream, amount: Int64(pending.feeClaimed))
+            }
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .pinAnnounce(let rootCID, let selector, let publicKey, let expiry, _, _):
@@ -594,6 +611,23 @@ public actor Ivy {
 
         case .miningChallengeSolution(let nonce, let hash, let blockNonce):
             await handleMiningSettlement(nonce: nonce, hash: hash, blockNonce: blockNonce, from: peer)
+
+        case .blocks(let rootCID, let items):
+            for item in items {
+                let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
+                tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
+            }
+            tally.recordSuccess(peer: peer)
+            await handleFeeForwardResponse(cid: rootCID, data: items.first?.data ?? Data(), from: peer)
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .settlementProof(let txHash, let amount, let chainId):
+            await ledger.recordPartialSettlement(peer: peer, workValue: Int64(amount))
+            config.logger.info("On-chain settlement from \(peer.publicKey.prefix(8))…: \(amount) ivy via \(chainId) tx \(txHash.prefix(16))…")
+            if !(await ledger.needsSettlement(peer: peer)) {
+                await ledger.recordSettlement(peer: peer)
+            }
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         default:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -669,7 +703,12 @@ public actor Ivy {
     private var pendingFeeForwards: [String: (upstream: PeerID, feeClaimed: UInt64)] = [:]
 
     private func handleFeeForward(cid: String, fee: UInt64, target: Data?, selector: String?, from peer: PeerID) async {
+        // Dual gate: behavioral (Tally) + economic (credit line)
         guard tally.shouldAllow(peer: peer) else {
+            fireToPeer(peer, .dontHave(cid: cid))
+            return
+        }
+        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else {
             fireToPeer(peer, .dontHave(cid: cid))
             return
         }
@@ -753,6 +792,45 @@ public actor Ivy {
                 }
             }
         }
+    }
+
+    // MARK: - Fee-Aware findNode
+
+    private func handleFeeNode(target: Data, fee: UInt64, from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else { return }
+
+        let targetHash = Array(target)
+
+        // Check if we can respond (no known peer closer than us)
+        let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
+        let localDist = Router.xorDistance(router.localHash, targetHash)
+        let canRespond = closest.isEmpty || !Router.isCloser(closest[0].hash, than: localDist, to: targetHash)
+
+        if canRespond || fee <= relayFee {
+            // Respond with our closest known peers — keep the full remaining fee
+            let endpoints = closest.map { $0.endpoint }
+            fireToPeer(peer, .neighbors(endpoints))
+            await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
+            return
+        }
+
+        // Forward to the closest peer we know toward the target
+        let remainingFee = fee - relayFee
+        for entry in closest {
+            guard entry.id != peer, entry.id != localID else { continue }
+            guard connections[entry.id] != nil else { continue }
+
+            let requestKey = "fn-\(target.prefix(8).map { String(format: "%02x", $0) }.joined())-\(peer.publicKey.prefix(8))"
+            pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
+            fireToPeer(entry.id, .findNode(target: target, fee: remainingFee))
+            return
+        }
+
+        // Can't forward — respond with what we have
+        let endpoints = closest.map { $0.endpoint }
+        fireToPeer(peer, .neighbors(endpoints))
+        await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
     }
 
     // MARK: - Chain Announces
@@ -1056,11 +1134,37 @@ public actor Ivy {
 
     // MARK: - Pin Announcements
 
-    private func handleFindPins(cid: String, from peer: PeerID) {
+    private func handleFindPins(cid: String, fee: UInt64, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
+        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else { return }
+
+        // Check if we store pin announcements for this CID
         let stored = pinAnnouncements[cid] ?? []
-        let results = stored.map { (publicKey: $0.publicKey, selector: $0.selector) }
-        fireToPeer(peer, .pins(announcements: results))
+        if !stored.isEmpty || fee <= relayFee {
+            // Respond with what we have — keep the full remaining fee
+            let results = stored.map { (publicKey: $0.publicKey, selector: $0.selector) }
+            fireToPeer(peer, .pins(announcements: results))
+            await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
+            return
+        }
+
+        // Forward toward the CID hash neighborhood
+        let remainingFee = fee - relayFee
+        let cidHash = Router.hash(cid)
+        let closest = router.closestPeers(to: cidHash, count: 3)
+        for entry in closest {
+            guard entry.id != peer, entry.id != localID else { continue }
+            guard connections[entry.id] != nil else { continue }
+
+            let requestKey = "fp-\(cid.prefix(8))-\(peer.publicKey.prefix(8))"
+            pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
+            fireToPeer(entry.id, .findPins(cid: cid, fee: remainingFee))
+            return
+        }
+
+        // Can't forward — respond with empty (still success for fee purposes)
+        fireToPeer(peer, .pins(announcements: []))
+        await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
     }
 
     private func handlePinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, from peer: PeerID) {

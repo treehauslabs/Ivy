@@ -360,4 +360,63 @@ struct EconomicMessageTests {
             Issue.record("Expected dhtForward")
         }
     }
+
+    @Test("findNode with fee roundtrip")
+    func testFindNodeWithFeeRoundtrip() {
+        let target = Data(repeating: 0xBB, count: 32)
+        let msg = Message.findNode(target: target, fee: 25)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .findNode(let t, let fee) = decoded {
+            #expect(t == target)
+            #expect(fee == 25)
+        } else {
+            Issue.record("Expected findNode with fee")
+        }
+    }
+
+    @Test("findNode backward compatible (no fee)")
+    func testFindNodeBackwardCompat() {
+        let target = Data(repeating: 0xCC, count: 32)
+        let msg = Message.findNode(target: target)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .findNode(let t, let fee) = decoded {
+            #expect(t == target)
+            #expect(fee == 0)
+        } else {
+            Issue.record("Expected findNode")
+        }
+    }
+
+    @Test("blocks multi-block roundtrip")
+    func testBlocksRoundtrip() {
+        let items: [(cid: String, data: Data)] = [
+            (cid: "Qm-a", data: Data([1, 2, 3])),
+            (cid: "Qm-b", data: Data([4, 5, 6])),
+            (cid: "Qm-c", data: Data([7, 8, 9]))
+        ]
+        let msg = Message.blocks(rootCID: "Qm-root", items: items)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .blocks(let root, let decoded_items) = decoded {
+            #expect(root == "Qm-root")
+            #expect(decoded_items.count == 3)
+            #expect(decoded_items[0].cid == "Qm-a")
+            #expect(decoded_items[1].data == Data([4, 5, 6]))
+            #expect(decoded_items[2].cid == "Qm-c")
+        } else {
+            Issue.record("Expected blocks")
+        }
+    }
+
+    @Test("settlementProof roundtrip")
+    func testSettlementProofRoundtrip() {
+        let msg = Message.settlementProof(txHash: "0xabc123", amount: 500, chainId: "nexus-mainnet")
+        let decoded = Message.deserialize(msg.serialize())
+        if case .settlementProof(let hash, let amount, let chain) = decoded {
+            #expect(hash == "0xabc123")
+            #expect(amount == 500)
+            #expect(chain == "nexus-mainnet")
+        } else {
+            Issue.record("Expected settlementProof")
+        }
+    }
 }
