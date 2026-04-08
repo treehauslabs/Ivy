@@ -1,5 +1,5 @@
 {
-  "originHash" : "c679038820154766cc2bf0eb6fa7b04e4c8114b54e2eb78a19b5c8ec6917e8ea",
+  "originHash" : "47092de714cfc32fa63d8597273081608cc1693a268d05519d1d8824c751c180",
   "pins" : [
     {
       "identity" : "acorn",
@@ -69,8 +69,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/treehauslabs/Tally.git",
       "state" : {
-        "revision" : "debbd1a91a2c6b00f4c9eece322364aa0a227cb2",
-        "version" : "1.0.0"
+        "revision" : "0e67040a9a9e6ab47036a4b53a2abe649f2a2732",
+        "version" : "1.2.0"
       }
     }
   ],

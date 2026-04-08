@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 @testable import Ivy
-import Tally
+@testable import Tally
 
 @Suite("KeyDifficulty")
 struct KeyDifficultyTests {
