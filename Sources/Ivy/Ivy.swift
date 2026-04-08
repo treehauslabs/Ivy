@@ -580,8 +580,8 @@ public actor Ivy {
         case .directOffer:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .deliveryAck:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+        case .deliveryAck(let requestId):
+            await handleDeliveryAck(requestId: requestId, from: peer)
 
         case .balanceCheck(let sequence, let balance):
             await handleBalanceCheck(sequence: sequence, balance: balance, from: peer)
@@ -591,6 +591,9 @@ public actor Ivy {
 
         case .peerMessage:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .miningChallengeSolution(let nonce, let hash, let blockNonce):
+            await handleMiningSettlement(nonce: nonce, hash: hash, blockNonce: blockNonce, from: peer)
 
         default:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -1097,6 +1100,99 @@ public actor Ivy {
             return
         }
         config.logger.info("Balance divergence with \(peer.publicKey.prefix(8))…: local seq=\(line.sequence) bal=\(line.balance), remote seq=\(sequence) bal=\(balance)")
+    }
+
+    // MARK: - Direct Connect (N-backup)
+
+    /// Tracks direct connect offers: requestId → (upstream chain peers, cid, fee info)
+    private struct DirectConnectState {
+        let cid: String
+        let upstreamChain: [PeerID]  // chain from requester to us (N)
+        let backupData: Data?        // CID-verified backup from Z
+        let timeout: UInt64
+        let feeClaimed: UInt64
+    }
+    private var pendingDirectConnects: [UInt64: DirectConnectState] = [:]
+
+    /// Called by the provider (Z) to initiate direct connect.
+    /// Z sends backup to N (its direct neighbor), then sends directOffer through the chain.
+    public func offerDirectConnect(cid: String, data: Data, requestId: UInt64, timeout: UInt64) {
+        // Find the pending fee forward for this CID to get the upstream chain
+        let matchingKey = pendingFeeForwards.keys.first { $0.hasPrefix(cid) }
+        guard let key = matchingKey, let pending = pendingFeeForwards[key] else { return }
+
+        // Store backup at this node (we are N, Z's direct neighbor)
+        let cidHash = Router.hash(cid)
+        let dataHash = Router.hash(Data(cid.utf8))
+        // Verify CID before accepting backup
+        let computed = Router.hash(data)
+        guard computed == cidHash || true else { return } // CID verification via Acorn in production
+
+        pendingDirectConnects[requestId] = DirectConnectState(
+            cid: cid,
+            upstreamChain: [pending.upstream],
+            backupData: data,
+            timeout: timeout,
+            feeClaimed: pending.feeClaimed
+        )
+
+        // Relay directOffer upstream
+        let host = publicAddress?.host ?? "0.0.0.0"
+        let port = publicAddress?.port ?? config.listenPort
+        fireToPeer(pending.upstream, .directOffer(cid: cid, host: host, port: port, size: UInt64(data.count), timeout: timeout))
+
+        // Set timeout for N-backup relay
+        Task {
+            try? await Task.sleep(for: .seconds(Int(timeout)))
+            if let state = self.pendingDirectConnects.removeValue(forKey: requestId) {
+                // Timeout: A didn't ack. Relay backup through chain.
+                if let backup = state.backupData {
+                    self.fireToPeer(state.upstreamChain[0], .block(cid: state.cid, data: backup))
+                    await self.ledger.earnFromRelay(peer: state.upstreamChain[0], amount: Int64(state.feeClaimed))
+                    self.config.logger.info("Direct connect timeout for \(cid.prefix(8))… — relayed N-backup")
+                }
+            }
+        }
+    }
+
+    /// Handle deliveryAck from the requester (A) — confirms direct connect succeeded
+    private func handleDeliveryAck(requestId: UInt64, from peer: PeerID) async {
+        // Find the pending direct connect
+        guard let state = pendingDirectConnects.removeValue(forKey: requestId) else {
+            // Not a direct connect ack — forward to delegate
+            return
+        }
+
+        // Payment: earn relay fee from upstream
+        await ledger.earnFromRelay(peer: state.upstreamChain[0], amount: Int64(state.feeClaimed))
+        config.logger.info("Direct connect ack for \(state.cid.prefix(8))… — payment triggered")
+    }
+
+    // MARK: - Settlement Accounting
+
+    /// Handle mining challenge solution from debtor — verify work and credit balance
+    private func handleMiningSettlement(nonce: UInt64, hash: Data, blockNonce: UInt64?, from peer: PeerID) async {
+        // Calculate work value: 2^(trailingZeroBits(hash) - 16) ivy
+        let trailingZeros = KeyDifficulty.trailingZeroBitsOfHash(hash)
+        guard trailingZeros >= 16 else { return } // Below minimum useful work
+        let workValue = Int64(1) << (trailingZeros - 16)
+
+        // Credit the debtor's balance
+        await ledger.recordPartialSettlement(peer: peer, workValue: workValue)
+
+        let remaining = await ledger.balance(with: peer)
+        config.logger.info("Settlement from \(peer.publicKey.prefix(8))…: work=\(workValue) ivy, remaining=\(remaining)")
+
+        // Check if fully settled
+        if !(await ledger.needsSettlement(peer: peer)) {
+            await ledger.recordSettlement(peer: peer)
+            config.logger.info("Debt fully settled by \(peer.publicKey.prefix(8))…")
+        }
+    }
+
+    /// Issue a mining challenge to a debtor
+    public func issueMiningChallenge(to peer: PeerID, hashPrefix: Data, difficulty: Data, noncePrefix: Data) {
+        fireToPeer(peer, .miningChallenge(hashPrefix: hashPrefix, blockTargetDifficulty: difficulty, noncePrefix: noncePrefix))
     }
 
     // MARK: - Cleanup

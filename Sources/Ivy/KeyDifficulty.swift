@@ -17,6 +17,19 @@ public enum KeyDifficulty: Sendable {
         return count
     }
 
+    public static func trailingZeroBitsOfHash(_ hash: Data) -> Int {
+        var count = 0
+        for byte in hash.reversed() {
+            if byte == 0 {
+                count += 8
+            } else {
+                count += byte.trailingZeroBitCount
+                break
+            }
+        }
+        return count
+    }
+
     public static func baseTrust(
         publicKey: String,
         minDifficulty: Int = 0,
