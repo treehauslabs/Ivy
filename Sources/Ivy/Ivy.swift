@@ -176,6 +176,22 @@ public actor Ivy {
 
     // MARK: - Sending
 
+    /// Send a peer message (gossip) to a specific connected peer.
+    public func sendMessage(to peer: PeerID, topic: String, payload: Data) {
+        fireToPeer(peer, .peerMessage(topic: topic, payload: payload))
+    }
+
+    /// Send a peer message to all connected peers.
+    public func broadcastMessage(topic: String, payload: Data) {
+        let msg = Message.peerMessage(topic: topic, payload: payload)
+        for (peer, _) in connections {
+            fireToPeer(peer, msg)
+        }
+        for (peer, _) in localPeers {
+            fireToPeer(peer, msg)
+        }
+    }
+
     func sendToPeer(_ peer: PeerID, _ message: Message) async throws {
         if let conn = connections[peer] {
             try await conn.send(message)
