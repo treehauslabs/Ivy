@@ -47,6 +47,7 @@ public actor Ivy {
     // Ivy economic layer
     public let ledger: CreditLineLedger
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, selector: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
+    private var blockCache: BoundedDictionary<String, Data> = BoundedDictionary(capacity: 10_000)
 
     public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
@@ -276,6 +277,7 @@ public actor Ivy {
         if let w = _worker, let near = await w.near {
             await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
         }
+        blockCache[cid] = data
         haveSet.insert(cid)
         let payload = Message.announceBlock(cid: cid).serialize()
         for (peer, conn) in connections {
@@ -714,8 +716,8 @@ public actor Ivy {
         }
 
         // Step 1: Check cache — serve locally if we have it
-        var data: Data?
-        if haveSet.contains(cid) {
+        var data: Data? = blockCache[cid]
+        if data == nil && haveSet.contains(cid) {
             data = await getLocalBlock(cid: cid)
         }
         if data == nil, let w = _worker {
@@ -753,7 +755,8 @@ public actor Ivy {
         var forwarded = false
         for entry in closest {
             guard entry.id != peer, entry.id != localID else { continue }
-            guard connections[entry.id] != nil else { continue }
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
 
             let requestKey = "\(cid)-\(peer.publicKey.prefix(8))-\(fee)"
             pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
@@ -784,6 +787,7 @@ public actor Ivy {
 
         // Cache the data
         haveSet.insert(cid)
+        blockCache[cid] = data
         if let w = _worker {
             let cidObj = ContentIdentifier(rawValue: cid)
             Task {
@@ -819,7 +823,8 @@ public actor Ivy {
         let remainingFee = fee - relayFee
         for entry in closest {
             guard entry.id != peer, entry.id != localID else { continue }
-            guard connections[entry.id] != nil else { continue }
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
 
             let requestKey = "fn-\(target.prefix(8).map { String(format: "%02x", $0) }.joined())-\(peer.publicKey.prefix(8))"
             pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
@@ -1157,7 +1162,8 @@ public actor Ivy {
         let closest = router.closestPeers(to: cidHash, count: 3)
         for entry in closest {
             guard entry.id != peer, entry.id != localID else { continue }
-            guard connections[entry.id] != nil else { continue }
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
 
             let requestKey = "fp-\(cid.prefix(8))-\(peer.publicKey.prefix(8))"
             pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
@@ -1190,7 +1196,8 @@ public actor Ivy {
         let cidHash = Router.hash(rootCID)
         let closest = router.closestPeers(to: cidHash, count: config.kBucketSize)
         for entry in closest {
-            guard connections[entry.id] != nil else { continue }
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
             fireToPeer(entry.id, msg)
         }
     }
