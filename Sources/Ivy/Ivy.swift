@@ -444,6 +444,7 @@ public actor Ivy {
                 connections[realID] = conn
                 let endpoint = PeerEndpoint(publicKey: publicKey, host: conn.endpoint.host, port: conn.endpoint.port)
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
+                Task { await ledger.establish(with: realID) }
             }
         }
 
