@@ -1043,7 +1043,10 @@ public actor Ivy {
 
     func registerLocalPeer(_ conn: LocalPeerConnection, as peerID: PeerID) {
         localPeers[peerID] = conn
-        Task { await handleLocalInbound(conn, from: peerID) }
+        Task {
+            await ledger.establish(with: peerID)
+            await handleLocalInbound(conn, from: peerID)
+        }
     }
 
     func unregisterLocalPeer(_ peerID: PeerID) {
