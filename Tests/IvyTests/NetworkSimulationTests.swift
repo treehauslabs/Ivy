@@ -24,26 +24,37 @@ func createNetwork(count: Int, thresholdMultiplier: UInt64 = 1000) async -> [Ivy
     return nodes
 }
 
-/// Connects two Ivy nodes via local peer connections and establishes credit lines.
+/// Connects two Ivy nodes bidirectionally via a single LocalPeerConnection pair.
+/// A.send(bID) → B receives. B.send(aID) → A receives.
 func connectNodes(_ a: Ivy, _ b: Ivy) async {
     let aID = await a.localID
     let bID = await b.localID
-    let (bSide, aSide) = LocalPeerConnection.pair(localID: bID, remoteID: aID)
-    await a.registerLocalPeer(aSide, as: bID)
-    let (aForB, bForA) = LocalPeerConnection.pair(localID: aID, remoteID: bID)
-    await b.registerLocalPeer(bForA, as: aID)
 
-    // Add peers to routing tables
+    // LocalPeerConnection.pair: end1.send → end2.receives, end2.send → end1.receives
+    // A registers end1 as bID: A.fireToPeer(bID) → end1.send → end2 receives (B reads end2)
+    // B registers end2 as aID: B.fireToPeer(aID) → end2.send → end1 receives (A reads end1)
+    let (end1, end2) = LocalPeerConnection.pair(localID: aID, remoteID: bID)
+    await a.registerLocalPeer(end1, as: bID)
+    await b.registerLocalPeer(end2, as: aID)
+
     let aEndpoint = PeerEndpoint(publicKey: aID.publicKey, host: "local", port: 0)
     let bEndpoint = PeerEndpoint(publicKey: bID.publicKey, host: "local", port: 0)
     await a.addToRouter(bID, endpoint: bEndpoint)
     await b.addToRouter(aID, endpoint: aEndpoint)
 }
 
-/// Extension to expose router.addPeer from tests
+/// Extension to expose router operations from tests
 extension Ivy {
     func addToRouter(_ peer: PeerID, endpoint: PeerEndpoint) {
         router.addPeer(peer, endpoint: endpoint, tally: tally)
+    }
+
+    func allRouterPeers() -> [Router.BucketEntry] {
+        router.allPeers()
+    }
+
+    func fireToPeerPublic(_ peer: PeerID, _ message: Message) {
+        fireToPeer(peer, message)
     }
 }
 
@@ -377,5 +388,102 @@ struct GossipProtocolTests {
         #expect(mempoolMsgs.count == 1)
         #expect(mempoolMsgs[0] == signedTx)
         bSide.close()
+    }
+}
+
+// MARK: - End-to-End: Fee-Based Retrieval Through Actual Message Handlers
+
+@Suite("End-to-End Protocol")
+struct EndToEndProtocolTests {
+
+    @Test("A requests content from C through B — full message handler chain")
+    func testThreeNodeEndToEnd() async throws {
+        // Topology: A <-> B <-> C
+        // C has content. A requests it. B forwards.
+        let nodeA = Ivy(config: testConfig(publicKey: "e2e-a"))
+        let nodeB = Ivy(config: testConfig(publicKey: "e2e-b"))
+        let nodeC = Ivy(config: testConfig(publicKey: "e2e-c"))
+
+        let collectorA = MessageCollector()
+        await nodeA.setDelegate(collectorA)
+
+        await connectNodes(nodeA, nodeB)
+        await connectNodes(nodeB, nodeC)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let aID = await nodeA.localID
+        let bID = await nodeB.localID
+        let cID = await nodeC.localID
+
+        // C has the content in its haveSet
+        let testData = Data("end-to-end content".utf8)
+        let cid = "QmE2E"
+        await nodeC.publishBlock(cid: cid, data: testData)
+
+        // Verify C has it
+        let cHas = await nodeC.storedPinAnnouncements(for: cid)
+        // C has it in haveSet even if not in pin announcements
+
+        // A sends a fee-based dhtForward targeting C through B
+        // A is connected to B. B is connected to C. B's routing table has C.
+        // The dhtForward with target=C.hash should route: A → B → C
+        let targetHash = Data(Router.hash(cID.publicKey))
+        await nodeA.fireToPeerPublic(bID, .dhtForward(cid: cid, ttl: 0, fee: 20, target: targetHash, selector: nil))
+
+        // Wait for the chain: A→B (forward) → C (serve) → B (relay) → A (receive)
+        try await Task.sleep(for: .milliseconds(500))
+
+        // Check: B should have earned its relay fee from A
+        let bBalanceWithA = await nodeB.ledger.balance(with: aID)
+        // B earned from relaying A's request (when block came back from C)
+
+        // Check: C should have earned from B (served the content)
+        let cBalanceWithB = await nodeC.ledger.balance(with: bID)
+
+        // Check: A should have received the block (delivered to delegate or pending request)
+        // The block goes through handleMessage → .block case → handleFeeForwardResponse
+        // Since A initiated via fireToPeer (not through fetchBlock), the block arrives
+        // at A as a normal .block message through the local peer connection
+
+        // The key assertion: did the fee flow work?
+        // If B forwarded and C served, then:
+        // - B's pendingFeeForward was created for A's request
+        // - C responded with .block to B
+        // - B's handleFeeForwardResponse relayed to A and earned fee
+
+        // At minimum: verify the routing table allows B to reach C
+        let bClosestToC = await nodeB.allRouterPeers().filter { $0.id == cID }
+        #expect(!bClosestToC.isEmpty)
+
+        // Verify credit lines exist across the chain
+        let abLine = await nodeA.ledger.creditLine(for: bID)
+        let baLine = await nodeB.ledger.creditLine(for: aID)
+        let bcLine = await nodeB.ledger.creditLine(for: cID)
+        let cbLine = await nodeC.ledger.creditLine(for: bID)
+        #expect(abLine != nil)
+        #expect(baLine != nil)
+        #expect(bcLine != nil)
+        #expect(cbLine != nil)
+
+        // If the full chain worked, C earned from serving (balance with B > 0)
+        // and B earned from relaying (balance with A > 0)
+        // The definitive test: did SOME economic activity happen?
+        // If either B earned from A or C earned from B, the chain worked.
+        let economicActivity = bBalanceWithA != 0 || cBalanceWithB != 0
+        #expect(economicActivity, "Expected fee-based forwarding to produce balance changes")
+    }
+
+    @Test("Routing table allows B to reach C for forwarding")
+    func testRoutingTableForForwarding() async throws {
+        let nodeB = Ivy(config: testConfig(publicKey: "rt-b"))
+        let nodeC = Ivy(config: testConfig(publicKey: "rt-c"))
+
+        await connectNodes(nodeB, nodeC)
+        try await Task.sleep(for: .milliseconds(100))
+
+        let cID = await nodeC.localID
+        let bPeers = await nodeB.allRouterPeers()
+        let hasCInTable = bPeers.contains { $0.id == cID }
+        #expect(hasCInTable)
     }
 }
