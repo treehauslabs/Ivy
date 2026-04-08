@@ -9,7 +9,7 @@ import Crypto
 /// These tests verify what unit tests can't: wire protocol, connection handshake,
 /// message framing, and end-to-end data flow over real network connections.
 
-private nonisolated(unsafe) var _nextPort: UInt16 = 29100
+private nonisolated(unsafe) var _nextPort: UInt16 = UInt16(ProcessInfo.processInfo.processIdentifier % 10000) + 30000
 private func nextPort() -> UInt16 { _nextPort += 1; return _nextPort }
 
 private func generateKey() -> (publicKey: String, privateKey: String) {
@@ -194,6 +194,271 @@ struct TCPIntegrationTests {
         if let retrieved {
             #expect(retrieved == testData, "Retrieved data should match original")
         }
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+    @Test("Pin announcement discoverable over TCP")
+    func testPinDiscoveryOverTCP() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+
+        try await ivy1.start()
+        try await ivy2.start()
+
+        try await ivy2.connect(to: PeerEndpoint(
+            publicKey: kp1.publicKey, host: "127.0.0.1", port: p1
+        ))
+        try await Task.sleep(for: .seconds(1))
+
+        // Node 1 publishes a pin announcement
+        let expiry = UInt64(Date().timeIntervalSince1970) + 86400
+        await ivy1.publishPinAnnounce(
+            rootCID: "pinned-data-root",
+            selector: "/",
+            expiry: expiry,
+            signature: Data(),
+            fee: 5
+        )
+        try await Task.sleep(for: .seconds(2))
+
+        // Node 2 should have the pin announcement stored (received via TCP)
+        let stored = await ivy2.storedPinAnnouncements(for: "pinned-data-root")
+        #expect(!stored.isEmpty, "Pin announcement should be discoverable on Node 2")
+        if let first = stored.first {
+            #expect(first.publicKey == kp1.publicKey, "Pinner should be Node 1")
+        }
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+
+    @Test("Bidirectional communication after connect")
+    func testBidirectionalCommunication() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+
+        let collector1 = GossipCollector()
+        let collector2 = GossipCollector()
+        await ivy1.setDelegate(collector1)
+        await ivy2.setDelegate(collector2)
+
+        try await ivy1.start()
+        try await ivy2.start()
+
+        try await ivy2.connect(to: PeerEndpoint(
+            publicKey: kp1.publicKey, host: "127.0.0.1", port: p1
+        ))
+        try await Task.sleep(for: .seconds(1))
+
+        // Node 1 → Node 2
+        await ivy1.broadcastMessage(topic: "from1", payload: Data("hello-from-1".utf8))
+        // Node 2 → Node 1
+        await ivy2.broadcastMessage(topic: "from2", payload: Data("hello-from-2".utf8))
+        try await Task.sleep(for: .seconds(1))
+
+        let msgs1 = await collector1.messages
+        let msgs2 = await collector2.messages
+        #expect(msgs1.contains(where: { $0.topic == "from2" }), "Node 1 should receive from Node 2")
+        #expect(msgs2.contains(where: { $0.topic == "from1" }), "Node 2 should receive from Node 1")
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+
+    @Test("Bootstrap peer auto-connect")
+    func testBootstrapAutoConnect() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        // Node 1 starts first (no bootstrap)
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        try await ivy1.start()
+
+        // Node 2 starts with Node 1 as bootstrap peer
+        let ivy2 = Ivy(config: makeConfig(
+            port: p2,
+            publicKey: kp2.publicKey,
+            bootstrapPeers: [PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1)]
+        ))
+        try await ivy2.start()
+
+        // Wait for bootstrap connection
+        try await Task.sleep(for: .seconds(2))
+
+        let peers2 = await ivy2.directPeerCount
+        #expect(peers2 >= 1, "Node 2 should auto-connect to bootstrap peer")
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+    @Test("Three-node relay over real TCP")
+    func testThreeNodeRelayTCP() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+        let kp3 = generateKey()
+        let p3 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
+
+        // Store data only on node 1
+        let testCID = "relay-tcp-content"
+        let testData = Data("only-on-node-1".utf8)
+        await ivy1.publishBlock(cid: testCID, data: testData)
+
+        try await ivy1.start()
+        try await ivy2.start()
+        try await ivy3.start()
+
+        // Chain: 3 → 2 → 1
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await ivy3.connect(to: PeerEndpoint(publicKey: kp2.publicKey, host: "127.0.0.1", port: p2))
+        try await Task.sleep(for: .seconds(2))
+
+        // Node 3 requests from node 1 via target — relays through node 2
+        let target = PeerID(publicKey: kp1.publicKey)
+        let retrieved = await ivy3.get(cid: testCID, target: target, fee: 20)
+
+        #expect(retrieved != nil, "Should retrieve via 3-node relay over TCP")
+        if let retrieved {
+            #expect(retrieved == testData, "Relayed data should match")
+        }
+
+        await ivy1.stop()
+        await ivy2.stop()
+        await ivy3.stop()
+    }
+
+    @Test("Disconnect and reconnect")
+    func testDisconnectReconnect() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+
+        try await ivy1.start()
+        try await ivy2.start()
+
+        // Connect
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await Task.sleep(for: .seconds(1))
+        let peersBefore = await ivy2.directPeerCount
+        #expect(peersBefore >= 1)
+
+        // Disconnect
+        await ivy2.disconnect(PeerID(publicKey: kp1.publicKey))
+        try await Task.sleep(for: .milliseconds(500))
+        let peersAfter = await ivy2.directPeerCount
+        #expect(peersAfter == 0, "Should have 0 peers after disconnect")
+
+        // Reconnect
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await Task.sleep(for: .seconds(1))
+        let peersReconnect = await ivy2.directPeerCount
+        #expect(peersReconnect >= 1, "Should reconnect successfully")
+
+        // Verify data still flows
+        let collector = AnnouncementCollector()
+        await ivy2.setDelegate(collector)
+        await ivy1.announceBlock(cid: "after-reconnect")
+        try await Task.sleep(for: .milliseconds(500))
+        let announcements = await collector.announcements
+        #expect(announcements.contains("after-reconnect"), "Announcements work after reconnect")
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+
+    @Test("Large message over TCP")
+    func testLargeMessage() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+
+        // Store 1MB of data on node 1
+        let largeData = Data(repeating: 0xAB, count: 1_048_576)
+        let largeCID = "large-data-1mb"
+        await ivy1.publishBlock(cid: largeCID, data: largeData)
+
+        try await ivy1.start()
+        try await ivy2.start()
+
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await Task.sleep(for: .seconds(2))
+
+        let target = PeerID(publicKey: kp1.publicKey)
+        let retrieved = await ivy2.get(cid: largeCID, target: target, fee: 20)
+
+        #expect(retrieved != nil, "Should retrieve 1MB payload")
+        if let retrieved {
+            #expect(retrieved.count == 1_048_576, "Data size should be 1MB")
+            #expect(retrieved == largeData, "Data should be intact")
+        }
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+
+    @Test("Multiple concurrent requests")
+    func testConcurrentRequests() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+
+        // Store 10 different CIDs on node 1
+        for i in 0..<10 {
+            await ivy1.publishBlock(cid: "concurrent-\(i)", data: Data("data-\(i)".utf8))
+        }
+
+        try await ivy1.start()
+        try await ivy2.start()
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await Task.sleep(for: .seconds(2))
+
+        let target = PeerID(publicKey: kp1.publicKey)
+
+        // Request all 10 concurrently
+        let results = await withTaskGroup(of: (Int, Data?).self) { group in
+            for i in 0..<10 {
+                group.addTask {
+                    let data = await ivy2.get(cid: "concurrent-\(i)", target: target, fee: 20)
+                    return (i, data)
+                }
+            }
+            var collected: [Int: Data?] = [:]
+            for await (i, data) in group { collected[i] = data }
+            return collected
+        }
+
+        var successCount = 0
+        for (i, data) in results {
+            if let data {
+                let expected = Data("data-\(i)".utf8)
+                #expect(data == expected)
+                successCount += 1
+            }
+        }
+        #expect(successCount >= 1, "At least one concurrent request should succeed")
 
         await ivy1.stop()
         await ivy2.stop()
