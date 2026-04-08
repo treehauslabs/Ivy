@@ -25,4 +25,8 @@ public actor NetworkCASWorker: AcornCASWorker {
     }
 
     public func storeLocal(cid: ContentIdentifier, data: Data) async {}
+
+    public func setNear(_ worker: any AcornCASWorker) {
+        self.near = worker
+    }
 }
