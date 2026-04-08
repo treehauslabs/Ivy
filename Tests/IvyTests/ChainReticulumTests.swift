@@ -121,21 +121,18 @@ struct CompactBlockMessageTests {
     func testChainAnnounceRoundtrip() {
         let destHash = Data(repeating: 0xEE, count: 16)
         let chainData = Data("chain-specific-data".utf8)
-        let announcePayload = Data("announce-signed-data".utf8)
 
         let msg = Message.chainAnnounce(
             destinationHash: destHash,
             hops: 3,
-            chainData: chainData,
-            announcePayload: announcePayload
+            chainData: chainData
         )
         let decoded = Message.deserialize(msg.serialize())
 
-        if case .chainAnnounce(let dh, let h, let cd, let ap) = decoded {
+        if case .chainAnnounce(let dh, let h, let cd) = decoded {
             #expect(dh == destHash)
             #expect(h == 3)
             #expect(cd == chainData)
-            #expect(ap == announcePayload)
         } else {
             Issue.record("Expected chainAnnounce")
         }
@@ -144,7 +141,7 @@ struct CompactBlockMessageTests {
     @Test("Frame preserves chain messages")
     func testFrameChainMessages() {
         let messages: [Message] = [
-            .chainAnnounce(destinationHash: Data(repeating: 0, count: 16), hops: 0, chainData: Data(), announcePayload: Data()),
+            .chainAnnounce(destinationHash: Data(repeating: 0, count: 16), hops: 0, chainData: Data()),
             .compactBlock(chainHash: Data(repeating: 0, count: 16), headerCID: "h", txCIDs: ["t1", "t2"]),
             .getBlockTxns(chainHash: Data(repeating: 0, count: 16), headerCID: "h", missingTxCIDs: ["t1"]),
             .blockTxns(chainHash: Data(repeating: 0, count: 16), headerCID: "h", transactions: [("t1", Data([1]))]),

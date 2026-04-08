@@ -29,18 +29,6 @@ struct MessageTests {
         }
     }
 
-    @Test("WantBlock roundtrip")
-    func testWantBlockRoundtrip() {
-        let cid = "abc123def456"
-        let msg = Message.wantBlock(cid: cid)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .wantBlock(let c) = decoded {
-            #expect(c == cid)
-        } else {
-            Issue.record("Expected wantBlock")
-        }
-    }
-
     @Test("Block roundtrip")
     func testBlockRoundtrip() {
         let cid = "deadbeef"
@@ -139,6 +127,29 @@ struct MessageTests {
         }
     }
 
+    @Test("DHTForward roundtrip")
+    func testDHTForwardRoundtrip() {
+        let msg = Message.dhtForward(cid: "QmTest123", ttl: 3)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .dhtForward(let cid, let ttl, _, _, _) = decoded {
+            #expect(cid == "QmTest123")
+            #expect(ttl == 3)
+        } else {
+            Issue.record("Expected dhtForward")
+        }
+    }
+
+    @Test("DHTForward zero TTL roundtrip")
+    func testDHTForwardZeroTTL() {
+        let msg = Message.dhtForward(cid: "abc", ttl: 0)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .dhtForward(_, let ttl, _, _, _) = decoded {
+            #expect(ttl == 0)
+        } else {
+            Issue.record("Expected dhtForward")
+        }
+    }
+
     @Test("PexRequest roundtrip")
     func testPexRequestRoundtrip() {
         let msg = Message.pexRequest(nonce: 12345)
@@ -182,6 +193,125 @@ struct MessageTests {
             #expect(p.isEmpty)
         } else {
             Issue.record("Expected pexResponse")
+        }
+    }
+
+    @Test("GetZoneInventory roundtrip")
+    func testGetZoneInventoryRoundtrip() {
+        let nodeHash = Data(repeating: 0xAB, count: 32)
+        let msg = Message.getZoneInventory(nodeHash: nodeHash, limit: 256)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .getZoneInventory(let nh, let lim) = decoded {
+            #expect(nh == nodeHash)
+            #expect(lim == 256)
+        } else {
+            Issue.record("Expected getZoneInventory")
+        }
+    }
+
+    @Test("ZoneInventory roundtrip")
+    func testZoneInventoryRoundtrip() {
+        let cids = ["cid-abc", "cid-def", "cid-ghi"]
+        let msg = Message.zoneInventory(cids: cids)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .zoneInventory(let c) = decoded {
+            #expect(c == cids)
+        } else {
+            Issue.record("Expected zoneInventory")
+        }
+    }
+
+    @Test("ZoneInventory empty roundtrip")
+    func testZoneInventoryEmpty() {
+        let msg = Message.zoneInventory(cids: [])
+        let decoded = Message.deserialize(msg.serialize())
+        if case .zoneInventory(let c) = decoded {
+            #expect(c.isEmpty)
+        } else {
+            Issue.record("Expected zoneInventory")
+        }
+    }
+
+    @Test("HaveCIDs roundtrip")
+    func testHaveCIDsRoundtrip() {
+        let cids = ["block-1", "block-2", "block-3"]
+        let msg = Message.haveCIDs(nonce: 42424242, cids: cids)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .haveCIDs(let nonce, let c) = decoded {
+            #expect(nonce == 42424242)
+            #expect(c == cids)
+        } else {
+            Issue.record("Expected haveCIDs")
+        }
+    }
+
+    @Test("HaveCIDsResult roundtrip")
+    func testHaveCIDsResultRoundtrip() {
+        let have = ["block-1", "block-3"]
+        let msg = Message.haveCIDsResult(nonce: 99887766, have: have)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .haveCIDsResult(let nonce, let h) = decoded {
+            #expect(nonce == 99887766)
+            #expect(h == have)
+        } else {
+            Issue.record("Expected haveCIDsResult")
+        }
+    }
+
+    @Test("HaveCIDsResult empty roundtrip")
+    func testHaveCIDsResultEmpty() {
+        let msg = Message.haveCIDsResult(nonce: 1, have: [])
+        let decoded = Message.deserialize(msg.serialize())
+        if case .haveCIDsResult(let nonce, let h) = decoded {
+            #expect(nonce == 1)
+            #expect(h.isEmpty)
+        } else {
+            Issue.record("Expected haveCIDsResult")
+        }
+    }
+
+    @Test("Identify with signature roundtrip")
+    func testIdentifyWithSignature() {
+        let sig = Data(repeating: 0xAB, count: 64)
+        let msg = Message.identify(
+            publicKey: "pk_test",
+            observedHost: "1.2.3.4",
+            observedPort: 4001,
+            listenAddrs: [("0.0.0.0", 4001)],
+            signature: sig
+        )
+        let decoded = Message.deserialize(msg.serialize())
+        if case .identify(let pk, let host, let port, let addrs, let s) = decoded {
+            #expect(pk == "pk_test")
+            #expect(host == "1.2.3.4")
+            #expect(port == 4001)
+            #expect(addrs.count == 1)
+            #expect(s == sig)
+        } else {
+            Issue.record("Expected identify")
+        }
+    }
+
+    @Test("Identify with empty signature roundtrip")
+    func testIdentifyEmptySignature() {
+        let msg = Message.identify(publicKey: "pk", observedHost: "h", observedPort: 80, listenAddrs: [], signature: Data())
+        let decoded = Message.deserialize(msg.serialize())
+        if case .identify(_, _, _, _, let s) = decoded {
+            #expect(s.isEmpty)
+        } else {
+            Issue.record("Expected identify")
+        }
+    }
+
+    @Test("WantBlocks roundtrip")
+    func testWantBlocksRoundtrip() {
+        let cids = ["cid-1", "cid-2", "cid-3"]
+        let msg = Message.wantBlocks(cids: cids)
+        let decoded = Message.deserialize(msg.serialize())
+        if case .wantBlocks(let c) = decoded {
+            #expect(c == cids)
+        } else {
+            Issue.record("Expected wantBlocks")
         }
     }
 }

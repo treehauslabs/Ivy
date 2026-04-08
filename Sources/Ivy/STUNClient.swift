@@ -12,12 +12,6 @@ public struct ObservedAddress: Sendable, Equatable, Hashable {
     }
 }
 
-public enum NATStatus: Sendable, Equatable {
-    case unknown
-    case reachable
-    case unreachable
-}
-
 public actor STUNClient {
     private let group: EventLoopGroup
     private let servers: [(String, Int)]

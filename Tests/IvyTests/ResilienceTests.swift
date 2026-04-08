@@ -142,7 +142,7 @@ struct MessageValidationTests {
     @Test("Oversized string rejected")
     func testOversizedString() {
         var buf = Data()
-        buf.appendUInt8(2)
+        buf.appendUInt8(16) // dhtForward tag
         let longString = String(repeating: "x", count: Int(MessageLimits.maxStringLength) + 1)
         let bytes = Data(longString.utf8)
         buf.appendUInt16(UInt16(bytes.count))
@@ -170,15 +170,6 @@ struct MessageValidationTests {
         } else {
             Issue.record("Expected neighbors")
         }
-    }
-
-    @Test("HolepunchConnect addrs capped")
-    func testHolepunchAddrsCapped() {
-        var buf = Data()
-        buf.appendUInt8(14)
-        buf.appendUInt16(UInt16(MessageLimits.maxHolepunchAddrs) + 1)
-        let msg = Message.deserialize(buf)
-        #expect(msg == nil)
     }
 
     @Test("CompactBlock txCIDs capped")

@@ -205,4 +205,111 @@ struct VerifiedDistanceStoreTests {
         let result = await policy.isProtected("anything")
         #expect(!result)
     }
+
+    @Test("storedCIDsClosestTo returns CIDs sorted by distance")
+    func testStoredCIDsClosestTo() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "zone-node", maxEntries: 1000)
+
+        var storedCIDs: [String] = []
+        for i in 0..<20 {
+            let data = Data("zone-block-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            storedCIDs.append(cid.rawValue)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let targetHash = Router.hash("some-other-node")
+        let closest = await store.storedCIDsClosestTo(hash: targetHash, limit: 5)
+
+        #expect(closest.count == 5)
+
+        // Verify they're sorted by distance to targetHash
+        var prevDistance: [UInt8]? = nil
+        for cid in closest {
+            let cidHash = Router.hash(cid)
+            let dist = Router.xorDistance(targetHash, cidHash)
+            if let prev = prevDistance {
+                #expect(prev <= dist)
+            }
+            prevDistance = dist
+        }
+    }
+
+    @Test("storedCIDsClosestTo returns empty for empty store")
+    func testStoredCIDsClosestToEmpty() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "empty-node")
+        let result = await store.storedCIDsClosestTo(hash: Router.hash("target"), limit: 10)
+        #expect(result.isEmpty)
+    }
+
+    @Test("storedCIDsClosestTo respects limit")
+    func testStoredCIDsClosestToLimit() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "limit-node", maxEntries: 1000)
+
+        for i in 0..<10 {
+            let data = Data("limit-block-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let result = await store.storedCIDsClosestTo(hash: Router.hash("target"), limit: 3)
+        #expect(result.count == 3)
+    }
+
+    @Test("sampleStoredCIDs returns requested count")
+    func testSampleStoredCIDs() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "sample-node", maxEntries: 1000)
+
+        for i in 0..<20 {
+            let data = Data("sample-block-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let sample = await store.sampleStoredCIDs(count: 5)
+        #expect(sample.count == 5)
+
+        // All sampled CIDs should be unique
+        #expect(Set(sample).count == 5)
+    }
+
+    @Test("sampleStoredCIDs returns all when count exceeds stored")
+    func testSampleStoredCIDsExceedsStored() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "small-node", maxEntries: 1000)
+
+        for i in 0..<3 {
+            let data = Data("small-block-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let sample = await store.sampleStoredCIDs(count: 10)
+        #expect(sample.count == 3)
+    }
+
+    @Test("sampleStoredCIDs returns empty for empty store")
+    func testSampleStoredCIDsEmpty() async {
+        let store = VerifiedDistanceStore(inner: MemStore(), nodePublicKey: "empty-sample")
+        let sample = await store.sampleStoredCIDs(count: 5)
+        #expect(sample.isEmpty)
+    }
+
+    @Test("trackedCIDCount matches stored non-protected items")
+    func testTrackedCIDCount() async {
+        let mem = MemStore()
+        let store = VerifiedDistanceStore(inner: mem, nodePublicKey: "tracked-node", maxEntries: 1000)
+
+        for i in 0..<7 {
+            let data = Data("tracked-\(i)".utf8)
+            let cid = ContentIdentifier(for: data)
+            await store.storeLocal(cid: cid, data: data)
+        }
+
+        let count = await store.trackedCIDCount
+        #expect(count == 7)
+    }
 }

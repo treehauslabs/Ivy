@@ -3,34 +3,20 @@ import Foundation
 public enum Message: Sendable {
     case ping(nonce: UInt64)
     case pong(nonce: UInt64)
-    case wantBlock(cid: String)
     case block(cid: String, data: Data)
     case dontHave(cid: String)
     case findNode(target: Data)
     case neighbors([PeerEndpoint])
     case announceBlock(cid: String)
 
-    case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)])
-    case dialBack(nonce: UInt64, host: String, port: UInt16)
-    case dialBackResult(nonce: UInt64, success: Bool)
-    case relayConnect(srcKey: String, dstKey: String)
-    case relayStatus(code: UInt8)
-    case relayData(peerKey: String, data: Data)
-    case holepunchConnect(addrs: [(String, UInt16)], nonce: UInt64)
-    case holepunchSync(nonce: UInt64)
-    case dhtForward(cid: String, ttl: UInt8)
+    case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], signature: Data)
+    case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
 
-    case announce(destinationHash: Data, hops: UInt8, payload: Data)
-    case pathRequest(destinationHash: Data)
-    case pathResponse(destinationHash: Data, hops: UInt8, announcePayload: Data)
-    case transportPacket(data: Data)
-
-    case chainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data, announcePayload: Data)
+    case chainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data)
     case compactBlock(chainHash: Data, headerCID: String, txCIDs: [String])
     case getBlockTxns(chainHash: Data, headerCID: String, missingTxCIDs: [String])
     case blockTxns(chainHash: Data, headerCID: String, transactions: [(String, Data)])
 
-    case haveBlock(cid: String)
     case wantBlocks(cids: [String])
 
     case newTxHashes(chainHash: Data, txHashes: [String])
@@ -40,66 +26,80 @@ public enum Message: Sendable {
     case getBlockRange(chainHash: Data, startIndex: UInt64, count: UInt16)
     case blockRange(chainHash: Data, startIndex: UInt64, blocks: [(String, Data)])
 
-    case blockManifest(blockCID: String, referencedCIDs: [String])
-    case getCIDs(cids: [String])
-    case cidData(items: [(String, Data)])
-
     case miningChallenge(hashPrefix: Data, blockTargetDifficulty: Data, noncePrefix: Data)
     case miningChallengeSolution(nonce: UInt64, hash: Data, blockNonce: UInt64?)
 
     case pexRequest(nonce: UInt64)
     case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
 
+    case getZoneInventory(nodeHash: Data, limit: UInt16)
+    case zoneInventory(cids: [String])
+    case haveCIDs(nonce: UInt64, cids: [String])
+    case haveCIDsResult(nonce: UInt64, have: [String])
+
+    // Ivy economic layer
+    case findPins(cid: String, fee: UInt64)
+    case pins(announcements: [(publicKey: String, selector: String)])
+    case pinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
+    case pinStored(rootCID: String)
+    case feeExhausted(consumed: UInt64)
+    case directOffer(cid: String, host: String, port: UInt16, size: UInt64, timeout: UInt64)
+    case deliveryAck(requestId: UInt64)
+    case balanceCheck(sequence: UInt64, balance: Int64)
+    case balanceLog(fromSequence: UInt64, operations: [(sequence: UInt64, amount: Int64, requestId: UInt64)])
+    case peerMessage(topic: String, payload: Data)
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
-        case wantBlock = 2
+        // tag 2 removed (wantBlock → use dhtForward with ttl:0)
         case block = 3
         case dontHave = 4
         case findNode = 5
         case neighbors = 6
         case announceBlock = 7
         case identify = 8
-        case dialBack = 9
-        case dialBackResult = 10
-        case relayConnect = 11
-        case relayStatus = 12
-        case relayData = 13
-        case holepunchConnect = 14
-        case holepunchSync = 15
+        // tags 9-10 removed (dialBack, dialBackResult — AutoNAT removed)
+        case getZoneInventory = 11
+        case zoneInventory = 12
+        case haveCIDs = 13
+        case haveCIDsResult = 14
         case dhtForward = 16
-        case announce = 17
-        case pathRequest = 18
-        case pathResponse = 19
-        case transportPacket = 20
         case chainAnnounce = 21
         case compactBlock = 22
         case getBlockTxns = 23
         case blockTxns = 24
-        case haveBlock = 25
         case wantBlocks = 26
         case newTxHashes = 27
         case getTxns = 28
         case txns = 29
         case getBlockRange = 30
         case blockRange = 31
-        case blockManifest = 32
-        case getCIDs = 33
-        case cidData = 34
+        // tags 32-34 removed (blockManifest, getCIDs, cidData)
         case miningChallenge = 35
         case miningChallengeSolution = 36
         case pexRequest = 37
         case pexResponse = 38
+        // Ivy economic layer (tags 40-55)
+        case findPins = 40
+        case pins = 41
+        case pinAnnounce = 42
+        case pinStored = 43
+        case feeExhausted = 44
+        case directOffer = 45
+        case deliveryAck = 46
+        case balanceCheck = 47
+        case balanceLog = 48
+        case peerMessage = 49
     }
 
     public func estimatedSize() -> Int {
         switch self {
         case .ping, .pong: return 9
-        case .wantBlock(let cid): return 3 + cid.utf8.count
         case .block(let cid, let data): return 7 + cid.utf8.count + data.count
         case .dontHave(let cid): return 3 + cid.utf8.count
         case .announceBlock(let cid): return 3 + cid.utf8.count
-        case .dhtForward(let cid, _): return 4 + cid.utf8.count
+        case .dhtForward(let cid, _, _, _, _): return 4 + cid.utf8.count
         default: return 256
         }
     }
@@ -113,9 +113,6 @@ public enum Message: Sendable {
         case .pong(let nonce):
             buf.append(Tag.pong.rawValue)
             buf.appendUInt64(nonce)
-        case .wantBlock(let cid):
-            buf.append(Tag.wantBlock.rawValue)
-            buf.appendLengthPrefixedString(cid)
         case .block(let cid, let data):
             buf.append(Tag.block.rawValue)
             buf.appendLengthPrefixedString(cid)
@@ -137,7 +134,7 @@ public enum Message: Sendable {
         case .announceBlock(let cid):
             buf.append(Tag.announceBlock.rawValue)
             buf.appendLengthPrefixedString(cid)
-        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs):
+        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let signature):
             buf.append(Tag.identify.rawValue)
             buf.appendLengthPrefixedString(publicKey)
             buf.appendLengthPrefixedString(observedHost)
@@ -147,63 +144,21 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(host)
                 buf.appendUInt16(port)
             }
-        case .dialBack(let nonce, let host, let port):
-            buf.append(Tag.dialBack.rawValue)
-            buf.appendUInt64(nonce)
-            buf.appendLengthPrefixedString(host)
-            buf.appendUInt16(port)
-        case .dialBackResult(let nonce, let success):
-            buf.append(Tag.dialBackResult.rawValue)
-            buf.appendUInt64(nonce)
-            buf.appendUInt8(success ? 1 : 0)
-        case .relayConnect(let srcKey, let dstKey):
-            buf.append(Tag.relayConnect.rawValue)
-            buf.appendLengthPrefixedString(srcKey)
-            buf.appendLengthPrefixedString(dstKey)
-        case .relayStatus(let code):
-            buf.append(Tag.relayStatus.rawValue)
-            buf.appendUInt8(code)
-        case .relayData(let peerKey, let data):
-            buf.append(Tag.relayData.rawValue)
-            buf.appendLengthPrefixedString(peerKey)
-            buf.appendLengthPrefixedData(data)
-        case .holepunchConnect(let addrs, let nonce):
-            buf.append(Tag.holepunchConnect.rawValue)
-            buf.appendUInt16(UInt16(addrs.count))
-            for (host, port) in addrs {
-                buf.appendLengthPrefixedString(host)
-                buf.appendUInt16(port)
-            }
-            buf.appendUInt64(nonce)
-        case .holepunchSync(let nonce):
-            buf.append(Tag.holepunchSync.rawValue)
-            buf.appendUInt64(nonce)
-        case .dhtForward(let cid, let ttl):
+            buf.appendLengthPrefixedData(signature)
+        case .dhtForward(let cid, let ttl, let fee, let target, let selector):
             buf.append(Tag.dhtForward.rawValue)
             buf.appendLengthPrefixedString(cid)
             buf.appendUInt8(ttl)
-        case .announce(let destinationHash, let hops, let payload):
-            buf.append(Tag.announce.rawValue)
-            buf.appendLengthPrefixedData(destinationHash)
-            buf.appendUInt8(hops)
-            buf.appendLengthPrefixedData(payload)
-        case .pathRequest(let destinationHash):
-            buf.append(Tag.pathRequest.rawValue)
-            buf.appendLengthPrefixedData(destinationHash)
-        case .pathResponse(let destinationHash, let hops, let announcePayload):
-            buf.append(Tag.pathResponse.rawValue)
-            buf.appendLengthPrefixedData(destinationHash)
-            buf.appendUInt8(hops)
-            buf.appendLengthPrefixedData(announcePayload)
-        case .transportPacket(let data):
-            buf.append(Tag.transportPacket.rawValue)
-            buf.appendLengthPrefixedData(data)
-        case .chainAnnounce(let destinationHash, let hops, let chainData, let announcePayload):
+            buf.appendUInt64(fee)
+            buf.appendUInt8(target != nil ? 1 : 0)
+            if let target { buf.appendLengthPrefixedData(target) }
+            buf.appendUInt8(selector != nil ? 1 : 0)
+            if let selector { buf.appendLengthPrefixedString(selector) }
+        case .chainAnnounce(let destinationHash, let hops, let chainData):
             buf.append(Tag.chainAnnounce.rawValue)
             buf.appendLengthPrefixedData(destinationHash)
             buf.appendUInt8(hops)
             buf.appendLengthPrefixedData(chainData)
-            buf.appendLengthPrefixedData(announcePayload)
         case .compactBlock(let chainHash, let headerCID, let txCIDs):
             buf.append(Tag.compactBlock.rawValue)
             buf.appendLengthPrefixedData(chainHash)
@@ -229,9 +184,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(cid)
                 buf.appendLengthPrefixedData(data)
             }
-        case .haveBlock(let cid):
-            buf.append(Tag.haveBlock.rawValue)
-            buf.appendLengthPrefixedString(cid)
         case .wantBlocks(let cids):
             buf.append(Tag.wantBlocks.rawValue)
             buf.appendUInt16(UInt16(cids.count))
@@ -270,22 +222,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(cid)
                 buf.appendLengthPrefixedData(data)
             }
-        case .blockManifest(let blockCID, let referencedCIDs):
-            buf.append(Tag.blockManifest.rawValue)
-            buf.appendLengthPrefixedString(blockCID)
-            buf.appendUInt16(UInt16(referencedCIDs.count))
-            for cid in referencedCIDs { buf.appendLengthPrefixedString(cid) }
-        case .getCIDs(let cids):
-            buf.append(Tag.getCIDs.rawValue)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids { buf.appendLengthPrefixedString(cid) }
-        case .cidData(let items):
-            buf.append(Tag.cidData.rawValue)
-            buf.appendUInt16(UInt16(items.count))
-            for (cid, data) in items {
-                buf.appendLengthPrefixedString(cid)
-                buf.appendLengthPrefixedData(data)
-            }
         case .miningChallenge(let hashPrefix, let blockTarget, let noncePrefix):
             buf.append(Tag.miningChallenge.rawValue)
             buf.appendLengthPrefixedData(hashPrefix)
@@ -309,6 +245,76 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(peer.host)
                 buf.appendUInt16(peer.port)
             }
+        case .getZoneInventory(let nodeHash, let limit):
+            buf.append(Tag.getZoneInventory.rawValue)
+            buf.appendLengthPrefixedData(nodeHash)
+            buf.appendUInt16(limit)
+        case .zoneInventory(let cids):
+            buf.append(Tag.zoneInventory.rawValue)
+            buf.appendUInt16(UInt16(cids.count))
+            for cid in cids { buf.appendLengthPrefixedString(cid) }
+        case .haveCIDs(let nonce, let cids):
+            buf.append(Tag.haveCIDs.rawValue)
+            buf.appendUInt64(nonce)
+            buf.appendUInt16(UInt16(cids.count))
+            for cid in cids { buf.appendLengthPrefixedString(cid) }
+        case .haveCIDsResult(let nonce, let have):
+            buf.append(Tag.haveCIDsResult.rawValue)
+            buf.appendUInt64(nonce)
+            buf.appendUInt16(UInt16(have.count))
+            for cid in have { buf.appendLengthPrefixedString(cid) }
+        case .findPins(let cid, let fee):
+            buf.append(Tag.findPins.rawValue)
+            buf.appendLengthPrefixedString(cid)
+            buf.appendUInt64(fee)
+        case .pins(let announcements):
+            buf.append(Tag.pins.rawValue)
+            buf.appendUInt16(UInt16(announcements.count))
+            for a in announcements {
+                buf.appendLengthPrefixedString(a.publicKey)
+                buf.appendLengthPrefixedString(a.selector)
+            }
+        case .pinAnnounce(let rootCID, let selector, let publicKey, let expiry, let signature, let fee):
+            buf.append(Tag.pinAnnounce.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+            buf.appendLengthPrefixedString(selector)
+            buf.appendLengthPrefixedString(publicKey)
+            buf.appendUInt64(expiry)
+            buf.appendLengthPrefixedData(signature)
+            buf.appendUInt64(fee)
+        case .pinStored(let rootCID):
+            buf.append(Tag.pinStored.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+        case .feeExhausted(let consumed):
+            buf.append(Tag.feeExhausted.rawValue)
+            buf.appendUInt64(consumed)
+        case .directOffer(let cid, let host, let port, let size, let timeout):
+            buf.append(Tag.directOffer.rawValue)
+            buf.appendLengthPrefixedString(cid)
+            buf.appendLengthPrefixedString(host)
+            buf.appendUInt16(port)
+            buf.appendUInt64(size)
+            buf.appendUInt64(timeout)
+        case .deliveryAck(let requestId):
+            buf.append(Tag.deliveryAck.rawValue)
+            buf.appendUInt64(requestId)
+        case .balanceCheck(let sequence, let balance):
+            buf.append(Tag.balanceCheck.rawValue)
+            buf.appendUInt64(sequence)
+            buf.appendUInt64(UInt64(bitPattern: balance))
+        case .balanceLog(let fromSequence, let operations):
+            buf.append(Tag.balanceLog.rawValue)
+            buf.appendUInt64(fromSequence)
+            buf.appendUInt16(UInt16(operations.count))
+            for op in operations {
+                buf.appendUInt64(op.sequence)
+                buf.appendUInt64(UInt64(bitPattern: op.amount))
+                buf.appendUInt64(op.requestId)
+            }
+        case .peerMessage(let topic, let payload):
+            buf.append(Tag.peerMessage.rawValue)
+            buf.appendLengthPrefixedString(topic)
+            buf.appendLengthPrefixedData(payload)
         }
         return buf
     }
@@ -324,9 +330,6 @@ public enum Message: Sendable {
         case .pong:
             guard let nonce = reader.readUInt64() else { return nil }
             return .pong(nonce: nonce)
-        case .wantBlock:
-            guard let cid = reader.readString() else { return nil }
-            return .wantBlock(cid: cid)
         case .block:
             guard let cid = reader.readString(),
                   let payload = reader.readData() else { return nil }
@@ -362,66 +365,22 @@ public enum Message: Sendable {
                       let port = reader.readUInt16() else { return nil }
                 addrs.append((host, port))
             }
-            return .identify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: addrs)
-        case .dialBack:
-            guard let nonce = reader.readUInt64(),
-                  let host = reader.readString(),
-                  let port = reader.readUInt16() else { return nil }
-            return .dialBack(nonce: nonce, host: host, port: port)
-        case .dialBackResult:
-            guard let nonce = reader.readUInt64(),
-                  let flag = reader.readUInt8() else { return nil }
-            return .dialBackResult(nonce: nonce, success: flag != 0)
-        case .relayConnect:
-            guard let srcKey = reader.readString(),
-                  let dstKey = reader.readString() else { return nil }
-            return .relayConnect(srcKey: srcKey, dstKey: dstKey)
-        case .relayStatus:
-            guard let code = reader.readUInt8() else { return nil }
-            return .relayStatus(code: code)
-        case .relayData:
-            guard let peerKey = reader.readString(),
-                  let data = reader.readData() else { return nil }
-            return .relayData(peerKey: peerKey, data: data)
-        case .holepunchConnect:
-            guard let count = reader.readUInt16(), count <= MessageLimits.maxHolepunchAddrs else { return nil }
-            var addrs = [(String, UInt16)]()
-            for _ in 0..<count {
-                guard let host = reader.readString(),
-                      let port = reader.readUInt16() else { return nil }
-                addrs.append((host, port))
-            }
-            guard let nonce = reader.readUInt64() else { return nil }
-            return .holepunchConnect(addrs: addrs, nonce: nonce)
-        case .holepunchSync:
-            guard let nonce = reader.readUInt64() else { return nil }
-            return .holepunchSync(nonce: nonce)
+            guard let signature = reader.readData() else { return nil }
+            return .identify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: addrs, signature: signature)
         case .dhtForward:
             guard let cid = reader.readString(),
                   let ttl = reader.readUInt8() else { return nil }
-            return .dhtForward(cid: cid, ttl: ttl)
-        case .announce:
-            guard let destHash = reader.readData(),
-                  let hops = reader.readUInt8(),
-                  let payload = reader.readData() else { return nil }
-            return .announce(destinationHash: destHash, hops: hops, payload: payload)
-        case .pathRequest:
-            guard let destHash = reader.readData() else { return nil }
-            return .pathRequest(destinationHash: destHash)
-        case .pathResponse:
-            guard let destHash = reader.readData(),
-                  let hops = reader.readUInt8(),
-                  let announcePayload = reader.readData() else { return nil }
-            return .pathResponse(destinationHash: destHash, hops: hops, announcePayload: announcePayload)
-        case .transportPacket:
-            guard let data = reader.readData() else { return nil }
-            return .transportPacket(data: data)
+            let fee = reader.readUInt64() ?? 0
+            var target: Data? = nil
+            if let hasTarget = reader.readUInt8(), hasTarget == 1 { target = reader.readData() }
+            var selector: String? = nil
+            if let hasSel = reader.readUInt8(), hasSel == 1 { selector = reader.readString() }
+            return .dhtForward(cid: cid, ttl: ttl, fee: fee, target: target, selector: selector)
         case .chainAnnounce:
             guard let destHash = reader.readData(),
                   let hops = reader.readUInt8(),
-                  let chainData = reader.readData(),
-                  let announcePayload = reader.readData() else { return nil }
-            return .chainAnnounce(destinationHash: destHash, hops: hops, chainData: chainData, announcePayload: announcePayload)
+                  let chainData = reader.readData() else { return nil }
+            return .chainAnnounce(destinationHash: destHash, hops: hops, chainData: chainData)
         case .compactBlock:
             guard let chainHash = reader.readData(),
                   let headerCID = reader.readString(),
@@ -456,9 +415,6 @@ public enum Message: Sendable {
                 txns.append((cid, data))
             }
             return .blockTxns(chainHash: chainHash, headerCID: headerCID, transactions: txns)
-        case .haveBlock:
-            guard let cid = reader.readString() else { return nil }
-            return .haveBlock(cid: cid)
         case .wantBlocks:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
             var cids = [String]()
@@ -514,34 +470,6 @@ public enum Message: Sendable {
                 blocks.append((cid, data))
             }
             return .blockRange(chainHash: chainHash, startIndex: startIndex, blocks: blocks)
-        case .blockManifest:
-            guard let blockCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .blockManifest(blockCID: blockCID, referencedCIDs: cids)
-        case .getCIDs:
-            guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .getCIDs(cids: cids)
-        case .cidData:
-            guard let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
-            var items = [(String, Data)]()
-            items.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString(), let data = reader.readData() else { return nil }
-                items.append((cid, data))
-            }
-            return .cidData(items: items)
         case .miningChallenge:
             guard let hashPrefix = reader.readData(),
                   let blockTarget = reader.readData(),
@@ -568,6 +496,94 @@ public enum Message: Sendable {
                 peers.append(PeerEndpoint(publicKey: key, host: host, port: port))
             }
             return .pexResponse(nonce: nonce, peers: peers)
+        case .getZoneInventory:
+            guard let nodeHash = reader.readData(),
+                  let limit = reader.readUInt16() else { return nil }
+            return .getZoneInventory(nodeHash: nodeHash, limit: limit)
+        case .zoneInventory:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .zoneInventory(cids: cids)
+        case .haveCIDs:
+            guard let nonce = reader.readUInt64(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .haveCIDs(nonce: nonce, cids: cids)
+        case .haveCIDsResult:
+            guard let nonce = reader.readUInt64(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var have = [String]()
+            have.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                have.append(cid)
+            }
+            return .haveCIDsResult(nonce: nonce, have: have)
+        case .findPins:
+            guard let cid = reader.readString(),
+                  let fee = reader.readUInt64() else { return nil }
+            return .findPins(cid: cid, fee: fee)
+        case .pins:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
+            var announcements = [(publicKey: String, selector: String)]()
+            for _ in 0..<count {
+                guard let pk = reader.readString(), let sel = reader.readString() else { return nil }
+                announcements.append((publicKey: pk, selector: sel))
+            }
+            return .pins(announcements: announcements)
+        case .pinAnnounce:
+            guard let rootCID = reader.readString(),
+                  let selector = reader.readString(),
+                  let publicKey = reader.readString(),
+                  let expiry = reader.readUInt64(),
+                  let signature = reader.readData(),
+                  let fee = reader.readUInt64() else { return nil }
+            return .pinAnnounce(rootCID: rootCID, selector: selector, publicKey: publicKey, expiry: expiry, signature: signature, fee: fee)
+        case .pinStored:
+            guard let rootCID = reader.readString() else { return nil }
+            return .pinStored(rootCID: rootCID)
+        case .feeExhausted:
+            guard let consumed = reader.readUInt64() else { return nil }
+            return .feeExhausted(consumed: consumed)
+        case .directOffer:
+            guard let cid = reader.readString(),
+                  let host = reader.readString(),
+                  let port = reader.readUInt16(),
+                  let size = reader.readUInt64(),
+                  let timeout = reader.readUInt64() else { return nil }
+            return .directOffer(cid: cid, host: host, port: port, size: size, timeout: timeout)
+        case .deliveryAck:
+            guard let requestId = reader.readUInt64() else { return nil }
+            return .deliveryAck(requestId: requestId)
+        case .balanceCheck:
+            guard let sequence = reader.readUInt64(),
+                  let rawBalance = reader.readUInt64() else { return nil }
+            return .balanceCheck(sequence: sequence, balance: Int64(bitPattern: rawBalance))
+        case .balanceLog:
+            guard let fromSequence = reader.readUInt64(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var ops = [(sequence: UInt64, amount: Int64, requestId: UInt64)]()
+            for _ in 0..<count {
+                guard let seq = reader.readUInt64(),
+                      let rawAmt = reader.readUInt64(),
+                      let rid = reader.readUInt64() else { return nil }
+                ops.append((sequence: seq, amount: Int64(bitPattern: rawAmt), requestId: rid))
+            }
+            return .balanceLog(fromSequence: fromSequence, operations: ops)
+        case .peerMessage:
+            guard let topic = reader.readString(),
+                  let payload = reader.readData() else { return nil }
+            return .peerMessage(topic: topic, payload: payload)
         }
     }
 

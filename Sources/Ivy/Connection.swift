@@ -50,13 +50,6 @@ public final class PeerConnection: @unchecked Sendable {
         try await channel.writeAndFlush(buf).get()
     }
 
-    public func sendPreSerialized(_ payload: Data) async throws {
-        var buf = channel.allocator.buffer(capacity: 4 + payload.count)
-        buf.writeInteger(UInt32(payload.count), endianness: .big)
-        buf.writeBytes(payload)
-        try await channel.writeAndFlush(buf).get()
-    }
-
     public func fireAndForget(_ payload: Data) {
         var buf = channel.allocator.buffer(capacity: 4 + payload.count)
         buf.writeInteger(UInt32(payload.count), endianness: .big)

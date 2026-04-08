@@ -130,6 +130,22 @@ public struct Router: Sendable {
         Array(SHA256.hash(data: Data(key.utf8)))
     }
 
+    static let truncatedHashLength = 16
+
+    public static func hash(_ data: Data) -> [UInt8] {
+        Array(SHA256.hash(data: data))
+    }
+
+    public static func truncatedHash(_ data: Data) -> Data {
+        Data(hash(data).prefix(truncatedHashLength))
+    }
+
+    public static func destinationHash(name: String, identityHash: Data) -> Data {
+        let nameHash = Data(hash(Data(name.utf8)).prefix(10))
+        let material = nameHash + identityHash
+        return truncatedHash(material)
+    }
+
     public static func commonPrefixLength(_ a: [UInt8], _ b: [UInt8]) -> Int {
         var cpl = 0
         for (x, y) in zip(a, b) {
