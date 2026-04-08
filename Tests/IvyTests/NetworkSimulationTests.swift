@@ -465,12 +465,19 @@ struct EndToEndProtocolTests {
         #expect(bcLine != nil)
         #expect(cbLine != nil)
 
-        // If the full chain worked, C earned from serving (balance with B > 0)
-        // and B earned from relaying (balance with A > 0)
-        // The definitive test: did SOME economic activity happen?
-        // If either B earned from A or C earned from B, the chain worked.
-        let economicActivity = bBalanceWithA != 0 || cBalanceWithB != 0
-        #expect(economicActivity, "Expected fee-based forwarding to produce balance changes")
+        // Exact fee verification:
+        // A sent fee: 20 to B. B's relay fee is 1. B forwards fee: 19 to C.
+        // C serves from cache, earns 19 from B.
+        // B relays response to A, earns 1 from A (relay fee).
+        //
+        // Expected balances:
+        // B's view of A: A owes B 1 (B earned relay fee) → balance = 1
+        // C's view of B: B owes C 19 (C earned content payment) → balance = 19
+        #expect(bBalanceWithA == 1, "B should earn relay fee of 1 from A, got \(bBalanceWithA)")
+        #expect(cBalanceWithB == 19, "C should earn content payment of 19 from B, got \(cBalanceWithB)")
+
+        // Verify the total adds up: A pays 20, B keeps 1, C gets 19
+        #expect(bBalanceWithA + cBalanceWithB == 20, "Total fees should equal A's bid")
     }
 
     @Test("Routing table allows B to reach C for forwarding")
