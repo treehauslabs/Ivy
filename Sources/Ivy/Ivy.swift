@@ -181,6 +181,16 @@ public actor Ivy {
         fireToPeer(peer, .peerMessage(topic: topic, payload: payload))
     }
 
+    /// Submit a mining solution to a creditor as settlement proof.
+    public func submitSettlement(to peer: PeerID, nonce: UInt64, hash: Data, blockNonce: UInt64? = nil) {
+        fireToPeer(peer, .miningChallengeSolution(nonce: nonce, hash: hash, blockNonce: blockNonce))
+    }
+
+    /// Submit on-chain settlement proof to a creditor.
+    public func submitSettlementProof(to peer: PeerID, txHash: String, amount: UInt64, chainId: String) {
+        fireToPeer(peer, .settlementProof(txHash: txHash, amount: amount, chainId: chainId))
+    }
+
     /// Send a peer message to all connected peers.
     public func broadcastMessage(topic: String, payload: Data) {
         let msg = Message.peerMessage(topic: topic, payload: payload)
