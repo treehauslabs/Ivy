@@ -56,7 +56,7 @@ public actor Ivy {
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
         self.group = group
         self.stunClient = STUNClient(group: group, servers: config.stunServers)
-        self.ledger = CreditLineLedger(localID: PeerID(publicKey: config.publicKey))
+        self.ledger = CreditLineLedger(localID: PeerID(publicKey: config.publicKey), baseThresholdMultiplier: config.baseThresholdMultiplier)
     }
 
     public func worker() -> NetworkCASWorker {
@@ -698,8 +698,7 @@ public actor Ivy {
 
     // MARK: - Fee-Aware Forwarding
 
-    /// Relay fee taken by this node per forwarded request (configurable)
-    private var relayFee: UInt64 { 1 }
+    private var relayFee: UInt64 { config.relayFee }
 
     /// Tracks pending fee-forwarded requests: requestKey → (upstream peer, fee claimed)
     private var pendingFeeForwards: [String: (upstream: PeerID, feeClaimed: UInt64)] = [:]
@@ -1204,6 +1203,101 @@ public actor Ivy {
 
     public func storedPinAnnouncements(for cid: String) -> [(publicKey: String, selector: String)] {
         (pinAnnouncements[cid] ?? []).map { (publicKey: $0.publicKey, selector: $0.selector) }
+    }
+
+    // MARK: - Public API (Application-Facing)
+
+    /// Retrieve content by CID. Checks local cache, then DHT with fee.
+    public func get(cid: String, fee: UInt64? = nil) async -> Data? {
+        let requestFee = fee ?? config.defaultRequestFee
+
+        // Local cache first
+        if let cached = blockCache[cid] { return cached }
+        if let data = await getLocalBlock(cid: cid) { return data }
+
+        // Fee-based DHT forward toward the CID hash
+        let cidHash = Router.hash(cid)
+        let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
+        var sent = 0
+        for entry in closest {
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
+            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL, fee: requestFee, target: nil, selector: nil))
+            sent += 1
+        }
+        if sent == 0 { return nil }
+
+        return await withCheckedContinuation { continuation in
+            pendingRequests[cid, default: []].append(continuation)
+            Task {
+                try? await Task.sleep(for: config.requestTimeout)
+                self.resolvePending(cid: cid, data: nil)
+            }
+        }
+    }
+
+    /// Retrieve content by CID targeting a specific pinner (from findPins result).
+    public func get(cid: String, target: PeerID, fee: UInt64? = nil) async -> Data? {
+        let requestFee = fee ?? config.defaultRequestFee
+
+        if let cached = blockCache[cid] { return cached }
+
+        let targetHash = Data(Router.hash(target.publicKey))
+        let closest = router.closestPeers(to: Array(targetHash), count: config.maxConcurrentRequests)
+        var sent = 0
+        for entry in closest {
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
+            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0, fee: requestFee, target: targetHash, selector: nil))
+            sent += 1
+            break
+        }
+        if sent == 0 { return nil }
+
+        return await withCheckedContinuation { continuation in
+            pendingRequests[cid, default: []].append(continuation)
+            Task {
+                try? await Task.sleep(for: config.requestTimeout)
+                self.resolvePending(cid: cid, data: nil)
+            }
+        }
+    }
+
+    /// Store content locally and announce to the DHT.
+    public func save(cid: String, data: Data, pin: Bool = true) async {
+        await publishBlock(cid: cid, data: data)
+        if pin {
+            let expiry = UInt64(Date().timeIntervalSince1970) + 86400
+            publishPinAnnounce(rootCID: cid, selector: "/", expiry: expiry, signature: Data(), fee: config.relayFee * 5)
+        }
+    }
+
+    /// Discover pinners for a CID via fee-based findPins.
+    public func discoverPinners(cid: String, fee: UInt64? = nil) async -> [(publicKey: String, selector: String)] {
+        let requestFee = fee ?? (config.defaultRequestFee / 2)
+        let cidHash = Router.hash(cid)
+        let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
+        for entry in closest {
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
+            fireToPeer(entry.id, .findPins(cid: cid, fee: requestFee))
+        }
+        // Return local knowledge; remote results arrive asynchronously via delegate
+        return storedPinAnnouncements(for: cid)
+    }
+
+    /// Generate a Curve25519 key pair with target difficulty.
+    public static func generateKey(targetDifficulty: Int, maxAttempts: Int = 100_000_000) -> (publicKey: String, privateKey: Data)? {
+        for _ in 0..<maxAttempts {
+            let privateKey = Crypto.Curve25519.Signing.PrivateKey()
+            let publicKeyBytes = privateKey.publicKey.rawRepresentation
+            let hex = publicKeyBytes.map { String(format: "%02x", $0) }.joined()
+            let difficulty = KeyDifficulty.trailingZeroBits(of: hex)
+            if difficulty >= targetDifficulty {
+                return (publicKey: hex, privateKey: privateKey.rawRepresentation)
+            }
+        }
+        return nil
     }
 
     // MARK: - Balance Reconciliation

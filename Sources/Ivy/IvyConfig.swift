@@ -26,6 +26,9 @@ public struct IvyConfig: Sendable {
     public let maxChainAnnounceHops: UInt8
     public let signingKey: Data
     public let logger: any IvyLogger
+    public let relayFee: UInt64
+    public let baseThresholdMultiplier: UInt64
+    public let defaultRequestFee: UInt64
 
     public init(
         publicKey: String,
@@ -51,7 +54,10 @@ public struct IvyConfig: Sendable {
         zoneSyncInterval: Duration = .seconds(1800),
         maxChainAnnounceHops: UInt8 = 10,
         signingKey: Data = Data(),
-        logger: any IvyLogger = NullLogger()
+        logger: any IvyLogger = NullLogger(),
+        relayFee: UInt64 = 1,
+        baseThresholdMultiplier: UInt64 = 100,
+        defaultRequestFee: UInt64 = 20
     ) {
         self.publicKey = publicKey
         self.listenPort = listenPort
@@ -77,5 +83,8 @@ public struct IvyConfig: Sendable {
         self.maxChainAnnounceHops = maxChainAnnounceHops
         self.signingKey = signingKey
         self.logger = logger
+        self.relayFee = relayFee
+        self.baseThresholdMultiplier = baseThresholdMultiplier
+        self.defaultRequestFee = defaultRequestFee
     }
 }
