@@ -183,17 +183,6 @@ Periodic announcements (every 5 minutes) carry the node's public key, name hash,
 
 ---
 
-## Chain-Aware Networking
-
-Ivy has first-class support for blockchain networks through `ChainDestination`:
-
-- **Chain subscriptions** with tip tracking — subscribed chain tips are cached and never evicted
-- **Pinning** — miners keep their own blocks permanently in the verified distance store
-- **Chain announce data** carries `tipIndex`, `tipCID`, `specCID`, and capability flags
-- **Verified distance store** — content-addressed storage that prioritizes blocks close to the node's keyspace position, with pinning for high-value content
-
----
-
 ## Reputation System
 
 Every interaction is metered by [Tally](https://github.com/treehauslabs/Tally). Reputation is local to each node — there is no global authority to compromise.

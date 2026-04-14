@@ -23,12 +23,13 @@ public struct IvyConfig: Sendable {
     public let replicationSampleSize: Int
     public let zoneSyncLimit: UInt16
     public let zoneSyncInterval: Duration
-    public let maxChainAnnounceHops: UInt8
     public let signingKey: Data
     public let logger: any IvyLogger
     public let relayFee: UInt64
     public let baseThresholdMultiplier: UInt64
     public let defaultRequestFee: UInt64
+    public let highBandwidthPeers: Int
+    public let sendBytesPerSecond: Int
 
     public init(
         publicKey: String,
@@ -52,12 +53,13 @@ public struct IvyConfig: Sendable {
         replicationSampleSize: Int = 32,
         zoneSyncLimit: UInt16 = 256,
         zoneSyncInterval: Duration = .seconds(1800),
-        maxChainAnnounceHops: UInt8 = 10,
         signingKey: Data = Data(),
         logger: any IvyLogger = NullLogger(),
         relayFee: UInt64 = 1,
         baseThresholdMultiplier: UInt64 = 100,
-        defaultRequestFee: UInt64 = 20
+        defaultRequestFee: UInt64 = 20,
+        highBandwidthPeers: Int = 3,
+        sendBytesPerSecond: Int = 1_048_576
     ) {
         self.publicKey = publicKey
         self.listenPort = listenPort
@@ -80,11 +82,12 @@ public struct IvyConfig: Sendable {
         self.replicationSampleSize = replicationSampleSize
         self.zoneSyncLimit = zoneSyncLimit
         self.zoneSyncInterval = zoneSyncInterval
-        self.maxChainAnnounceHops = maxChainAnnounceHops
         self.signingKey = signingKey
         self.logger = logger
         self.relayFee = relayFee
         self.baseThresholdMultiplier = baseThresholdMultiplier
         self.defaultRequestFee = defaultRequestFee
+        self.highBandwidthPeers = highBandwidthPeers
+        self.sendBytesPerSecond = sendBytesPerSecond
     }
 }

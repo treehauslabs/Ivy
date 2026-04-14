@@ -36,7 +36,6 @@ public actor Ivy {
     private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
     private var healthMonitor: PeerHealthMonitor?
     private var haveSet = InventorySet()
-    private var chainAnnounceDedup = InventorySet()
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
     private var _casBridge: CASBridge?
     private var _serviceBus: LocalServiceBus?
@@ -49,6 +48,14 @@ public actor Ivy {
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, selector: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
     private var blockCache: BoundedDictionary<String, Data> = BoundedDictionary(capacity: 10_000)
 
+    // Volume tracking: child CID → root CID, root CID → provider peer(s)
+    private var volumeMembership: BoundedDictionary<String, String> = BoundedDictionary(capacity: 50_000)
+    private var volumeProviders: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
+    private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
+
+    // Per-peer bandwidth budgeting
+    private let sendBudget: SendBudget
+
     public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
         self.localID = PeerID(publicKey: config.publicKey)
@@ -57,6 +64,7 @@ public actor Ivy {
         self.group = group
         self.stunClient = STUNClient(group: group, servers: config.stunServers)
         self.ledger = CreditLineLedger(localID: PeerID(publicKey: config.publicKey), baseThresholdMultiplier: config.baseThresholdMultiplier)
+        self.sendBudget = SendBudget(baseBytesPerSecond: config.sendBytesPerSecond)
     }
 
     public func worker() -> NetworkCASWorker {
@@ -135,6 +143,8 @@ public actor Ivy {
         }
         connections.removeAll()
         pendingForwards.removeAll()
+        pendingFeeForwards.removeAll()
+        pendingDirectConnects.removeAll()
     }
 
     // MARK: - Connection Management
@@ -171,6 +181,7 @@ public actor Ivy {
         if let monitor = healthMonitor {
             Task { await monitor.removePeer(peer) }
         }
+        Task { await sendBudget.removePeer(peer) }
         delegate?.ivy(self, didDisconnect: peer)
     }
 
@@ -202,16 +213,22 @@ public actor Ivy {
         }
     }
 
-    func sendToPeer(_ peer: PeerID, _ message: Message) async throws {
-        if let conn = connections[peer] {
-            try await conn.send(message)
-        }
-    }
-
-    func fireToPeer(_ peer: PeerID, _ message: Message) {
+    func fireToPeer(_ peer: PeerID, _ message: Message, earnsFee: Bool = false) {
         if let local = localPeers[peer] {
             local.send(message)
-        } else if let conn = connections[peer] {
+            return
+        }
+        guard let conn = connections[peer] else { return }
+        // Keepalive and fee-earning messages bypass budget
+        if message.isKeepalive || earnsFee {
+            conn.fireAndForgetMessage(message)
+            return
+        }
+        let size = message.estimatedSize()
+        let rep = tally.reputation(for: peer)
+        Task {
+            let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
+            guard await sendBudget.shouldSend(to: peer, bytes: size, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
             conn.fireAndForgetMessage(message)
         }
     }
@@ -219,8 +236,25 @@ public actor Ivy {
     func firePayloadToPeer(_ peer: PeerID, _ payload: Data) {
         if let local = localPeers[peer] {
             if let msg = Message.deserialize(payload) { local.send(msg) }
-        } else if let conn = connections[peer] {
-            conn.fireAndForget(payload)
+            return
+        }
+        guard let conn = connections[peer] else { return }
+        // Pre-serialized payloads are typically block responses (consensus) — always send
+        conn.fireAndForget(payload)
+    }
+
+    /// Broadcast a pre-serialized payload to all connected network peers except `excluding`.
+    /// Respects Tally allowance and reputation-weighted send budget.
+    private func broadcastPayload(_ payload: Data, excluding: PeerID? = nil) {
+        for (peer, conn) in connections {
+            if let excluded = excluding, peer == excluded { continue }
+            guard tally.shouldAllow(peer: peer) else { continue }
+            let rep = tally.reputation(for: peer)
+            Task {
+                let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
+                guard await sendBudget.shouldSend(to: peer, bytes: payload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
+                conn.fireAndForget(payload)
+            }
         }
     }
 
@@ -306,41 +340,22 @@ public actor Ivy {
         blockCache[cid] = data
         haveSet.insert(cid)
         let payload = Message.announceBlock(cid: cid).serialize()
-        for (peer, conn) in connections {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(payload)
-        }
+        broadcastPayload(payload)
         for (_, local) in localPeers {
             local.send(.announceBlock(cid: cid))
         }
     }
 
     public func publishBlock(cid: String, data: Data, referencedContent: [(String, Data)]) async {
-        if let w = _worker, let near = await w.near {
-            await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
-            for (refCID, refData) in referencedContent {
-                await near.storeLocal(cid: ContentIdentifier(rawValue: refCID), data: refData)
-            }
-        }
-        haveSet.insert(cid)
-        for (refCID, _) in referencedContent { haveSet.insert(refCID) }
-        let payload = Message.announceBlock(cid: cid).serialize()
-        for (peer, conn) in connections {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(payload)
-        }
-        for (_, local) in localPeers {
-            local.send(.announceBlock(cid: cid))
-        }
+        // Store referenced content as a volume — the block CID is the natural root
+        let allItems = [(cid, data)] + referencedContent
+        await publishVolume(rootCID: cid, items: allItems.map { (cid: $0.0, data: $0.1) })
     }
 
     public func announceBlock(cid: String) {
-        let payload = Message.announceBlock(cid: cid).serialize()
         haveSet.insert(cid)
-        for (peer, conn) in connections {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(payload)
-        }
+        let payload = Message.announceBlock(cid: cid).serialize()
+        broadcastPayload(payload)
     }
 
     // MARK: - DHT
@@ -520,6 +535,11 @@ public actor Ivy {
             resolvePending(cid: cid, data: data)
             resolveForwards(cid: cid, data: data, from: peer)
 
+            // Volume provider memory: if this CID belongs to a volume, remember the provider
+            if let rootCID = volumeMembership[cid] {
+                recordVolumeProvider(rootCID: rootCID, peer: peer)
+            }
+
             if let w = _worker {
                 let cidObj = ContentIdentifier(rawValue: cid)
                 Task {
@@ -563,10 +583,7 @@ public actor Ivy {
                 haveSet.insert(cid)
                 fireToPeer(peer, .dhtForward(cid: cid, ttl: 0))
                 let payload = Message.announceBlock(cid: cid).serialize()
-                for (otherPeer, conn) in connections where otherPeer != peer {
-                    guard tally.shouldAllow(peer: otherPeer) else { continue }
-                    conn.fireAndForget(payload)
-                }
+                broadcastPayload(payload, excluding: peer)
             }
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
 
@@ -579,9 +596,6 @@ public actor Ivy {
             } else {
                 await handleDHTForward(cid: cid, ttl: ttl, from: peer)
             }
-
-        case .chainAnnounce(let destinationHash, let hops, let chainData):
-            await handleChainAnnounce(destinationHash: destinationHash, hops: hops, chainData: chainData, from: peer)
 
         case .getZoneInventory(let nodeHash, let limit):
             await handleGetZoneInventory(nodeHash: nodeHash, limit: limit, from: peer)
@@ -647,7 +661,20 @@ public actor Ivy {
                 tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
             }
             tally.recordSuccess(peer: peer)
-            await handleFeeForwardResponse(cid: rootCID, data: items.first?.data ?? Data(), from: peer)
+
+            // Resolve pending volume requests
+            let volumeKey = "\(rootCID)-\(peer.publicKey.prefix(8))"
+            if pendingVolumeRequests[volumeKey] != nil {
+                var result: [String: Data] = [:]
+                for item in items {
+                    result[item.cid] = item.data
+                    haveSet.insert(item.cid)
+                    blockCache[item.cid] = item.data
+                }
+                recordVolumeProvider(rootCID: rootCID, peer: peer)
+                resolveVolumeRequest(key: volumeKey, result: result)
+            }
+
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .settlementProof(let txHash, let amount, let chainId):
@@ -657,6 +684,15 @@ public actor Ivy {
                 await ledger.recordSettlement(peer: peer)
             }
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .getVolume(let rootCID, let cids):
+            await handleGetVolume(rootCID: rootCID, cids: cids, from: peer)
+
+        case .announceVolume(let rootCID, let childCIDs, let totalSize):
+            await handleAnnounceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
+
+        case .pushVolume(let rootCID, let items):
+            await handlePushVolume(rootCID: rootCID, items: items, from: peer)
 
         default:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -754,7 +790,7 @@ public actor Ivy {
 
         if let data {
             // We have it — serve and keep the full remaining fee
-            fireToPeer(peer, .block(cid: cid, data: data))
+            fireToPeer(peer, .block(cid: cid, data: data), earnsFee: true)
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
             // Pay-on-success: charge the upstream peer
@@ -864,44 +900,6 @@ public actor Ivy {
         await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
     }
 
-    // MARK: - Chain Announces
-
-    private func handleChainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
-
-        // Dedup: hash the announce content to detect loops
-        let dedupKey = String(describing: Router.hash(destinationHash + chainData).prefix(16))
-        guard !chainAnnounceDedup.contains(dedupKey) else { return }
-        chainAnnounceDedup.insert(dedupKey)
-
-        // TTL bound: drop if too many hops
-        guard hops < config.maxChainAnnounceHops else { return }
-
-        delegate?.ivy(self, didReceiveMessage: .chainAnnounce(destinationHash: destinationHash, hops: hops, chainData: chainData), from: peer)
-
-        let fwdPayload = Message.chainAnnounce(
-            destinationHash: destinationHash,
-            hops: hops + 1,
-            chainData: chainData
-        ).serialize()
-        for (otherPeer, conn) in connections where otherPeer != peer {
-            guard tally.shouldAllow(peer: otherPeer) else { continue }
-            conn.fireAndForget(fwdPayload)
-        }
-    }
-
-    public func broadcastChainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data) {
-        let payload = Message.chainAnnounce(
-            destinationHash: destinationHash,
-            hops: hops,
-            chainData: chainData
-        ).serialize()
-        for (peer, conn) in connections {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(payload)
-        }
-    }
-
     // MARK: - Zone Sync (periodic)
 
     private func startZoneSync() {
@@ -935,7 +933,7 @@ public actor Ivy {
             return
         }
 
-        if let store = near as? VerifiedDistanceStore {
+        if let store = near as? ProfitWeightedStore {
             let cids = await store.storedCIDsClosestTo(hash: Array(nodeHash), limit: Int(limit))
             fireToPeer(peer, .zoneInventory(cids: cids))
         } else {
@@ -945,15 +943,40 @@ public actor Ivy {
 
     private func handleZoneInventory(cids: [String], from peer: PeerID) async {
         tally.recordSuccess(peer: peer)
-        var fetched = 0
+
+        // Partition CIDs into volume-grouped and standalone
+        var volumeBatches: [String: [String]] = [:]  // rootCID → [missing child CIDs]
+        var standalone: [String] = []
+
         for cid in cids {
             guard !haveSet.contains(cid) else { continue }
+            if let rootCID = volumeMembership[cid] {
+                volumeBatches[rootCID, default: []].append(cid)
+            } else {
+                standalone.append(cid)
+            }
+        }
+
+        var fetched = 0
+
+        // Batch-fetch each volume group with a single getVolume request
+        for (rootCID, missingCIDs) in volumeBatches {
+            for cid in missingCIDs { haveSet.insert(cid) }
+            fireToPeer(peer, .getVolume(rootCID: rootCID, cids: missingCIDs))
+            fetched += missingCIDs.count
+        }
+
+        // Fetch standalone CIDs individually
+        for cid in standalone {
             haveSet.insert(cid)
             fireToPeer(peer, .dhtForward(cid: cid, ttl: 0))
             fetched += 1
         }
+
         if fetched > 0 {
-            config.logger.info("Zone sync: requesting \(fetched) blocks from \(peer.publicKey.prefix(8))…")
+            let volumeCount = volumeBatches.count
+            let standaloneCount = standalone.count
+            config.logger.info("Zone sync: requesting \(fetched) blocks from \(peer.publicKey.prefix(8))… (\(volumeCount) volume batches, \(standaloneCount) individual)")
         }
     }
 
@@ -972,7 +995,7 @@ public actor Ivy {
 
     private func runReplicationRound() async {
         guard let w = _worker, let near = await w.near else { return }
-        guard let store = near as? VerifiedDistanceStore else { return }
+        guard let store = near as? ProfitWeightedStore else { return }
 
         let sample = await store.sampleStoredCIDs(count: config.replicationSampleSize)
         guard !sample.isEmpty else { return }
@@ -1018,9 +1041,46 @@ public actor Ivy {
             }
         }
 
-        // Push under-replicated blocks to closest peers that lack them
+        // Push under-replicated blocks to closest peers that lack them.
+        // Volume-aware: if a CID belongs to a volume, push all volume members as a batch.
         var pushCount = 0
+        var pushedVolumes: Set<String> = []
+
         for (cid, count) in replicaCounts where count < config.replicationMinCopies {
+            // Volume-aware batching: if this CID is part of a volume, push the whole volume
+            if let rootCID = volumeMembership[cid], !pushedVolumes.contains(rootCID) {
+                pushedVolumes.insert(rootCID)
+
+                // Gather all volume members' data
+                let members = await store.volumeMembers(rootCID: rootCID)
+                var volumeItems: [(cid: String, data: Data)] = []
+                for member in members {
+                    if let data = await store.getLocal(cid: ContentIdentifier(rawValue: member)) {
+                        volumeItems.append((cid: member, data: data))
+                    }
+                }
+
+                if !volumeItems.isEmpty {
+                    let rootHash = Router.hash(rootCID)
+                    let closest = router.closestPeers(to: rootHash, count: config.replicationMinCopies * 2)
+                    for entry in closest {
+                        guard connections[entry.id] != nil else { continue }
+                        guard tally.shouldAllow(peer: entry.id) else { continue }
+                        // Check if peer is missing any volume member
+                        let peerMissing = peerDoesntHave[entry.id] ?? []
+                        let hasMissing = volumeItems.contains { peerMissing.contains($0.cid) }
+                        guard hasMissing else { continue }
+                        fireToPeer(entry.id, .blocks(rootCID: rootCID, items: volumeItems))
+                        let totalBytes = volumeItems.reduce(0) { $0 + $1.data.count }
+                        let cpl = Router.commonPrefixLength(router.localHash, rootHash)
+                        tally.recordSent(peer: entry.id, bytes: totalBytes, cpl: cpl)
+                        pushCount += volumeItems.count
+                    }
+                }
+                continue
+            }
+
+            // Non-volume CID: push individually (original behavior)
             guard let data = await store.getLocal(cid: ContentIdentifier(rawValue: cid)) else { continue }
             let cidHash = Router.hash(cid)
             let closest = router.closestPeers(to: cidHash, count: config.replicationMinCopies * 2)
@@ -1357,11 +1417,6 @@ public actor Ivy {
         guard let key = matchingKey, let pending = pendingFeeForwards[key] else { return }
 
         // Store backup at this node (we are N, Z's direct neighbor)
-        let cidHash = Router.hash(cid)
-        let dataHash = Router.hash(Data(cid.utf8))
-        // Verify CID before accepting backup
-        let computed = Router.hash(data)
-        guard computed == cidHash || true else { return } // CID verification via Acorn in production
 
         pendingDirectConnects[requestId] = DirectConnectState(
             cid: cid,
@@ -1430,6 +1485,286 @@ public actor Ivy {
         fireToPeer(peer, .miningChallenge(hashPrefix: hashPrefix, blockTargetDifficulty: difficulty, noncePrefix: noncePrefix))
     }
 
+    // MARK: - Volume-Aware Fetching
+
+    /// Handle a getVolume request: serve all requested CIDs in a single .blocks() response.
+    private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+
+        var items: [(cid: String, data: Data)] = []
+        for cid in cids {
+            if let data = blockCache[cid] {
+                items.append((cid: cid, data: data))
+            } else if let data = await getLocalBlock(cid: cid) {
+                items.append((cid: cid, data: data))
+            }
+        }
+
+        if !items.isEmpty {
+            fireToPeer(peer, .blocks(rootCID: rootCID, items: items))
+            let totalBytes = items.reduce(0) { $0 + $1.data.count }
+            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
+            tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
+        }
+    }
+
+    /// Handle announceVolume: record provider, track membership, gossip to other peers.
+    private func handleAnnounceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64, from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+
+        // Dedup: don't process the same volume announcement twice
+        let dedupKey = "vol-\(rootCID)"
+        guard !haveSet.contains(dedupKey) else { return }
+        haveSet.insert(dedupKey)
+
+        recordVolumeProvider(rootCID: rootCID, peer: peer)
+
+        // Track membership
+        for child in childCIDs {
+            volumeMembership[child] = rootCID
+        }
+        volumeMembership[rootCID] = rootCID
+
+        // Gossip relay to other connected peers (like announceBlock)
+        let payload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        broadcastPayload(payload, excluding: peer)
+
+        delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
+    }
+
+    /// Handle pushVolume: a high-bandwidth peer proactively sent full volume data.
+    /// Store all items, register membership, record the sender as a provider, then announce metadata to other peers.
+    private func handlePushVolume(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+
+        let dedupKey = "vol-\(rootCID)"
+        guard !haveSet.contains(dedupKey) else { return }
+        haveSet.insert(dedupKey)
+
+        let childCIDs = items.map(\.cid)
+        var totalSize: UInt64 = 0
+
+        // Store items locally and track membership
+        for (cid, data) in items {
+            blockCache[cid] = data
+            haveSet.insert(cid)
+            volumeMembership[cid] = rootCID
+            totalSize += UInt64(data.count)
+        }
+        volumeMembership[rootCID] = rootCID
+        recordVolumeProvider(rootCID: rootCID, peer: peer)
+
+        // Store in profit-weighted store for co-location
+        if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
+            await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
+            for (cid, data) in items {
+                await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+            }
+        }
+
+        let totalBytes = items.reduce(0) { $0 + $1.data.count }
+        let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
+        tally.recordReceived(peer: peer, bytes: totalBytes, cpl: cpl)
+        tally.recordSuccess(peer: peer)
+
+        // Re-announce as metadata to other peers (they can request via getVolume if interested)
+        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        broadcastPayload(announcePayload, excluding: peer)
+
+        delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
+    }
+
+    /// Record that a peer served content belonging to a volume (provider memory).
+    private func recordVolumeProvider(rootCID: String, peer: PeerID) {
+        var providers = volumeProviders[rootCID] ?? []
+        if !providers.contains(peer) {
+            providers.append(peer)
+            if providers.count > 8 { providers = Array(providers.suffix(8)) }
+            volumeProviders[rootCID] = providers
+        }
+    }
+
+    /// Publish a volume: store all items locally, track membership, announce to peers.
+    public func publishVolume(rootCID: String, items: [(cid: String, data: Data)]) async {
+        let childCIDs = items.map(\.cid)
+        let totalSize = UInt64(items.reduce(0) { $0 + $1.data.count })
+
+        // Track membership
+        for child in childCIDs {
+            volumeMembership[child] = rootCID
+        }
+        volumeMembership[rootCID] = rootCID
+
+        // Store locally
+        if let w = _worker, let near = await w.near {
+            if let store = near as? ProfitWeightedStore {
+                await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
+                for (cid, data) in items {
+                    await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+                }
+            } else {
+                for (cid, data) in items {
+                    await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
+                }
+            }
+        }
+
+        // Cache
+        for (cid, data) in items {
+            blockCache[cid] = data
+            haveSet.insert(cid)
+        }
+
+        // High-bandwidth push: proactively send full volume data to top-reputation peers
+        // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
+        // These bypass budget — we're the publisher, pushing to our best peers is self-interested
+        let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items).serialize()
+        let highBWPeers = selectHighBandwidthPeers(count: config.highBandwidthPeers)
+        var pushedPeers: Set<PeerID> = []
+        for peer in highBWPeers {
+            if let conn = connections[peer] {
+                conn.fireAndForget(highBWPayload)
+                pushedPeers.insert(peer)
+            }
+        }
+
+        // Announce volume metadata to remaining peers (low-bandwidth mode, budget-gated)
+        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        for (peer, conn) in connections where !pushedPeers.contains(peer) {
+            guard tally.shouldAllow(peer: peer) else { continue }
+            let rep = tally.reputation(for: peer)
+            Task {
+                let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
+                guard await sendBudget.shouldSend(to: peer, bytes: announcePayload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
+                conn.fireAndForget(announcePayload)
+            }
+        }
+        for (_, local) in localPeers {
+            local.send(.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize))
+        }
+    }
+
+    /// Select the top N peers by reputation for high-bandwidth proactive push.
+    /// Analogous to Bitcoin's BIP 152 high-bandwidth peer selection.
+    private func selectHighBandwidthPeers(count: Int) -> [PeerID] {
+        guard count > 0 else { return [] }
+        let candidates = Array(connections.keys)
+        guard !candidates.isEmpty else { return [] }
+
+        // Sort by reputation (highest first), take top N
+        let sorted = candidates.sorted { a, b in
+            tally.reputation(for: a) > tally.reputation(for: b)
+        }
+        return Array(sorted.prefix(count))
+    }
+
+    /// Fetch a volume's contents by batch-requesting from a known provider.
+    /// Falls back to individual DHT lookups for any CIDs the provider can't serve.
+    public func fetchVolume(rootCID: String, childCIDs: [String], fee: UInt64? = nil) async -> [String: Data] {
+        var result: [String: Data] = [:]
+        var missing: [String] = []
+
+        // Check local cache first
+        for cid in childCIDs {
+            if let data = blockCache[cid] {
+                result[cid] = data
+            } else if let data = await getLocalBlock(cid: cid) {
+                result[cid] = data
+            } else {
+                missing.append(cid)
+            }
+        }
+
+        guard !missing.isEmpty else { return result }
+
+        // Try known volume providers first (batch request)
+        if let providers = volumeProviders[rootCID] {
+            for provider in providers {
+                guard connections[provider] != nil || localPeers[provider] != nil else { continue }
+                guard tally.shouldAllow(peer: provider) else { continue }
+
+                let batchResult = await requestVolumeFromPeer(rootCID: rootCID, cids: missing, peer: provider)
+                for (cid, data) in batchResult {
+                    result[cid] = data
+                    missing.removeAll { $0 == cid }
+                }
+
+                if !batchResult.isEmpty {
+                    tally.recordSuccess(peer: provider)
+                }
+                if missing.isEmpty { break }
+            }
+        }
+
+        // For remaining missing CIDs, find providers via DHT
+        if !missing.isEmpty {
+            let rootHash = Router.hash(rootCID)
+            let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
+            for entry in closest {
+                guard connections[entry.id] != nil || localPeers[entry.id] != nil else { continue }
+                guard tally.shouldAllow(peer: entry.id) else { continue }
+
+                let batchResult = await requestVolumeFromPeer(rootCID: rootCID, cids: missing, peer: entry.id)
+                for (cid, data) in batchResult {
+                    result[cid] = data
+                    missing.removeAll { $0 == cid }
+                    // This peer is a volume provider — remember them
+                    recordVolumeProvider(rootCID: rootCID, peer: entry.id)
+                }
+                if missing.isEmpty { break }
+            }
+        }
+
+        // Last resort: individual fee-based DHT lookups for stragglers
+        for cid in missing {
+            if let data = await get(cid: cid, fee: fee) {
+                result[cid] = data
+            }
+        }
+
+        // Store volume in distance store for co-location
+        if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
+            await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
+            for (cid, data) in result {
+                await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+            }
+        }
+
+        return result
+    }
+
+    /// Send a getVolume request to a specific peer and wait for the .blocks() response.
+    private func requestVolumeFromPeer(rootCID: String, cids: [String], peer: PeerID) async -> [String: Data] {
+        let volumeKey = "\(rootCID)-\(peer.publicKey.prefix(8))"
+
+        return await withCheckedContinuation { continuation in
+            pendingVolumeRequests[volumeKey, default: []].append(continuation)
+            fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
+
+            Task {
+                try? await Task.sleep(for: config.requestTimeout)
+                self.resolveVolumeRequest(key: volumeKey, result: [:])
+            }
+        }
+    }
+
+    private func resolveVolumeRequest(key: String, result: [String: Data]) {
+        guard let continuations = pendingVolumeRequests.removeValue(forKey: key) else { return }
+        for cont in continuations {
+            cont.resume(returning: result)
+        }
+    }
+
+    /// Look up the volume root CID for a given CID.
+    public func volumeRoot(for cid: String) -> String? {
+        volumeMembership[cid]
+    }
+
+    /// Get known providers for a volume.
+    public func providers(for rootCID: String) -> [PeerID] {
+        volumeProviders[rootCID] ?? []
+    }
+
     // MARK: - Cleanup
 
     private func cleanupPendingForPeer(_ peer: PeerID) {
@@ -1452,6 +1787,10 @@ public actor Ivy {
 
         for (cid, _) in pendingRequests {
             resolvePending(cid: cid, data: nil)
+        }
+
+        for (key, _) in pendingVolumeRequests {
+            resolveVolumeRequest(key: key, result: [:])
         }
 
         pendingForwards.removeAll()

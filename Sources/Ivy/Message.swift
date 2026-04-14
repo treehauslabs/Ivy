@@ -12,19 +12,7 @@ public enum Message: Sendable {
     case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], signature: Data)
     case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
 
-    case chainAnnounce(destinationHash: Data, hops: UInt8, chainData: Data)
-    case compactBlock(chainHash: Data, headerCID: String, txCIDs: [String])
-    case getBlockTxns(chainHash: Data, headerCID: String, missingTxCIDs: [String])
-    case blockTxns(chainHash: Data, headerCID: String, transactions: [(String, Data)])
-
     case wantBlocks(cids: [String])
-
-    case newTxHashes(chainHash: Data, txHashes: [String])
-    case getTxns(chainHash: Data, txHashes: [String])
-    case txns(chainHash: Data, transactions: [(String, Data)])
-
-    case getBlockRange(chainHash: Data, startIndex: UInt64, count: UInt16)
-    case blockRange(chainHash: Data, startIndex: UInt64, blocks: [(String, Data)])
 
     case miningChallenge(hashPrefix: Data, blockTargetDifficulty: Data, noncePrefix: Data)
     case miningChallengeSolution(nonce: UInt64, hash: Data, blockNonce: UInt64?)
@@ -51,6 +39,11 @@ public enum Message: Sendable {
     case blocks(rootCID: String, items: [(cid: String, data: Data)])
     case settlementProof(txHash: String, amount: UInt64, chainId: String)
 
+    // Volume-aware fetching (tags 53-56)
+    case getVolume(rootCID: String, cids: [String])
+    case announceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64)
+    case pushVolume(rootCID: String, items: [(cid: String, data: Data)])
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
@@ -67,17 +60,8 @@ public enum Message: Sendable {
         case haveCIDs = 13
         case haveCIDsResult = 14
         case dhtForward = 16
-        case chainAnnounce = 21
-        case compactBlock = 22
-        case getBlockTxns = 23
-        case blockTxns = 24
+        // tags 21-31 removed (chain-specific messages)
         case wantBlocks = 26
-        case newTxHashes = 27
-        case getTxns = 28
-        case txns = 29
-        case getBlockRange = 30
-        case blockRange = 31
-        // tags 32-34 removed (blockManifest, getCIDs, cidData)
         case miningChallenge = 35
         case miningChallengeSolution = 36
         case pexRequest = 37
@@ -95,6 +79,18 @@ public enum Message: Sendable {
         case peerMessage = 49
         case blocks = 50
         case settlementProof = 51
+        // Volume-aware fetching
+        case getVolume = 53
+        case announceVolume = 54
+        case pushVolume = 55
+    }
+
+    /// True for messages that keep the connection alive — always sent regardless of budget.
+    public var isKeepalive: Bool {
+        switch self {
+        case .ping, .pong, .identify: return true
+        default: return false
+        }
     }
 
     public func estimatedSize() -> Int {
@@ -104,6 +100,12 @@ public enum Message: Sendable {
         case .dontHave(let cid): return 3 + cid.utf8.count
         case .announceBlock(let cid): return 3 + cid.utf8.count
         case .dhtForward(let cid, _, _, _, _): return 4 + cid.utf8.count
+        case .blocks(let rootCID, let items):
+            return 5 + rootCID.utf8.count + items.reduce(0) { $0 + 6 + $1.cid.utf8.count + $1.data.count }
+        case .pushVolume(let rootCID, let items):
+            return 7 + rootCID.utf8.count + items.reduce(0) { $0 + 6 + $1.cid.utf8.count + $1.data.count }
+        case .peerMessage(let topic, let payload):
+            return 5 + topic.utf8.count + payload.count
         default: return 256
         }
     }
@@ -159,73 +161,11 @@ public enum Message: Sendable {
             if let target { buf.appendLengthPrefixedData(target) }
             buf.appendUInt8(selector != nil ? 1 : 0)
             if let selector { buf.appendLengthPrefixedString(selector) }
-        case .chainAnnounce(let destinationHash, let hops, let chainData):
-            buf.append(Tag.chainAnnounce.rawValue)
-            buf.appendLengthPrefixedData(destinationHash)
-            buf.appendUInt8(hops)
-            buf.appendLengthPrefixedData(chainData)
-        case .compactBlock(let chainHash, let headerCID, let txCIDs):
-            buf.append(Tag.compactBlock.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendLengthPrefixedString(headerCID)
-            buf.appendUInt16(UInt16(txCIDs.count))
-            for cid in txCIDs {
-                buf.appendLengthPrefixedString(cid)
-            }
-        case .getBlockTxns(let chainHash, let headerCID, let missingTxCIDs):
-            buf.append(Tag.getBlockTxns.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendLengthPrefixedString(headerCID)
-            buf.appendUInt16(UInt16(missingTxCIDs.count))
-            for cid in missingTxCIDs {
-                buf.appendLengthPrefixedString(cid)
-            }
-        case .blockTxns(let chainHash, let headerCID, let transactions):
-            buf.append(Tag.blockTxns.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendLengthPrefixedString(headerCID)
-            buf.appendUInt16(UInt16(transactions.count))
-            for (cid, data) in transactions {
-                buf.appendLengthPrefixedString(cid)
-                buf.appendLengthPrefixedData(data)
-            }
         case .wantBlocks(let cids):
             buf.append(Tag.wantBlocks.rawValue)
             buf.appendUInt16(UInt16(cids.count))
             for cid in cids {
                 buf.appendLengthPrefixedString(cid)
-            }
-        case .newTxHashes(let chainHash, let txHashes):
-            buf.append(Tag.newTxHashes.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendUInt16(UInt16(txHashes.count))
-            for h in txHashes { buf.appendLengthPrefixedString(h) }
-        case .getTxns(let chainHash, let txHashes):
-            buf.append(Tag.getTxns.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendUInt16(UInt16(txHashes.count))
-            for h in txHashes { buf.appendLengthPrefixedString(h) }
-        case .txns(let chainHash, let transactions):
-            buf.append(Tag.txns.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendUInt16(UInt16(transactions.count))
-            for (h, d) in transactions {
-                buf.appendLengthPrefixedString(h)
-                buf.appendLengthPrefixedData(d)
-            }
-        case .getBlockRange(let chainHash, let startIndex, let count):
-            buf.append(Tag.getBlockRange.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendUInt64(startIndex)
-            buf.appendUInt16(count)
-        case .blockRange(let chainHash, let startIndex, let blocks):
-            buf.append(Tag.blockRange.rawValue)
-            buf.appendLengthPrefixedData(chainHash)
-            buf.appendUInt64(startIndex)
-            buf.appendUInt16(UInt16(blocks.count))
-            for (cid, data) in blocks {
-                buf.appendLengthPrefixedString(cid)
-                buf.appendLengthPrefixedData(data)
             }
         case .miningChallenge(let hashPrefix, let blockTarget, let noncePrefix):
             buf.append(Tag.miningChallenge.rawValue)
@@ -333,6 +273,25 @@ public enum Message: Sendable {
             buf.appendLengthPrefixedString(txHash)
             buf.appendUInt64(amount)
             buf.appendLengthPrefixedString(chainId)
+        case .getVolume(let rootCID, let cids):
+            buf.append(Tag.getVolume.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+            buf.appendUInt16(UInt16(cids.count))
+            for cid in cids { buf.appendLengthPrefixedString(cid) }
+        case .announceVolume(let rootCID, let childCIDs, let totalSize):
+            buf.append(Tag.announceVolume.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+            buf.appendUInt16(UInt16(childCIDs.count))
+            for cid in childCIDs { buf.appendLengthPrefixedString(cid) }
+            buf.appendUInt64(totalSize)
+        case .pushVolume(let rootCID, let items):
+            buf.append(Tag.pushVolume.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
+            buf.appendUInt16(UInt16(items.count))
+            for item in items {
+                buf.appendLengthPrefixedString(item.cid)
+                buf.appendLengthPrefixedData(item.data)
+            }
         }
         return buf
     }
@@ -395,45 +354,6 @@ public enum Message: Sendable {
             var selector: String? = nil
             if let hasSel = reader.readUInt8(), hasSel == 1 { selector = reader.readString() }
             return .dhtForward(cid: cid, ttl: ttl, fee: fee, target: target, selector: selector)
-        case .chainAnnounce:
-            guard let destHash = reader.readData(),
-                  let hops = reader.readUInt8(),
-                  let chainData = reader.readData() else { return nil }
-            return .chainAnnounce(destinationHash: destHash, hops: hops, chainData: chainData)
-        case .compactBlock:
-            guard let chainHash = reader.readData(),
-                  let headerCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var txCIDs = [String]()
-            txCIDs.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                txCIDs.append(cid)
-            }
-            return .compactBlock(chainHash: chainHash, headerCID: headerCID, txCIDs: txCIDs)
-        case .getBlockTxns:
-            guard let chainHash = reader.readData(),
-                  let headerCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .getBlockTxns(chainHash: chainHash, headerCID: headerCID, missingTxCIDs: cids)
-        case .blockTxns:
-            guard let chainHash = reader.readData(),
-                  let headerCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
-            var txns = [(String, Data)]()
-            txns.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString(),
-                      let data = reader.readData() else { return nil }
-                txns.append((cid, data))
-            }
-            return .blockTxns(chainHash: chainHash, headerCID: headerCID, transactions: txns)
         case .wantBlocks:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
             var cids = [String]()
@@ -443,52 +363,6 @@ public enum Message: Sendable {
                 cids.append(cid)
             }
             return .wantBlocks(cids: cids)
-        case .newTxHashes:
-            guard let chainHash = reader.readData(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var hashes = [String]()
-            hashes.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let h = reader.readString() else { return nil }
-                hashes.append(h)
-            }
-            return .newTxHashes(chainHash: chainHash, txHashes: hashes)
-        case .getTxns:
-            guard let chainHash = reader.readData(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var hashes = [String]()
-            hashes.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let h = reader.readString() else { return nil }
-                hashes.append(h)
-            }
-            return .getTxns(chainHash: chainHash, txHashes: hashes)
-        case .txns:
-            guard let chainHash = reader.readData(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
-            var txs = [(String, Data)]()
-            txs.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let h = reader.readString(), let d = reader.readData() else { return nil }
-                txs.append((h, d))
-            }
-            return .txns(chainHash: chainHash, transactions: txs)
-        case .getBlockRange:
-            guard let chainHash = reader.readData(),
-                  let startIndex = reader.readUInt64(),
-                  let count = reader.readUInt16() else { return nil }
-            return .getBlockRange(chainHash: chainHash, startIndex: startIndex, count: count)
-        case .blockRange:
-            guard let chainHash = reader.readData(),
-                  let startIndex = reader.readUInt64(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
-            var blocks = [(String, Data)]()
-            blocks.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString(), let data = reader.readData() else { return nil }
-                blocks.append((cid, data))
-            }
-            return .blockRange(chainHash: chainHash, startIndex: startIndex, blocks: blocks)
         case .miningChallenge:
             guard let hashPrefix = reader.readData(),
                   let blockTarget = reader.readData(),
@@ -619,6 +493,38 @@ public enum Message: Sendable {
                   let amount = reader.readUInt64(),
                   let chainId = reader.readString() else { return nil }
             return .settlementProof(txHash: txHash, amount: amount, chainId: chainId)
+        case .getVolume:
+            guard let rootCID = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            return .getVolume(rootCID: rootCID, cids: cids)
+        case .announceVolume:
+            guard let rootCID = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
+            var cids = [String]()
+            cids.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString() else { return nil }
+                cids.append(cid)
+            }
+            let totalSize = reader.readUInt64() ?? 0
+            return .announceVolume(rootCID: rootCID, childCIDs: cids, totalSize: totalSize)
+        case .pushVolume:
+            guard let rootCID = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
+            var items = [(cid: String, data: Data)]()
+            items.reserveCapacity(Int(count))
+            for _ in 0..<count {
+                guard let cid = reader.readString(),
+                      let data = reader.readData() else { return nil }
+                items.append((cid: cid, data: data))
+            }
+            return .pushVolume(rootCID: rootCID, items: items)
         }
     }
 
