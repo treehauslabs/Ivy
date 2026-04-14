@@ -765,8 +765,14 @@ public actor Ivy {
 
     /// Tracks pending fee-forwarded requests: requestKey → (upstream peer, fee claimed)
     private var pendingFeeForwards: [String: (upstream: PeerID, feeClaimed: UInt64)] = [:]
+    private static let maxPendingFeeForwards = 10_000
 
     private func handleFeeForward(cid: String, fee: UInt64, target: Data?, selector: String?, from peer: PeerID) async {
+        // Capacity check: refuse new forwards when relay queue is full
+        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else {
+            fireToPeer(peer, .dontHave(cid: cid))
+            return
+        }
         // Dual gate: behavioral (Tally) + economic (graduated debt pressure)
         guard tally.shouldAllow(peer: peer) else {
             fireToPeer(peer, .dontHave(cid: cid))
@@ -864,6 +870,7 @@ public actor Ivy {
     // MARK: - Fee-Aware findNode
 
     private func handleFeeNode(target: Data, fee: UInt64, from peer: PeerID) async {
+        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else { return }
         guard tally.shouldAllow(peer: peer) else { return }
         let pressure = await ledger.debtPressure(for: peer)
         if pressure > 0, Double.random(in: 0..<1) < pressure { return }
@@ -1231,6 +1238,7 @@ public actor Ivy {
     // MARK: - Pin Announcements
 
     private func handleFindPins(cid: String, fee: UInt64, from peer: PeerID) async {
+        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else { return }
         guard tally.shouldAllow(peer: peer) else { return }
         let pressure = await ledger.debtPressure(for: peer)
         if pressure > 0, Double.random(in: 0..<1) < pressure { return }
@@ -1831,6 +1839,12 @@ public actor Ivy {
     }
 
     func handleNewInboundChannel(_ channel: Channel) {
+        // Reject if at connection capacity
+        if let maxPeers = config.tallyConfig.maxPeers, connections.count >= maxPeers {
+            channel.close(promise: nil)
+            return
+        }
+
         let unknownID = PeerID(publicKey: "inbound-\(UUID().uuidString)")
         let remoteAddr = channel.remoteAddress
         let host = remoteAddr?.ipAddress ?? "unknown"
@@ -1845,6 +1859,18 @@ public actor Ivy {
         Task {
             sendIdentify(to: conn)
             await handleInbound(conn)
+        }
+        // Disconnect if peer doesn't identify within 30 seconds
+        let peerToTimeout = unknownID
+        Task { [weak self] in
+            try? await Task.sleep(for: .seconds(30))
+            await self?.timeoutUnidentifiedPeer(peerToTimeout)
+        }
+    }
+
+    private func timeoutUnidentifiedPeer(_ peer: PeerID) {
+        if connections[peer] != nil, peer.publicKey.hasPrefix("inbound-") {
+            disconnect(peer)
         }
     }
 
