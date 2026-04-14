@@ -33,21 +33,21 @@ actor SendBudget {
     /// - `earnsFee`: true if this message directly earns us relay fees — always allowed
     /// - `isKeepalive`: true for ping/pong/identify — always allowed (connection maintenance)
     /// - `reputationScore`: peer's Tally reputation (0.0 = untrusted, 1.0+ = excellent)
-    /// - `atCreditLimit`: true if peer has exhausted their credit line
-    func shouldSend(to peer: PeerID, bytes: Int, earnsFee: Bool, isKeepalive: Bool, reputationScore: Double, atCreditLimit: Bool) -> Bool {
+    /// - `debtPressure`: 0.0 (no debt) to 1.0 (at/past credit threshold) — graduated throttle
+    func shouldSend(to peer: PeerID, bytes: Int, earnsFee: Bool, isKeepalive: Bool, reputationScore: Double, debtPressure: Double) -> Bool {
         // Always send fee-earning messages — they pay us directly
         if earnsFee { return true }
         // Always send keepalive — we need connections alive to earn
         if isKeepalive { return true }
 
         let now = ContinuousClock.now
-        var window = peerWindows[peer] ?? PeerWindow(bytesSent: 0, windowStart: now, budget: computeBudget(reputation: reputationScore, atCreditLimit: atCreditLimit))
+        var window = peerWindows[peer] ?? PeerWindow(bytesSent: 0, windowStart: now, budget: computeBudget(reputation: reputationScore, debtPressure: debtPressure))
 
         // Reset window if expired
         if now - window.windowStart >= interval {
             window.bytesSent = 0
             window.windowStart = now
-            window.budget = computeBudget(reputation: reputationScore, atCreditLimit: atCreditLimit)
+            window.budget = computeBudget(reputation: reputationScore, debtPressure: debtPressure)
         }
 
         guard window.bytesSent + bytes <= window.budget else {
@@ -60,22 +60,26 @@ actor SendBudget {
         return true
     }
 
-    /// Compute per-peer budget from reputation.
+    /// Compute per-peer budget from reputation and debt pressure.
     /// - Base: 10% of total for unknown peers (reputation ~0)
     /// - Linear scale: reputation 1.0 = 100% of base budget
     /// - Bonus: reputation >1.0 gets up to 200% (super-contributors)
-    /// - Credit limit: peers at limit get only 5% (just enough for keepalive + small messages)
-    private func computeBudget(reputation: Double, atCreditLimit: Bool) -> Int {
-        if atCreditLimit {
-            return max(baseBytesPerSecond / 20, 1024) // 5% floor, minimum 1KB
-        }
+    /// - Debt pressure scales budget down: 0.0 = full budget, 1.0 = 5% floor
+    private func computeBudget(reputation: Double, debtPressure: Double) -> Int {
         // Clamp reputation to [0, 2] range for budget calculation
         let clamped = min(max(reputation, 0.0), 2.0)
         // 10% base + 90% scaled by reputation (at rep=1.0, gets 100%)
         let fraction = 0.1 + 0.9 * min(clamped, 1.0)
         // Bonus for super-contributors: rep 1.0-2.0 adds up to 100% extra
         let bonus = max(clamped - 1.0, 0.0)
-        let total = fraction + bonus
+        let reputationBudget = fraction + bonus
+
+        // Graduated debt throttle: linearly scale from full budget (pressure=0)
+        // down to 5% floor (pressure=1). Peers feel increasing friction as debt grows.
+        let pressure = min(max(debtPressure, 0.0), 1.0)
+        let debtMultiplier = 1.0 - pressure * 0.95 // 1.0 at 0 debt → 0.05 at threshold
+        let total = reputationBudget * debtMultiplier
+
         return max(Int(Double(baseBytesPerSecond) * total), 1024)
     }
 

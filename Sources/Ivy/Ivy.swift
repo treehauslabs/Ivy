@@ -227,8 +227,8 @@ public actor Ivy {
         let size = message.estimatedSize()
         let rep = tally.reputation(for: peer)
         Task {
-            let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
-            guard await sendBudget.shouldSend(to: peer, bytes: size, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
+            let pressure = await ledger.debtPressure(for: peer)
+            guard await sendBudget.shouldSend(to: peer, bytes: size, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
             conn.fireAndForgetMessage(message)
         }
     }
@@ -251,8 +251,8 @@ public actor Ivy {
             guard tally.shouldAllow(peer: peer) else { continue }
             let rep = tally.reputation(for: peer)
             Task {
-                let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
-                guard await sendBudget.shouldSend(to: peer, bytes: payload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
+                let pressure = await ledger.debtPressure(for: peer)
+                guard await sendBudget.shouldSend(to: peer, bytes: payload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
                 conn.fireAndForget(payload)
             }
         }
@@ -767,12 +767,13 @@ public actor Ivy {
     private var pendingFeeForwards: [String: (upstream: PeerID, feeClaimed: UInt64)] = [:]
 
     private func handleFeeForward(cid: String, fee: UInt64, target: Data?, selector: String?, from peer: PeerID) async {
-        // Dual gate: behavioral (Tally) + economic (credit line)
+        // Dual gate: behavioral (Tally) + economic (graduated debt pressure)
         guard tally.shouldAllow(peer: peer) else {
             fireToPeer(peer, .dontHave(cid: cid))
             return
         }
-        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else {
+        let pressure = await ledger.debtPressure(for: peer)
+        if pressure > 0, Double.random(in: 0..<1) < pressure {
             fireToPeer(peer, .dontHave(cid: cid))
             return
         }
@@ -864,7 +865,8 @@ public actor Ivy {
 
     private func handleFeeNode(target: Data, fee: UInt64, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
-        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else { return }
+        let pressure = await ledger.debtPressure(for: peer)
+        if pressure > 0, Double.random(in: 0..<1) < pressure { return }
 
         let targetHash = Array(target)
 
@@ -1230,7 +1232,8 @@ public actor Ivy {
 
     private func handleFindPins(cid: String, fee: UInt64, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
-        guard await ledger.creditLine(for: peer)?.availableCapacity ?? 0 > 0 else { return }
+        let pressure = await ledger.debtPressure(for: peer)
+        if pressure > 0, Double.random(in: 0..<1) < pressure { return }
 
         // Check if we store pin announcements for this CID
         let stored = pinAnnouncements[cid] ?? []
@@ -1634,8 +1637,8 @@ public actor Ivy {
             guard tally.shouldAllow(peer: peer) else { continue }
             let rep = tally.reputation(for: peer)
             Task {
-                let atLimit = await ledger.creditLine(for: peer)?.availableCapacity ?? 1 <= 0
-                guard await sendBudget.shouldSend(to: peer, bytes: announcePayload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, atCreditLimit: atLimit) else { return }
+                let pressure = await ledger.debtPressure(for: peer)
+                guard await sendBudget.shouldSend(to: peer, bytes: announcePayload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
                 conn.fireAndForget(announcePayload)
             }
         }
