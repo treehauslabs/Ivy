@@ -1,13 +1,13 @@
 {
-  "originHash" : "c98fb9239c1deb22ccbb725522e724eef6f060bfadcd3adfc10f02e977dcd242",
+  "originHash" : "71d5f024015c69ed6510d3661c8bb597ea9a53889ef901f38bb786bc10f7db5a",
   "pins" : [
     {
       "identity" : "acorn",
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/treehauslabs/Acorn.git",
       "state" : {
-        "revision" : "8f2911ff78e9a0dd14d7cc7bf79276e4b326359e",
-        "version" : "2.0.0"
+        "revision" : "a685a022b88dfb7be479e89d91c61f65c6478520",
+        "version" : "2.1.0"
       }
     },
     {
@@ -24,8 +24,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-asn1.git",
       "state" : {
-        "revision" : "9f542610331815e29cc3821d3b6f488db8715517",
-        "version" : "1.6.0"
+        "revision" : "eb50cbd14606a9161cbc5d452f18797c90ef0bab",
+        "version" : "1.7.0"
       }
     },
     {
@@ -105,8 +105,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/apple/swift-nio.git",
       "state" : {
-        "revision" : "b31565862a8f39866af50bc6676160d8dda7de35",
-        "version" : "2.96.0"
+        "revision" : "cd6710454f25733900e133c6caf5188952763c36",
+        "version" : "2.98.0"
       }
     },
     {

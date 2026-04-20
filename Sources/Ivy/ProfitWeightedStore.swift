@@ -78,6 +78,51 @@ public actor ProfitWeightedStore: AcornCASWorker {
         await inner.storeLocal(cid: cid, data: data)
     }
 
+    /// Batched store: single capacity check, single eviction pass, single
+    /// delegation to the inner worker's batch path. At steady-state capacity
+    /// this replaces O(batch * N) sampling work with O(batch + N).
+    public func storeLocalBatch(_ entries: [(ContentIdentifier, Data)]) async {
+        guard !entries.isEmpty else { return }
+
+        var toWrite: [(ContentIdentifier, Data)] = []
+        toWrite.reserveCapacity(entries.count)
+
+        // Classify each entry as protected or evictable; make evictable entries
+        // fit by calling findLeastProfitable once per slot needed.
+        for (cid, data) in entries {
+            let computed = ContentIdentifier(for: data)
+            guard computed.rawValue == cid.rawValue else { continue }
+
+            if await protectionPolicy.isProtected(cid.rawValue) {
+                cidProfit[cid.rawValue] = CIDMetrics(lastAccess: .now, isProtected: true)
+                toWrite.append((cid, data))
+                continue
+            }
+
+            if cidProfit[cid.rawValue] != nil {
+                // Already tracked — just refresh metrics, no eviction needed.
+                cidProfit[cid.rawValue] = CIDMetrics(lastAccess: .now)
+                toWrite.append((cid, data))
+                continue
+            }
+
+            if cidProfit.count >= maxEntries {
+                if let evicted = await findLeastProfitable() {
+                    cidProfit.removeValue(forKey: evicted)
+                } else {
+                    continue  // everything protected
+                }
+            }
+
+            cidProfit[cid.rawValue] = CIDMetrics(lastAccess: .now)
+            toWrite.append((cid, data))
+        }
+
+        if !toWrite.isEmpty {
+            await inner.storeLocalBatch(toWrite)
+        }
+    }
+
     public func storeVerified(cid: ContentIdentifier, data: Data) async {
         let computed = ContentIdentifier(for: data)
         guard computed.rawValue == cid.rawValue else { return }
@@ -165,13 +210,13 @@ public actor ProfitWeightedStore: AcornCASWorker {
         return UInt64(metrics.accessCount + 1) * 1000 / UInt64(cappedAge)
     }
 
+    /// Sampling budget: bounded regardless of cache size so per-store cost is O(1).
+    private static let evictionSampleSize = 32
+
     /// Find the least profitable non-protected CID via random sampling.
     private func findLeastProfitable() async -> String? {
-        let allKeys = Array(cidProfit.keys)
-        guard !allKeys.isEmpty else { return nil }
-
-        let sampleSize = min(max(Int(Double(allKeys.count).squareRoot()), 16), min(allKeys.count, 128))
-        let sampledKeys = allKeys.shuffled().prefix(sampleSize)
+        guard cidProfit.count > 0 else { return nil }
+        let sampledKeys = cidProfit.randomSampleKeys(count: Self.evictionSampleSize)
 
         var worstKey: String?
         var worstScore: UInt64 = .max
@@ -191,11 +236,8 @@ public actor ProfitWeightedStore: AcornCASWorker {
 
     /// Find and evict the least profitable volume (all members) or standalone CID.
     private func evictLeastProfitableVolume() async -> Set<String>? {
-        let allKeys = Array(cidProfit.keys)
-        guard !allKeys.isEmpty else { return nil }
-
-        let sampleSize = min(max(Int(Double(allKeys.count).squareRoot()), 16), min(allKeys.count, 128))
-        let sampledKeys = allKeys.shuffled().prefix(sampleSize)
+        guard cidProfit.count > 0 else { return nil }
+        let sampledKeys = cidProfit.randomSampleKeys(count: Self.evictionSampleSize)
 
         var worstRoot: String?
         var worstScore: UInt64 = .max
