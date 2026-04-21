@@ -69,6 +69,7 @@ public actor ProfitWeightedStore: AcornCASWorker {
         if cidProfit.count >= maxEntries {
             if let evicted = await findLeastProfitable() {
                 cidProfit.removeValue(forKey: evicted)
+                dropFromVolumeTracking(evicted)
             } else {
                 return // everything is protected, can't evict
             }
@@ -109,6 +110,7 @@ public actor ProfitWeightedStore: AcornCASWorker {
             if cidProfit.count >= maxEntries {
                 if let evicted = await findLeastProfitable() {
                     cidProfit.removeValue(forKey: evicted)
+                    dropFromVolumeTracking(evicted)
                 } else {
                     continue  // everything protected
                 }
@@ -170,6 +172,45 @@ public actor ProfitWeightedStore: AcornCASWorker {
         }
         volumeChildren[rootCID, default: []].insert(rootCID)
         volumeMembership[rootCID] = rootCID
+
+        // Membership tracking is pure bookkeeping on top of cidProfit. If the
+        // caller registered CIDs that cidProfit already evicted (or never saw),
+        // drop them here so the volume dicts stay in sync and don't grow
+        // unbounded as the chain mines blocks forever.
+        compactVolumeTracking()
+    }
+
+    /// Drop a CID from both volume dicts. If a root loses its last member,
+    /// drop the root entry too so volumeChildren doesn't accumulate empty sets.
+    private func dropFromVolumeTracking(_ cid: String) {
+        if let root = volumeMembership.removeValue(forKey: cid) {
+            if var children = volumeChildren[root] {
+                children.remove(cid)
+                if children.isEmpty {
+                    volumeChildren.removeValue(forKey: root)
+                } else {
+                    volumeChildren[root] = children
+                }
+            }
+        }
+        // If the cid was itself a root (may or may not have children), clear
+        // its child set too — any orphan child entries will be removed when
+        // cidProfit evicts them.
+        if volumeChildren[cid] != nil {
+            volumeChildren.removeValue(forKey: cid)
+        }
+    }
+
+    /// Remove volume entries whose CID is no longer tracked by cidProfit.
+    /// Called after registerVolume so membership never exceeds the bounded
+    /// profit dict. O(volumeMembership.count) but amortized cheap in practice
+    /// because volumeMembership is bounded by cidProfit's capacity.
+    private func compactVolumeTracking() {
+        guard !volumeMembership.isEmpty else { return }
+        let stale = volumeMembership.keys.filter { cidProfit[$0] == nil }
+        for cid in stale {
+            dropFromVolumeTracking(cid)
+        }
     }
 
     public func volumeRoot(for cid: String) -> String? {
