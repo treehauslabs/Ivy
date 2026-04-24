@@ -30,6 +30,15 @@ public struct IvyConfig: Sendable {
     public let defaultRequestFee: UInt64
     public let highBandwidthPeers: Int
     public let sendBytesPerSecond: Int
+    /// Upper bound on distinct in-flight CIDs tracked in `pendingRequests` /
+    /// `pendingVolumeRequests`. Prevents an attacker (or a runaway local
+    /// caller) from allocating unbounded continuations by repeatedly asking
+    /// for unique CIDs faster than `requestTimeout` drains them.
+    public let maxPendingRequests: Int
+    /// Per-CID cap on coalesced waiters. Many concurrent local callers for
+    /// the same CID legitimately fan-in to one pending request; this caps
+    /// the fan-in so one hot CID can't grow one continuation list forever.
+    public let maxWaitersPerPendingCID: Int
 
     public init(
         publicKey: String,
@@ -59,7 +68,9 @@ public struct IvyConfig: Sendable {
         baseThresholdMultiplier: UInt64 = 100,
         defaultRequestFee: UInt64 = 20,
         highBandwidthPeers: Int = 3,
-        sendBytesPerSecond: Int = 1_048_576
+        sendBytesPerSecond: Int = 1_048_576,
+        maxPendingRequests: Int = 4_096,
+        maxWaitersPerPendingCID: Int = 64
     ) {
         self.publicKey = publicKey
         self.listenPort = listenPort
@@ -89,5 +100,7 @@ public struct IvyConfig: Sendable {
         self.defaultRequestFee = defaultRequestFee
         self.highBandwidthPeers = highBandwidthPeers
         self.sendBytesPerSecond = sendBytesPerSecond
+        self.maxPendingRequests = maxPendingRequests
+        self.maxWaitersPerPendingCID = maxWaitersPerPendingCID
     }
 }

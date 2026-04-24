@@ -265,12 +265,14 @@ public actor Ivy {
     // MARK: - Content Fetching
 
     func fetchBlock(cid: String) async -> Data? {
-        if pendingRequests[cid] != nil {
+        if let existing = pendingRequests[cid] {
+            guard existing.count < config.maxWaitersPerPendingCID else { return nil }
             return await withCheckedContinuation { continuation in
                 pendingRequests[cid, default: []].append(continuation)
             }
         }
 
+        guard pendingRequests.count < config.maxPendingRequests else { return nil }
         let data = await fetchViaDHT(cid: cid)
         if data != nil { return data }
 
@@ -321,6 +323,9 @@ public actor Ivy {
             }
         }
 
+        guard pendingRequests[cid] == nil, pendingRequests.count < config.maxPendingRequests else {
+            return nil
+        }
         return await withCheckedContinuation { continuation in
             pendingRequests[cid] = [continuation]
 
@@ -1332,6 +1337,7 @@ public actor Ivy {
         }
         if sent == 0 { return nil }
 
+        guard canRegisterPending(cid: cid) else { return nil }
         return await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
             Task {
@@ -1360,6 +1366,7 @@ public actor Ivy {
         // recordSuccess / recordFailure can actually mutate reputation —
         // Tally.recordSuccess/Failure are no-ops if the peer isn't in ledgers.
         tally.recordRequest(peer: peer)
+        guard canRegisterPending(cid: cid) else { return nil }
         fireToPeer(peer, .dhtForward(cid: cid, ttl: 0), bypassBudget: true)
         let data: Data? = await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
@@ -1404,6 +1411,7 @@ public actor Ivy {
         }
         if sent == 0 { return nil }
 
+        guard canRegisterPending(cid: cid) else { return nil }
         let data: Data? = await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
             Task {
@@ -1806,6 +1814,12 @@ public actor Ivy {
     private func requestVolumeFromPeer(rootCID: String, cids: [String], peer: PeerID) async -> [String: Data] {
         let volumeKey = "\(rootCID)-\(peer.publicKey.prefix(8))"
 
+        if let existing = pendingVolumeRequests[volumeKey] {
+            guard existing.count < config.maxWaitersPerPendingCID else { return [:] }
+        } else {
+            guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
+        }
+
         return await withCheckedContinuation { continuation in
             pendingVolumeRequests[volumeKey, default: []].append(continuation)
             fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
@@ -1815,6 +1829,16 @@ public actor Ivy {
                 self.resolveVolumeRequest(key: volumeKey, result: [:])
             }
         }
+    }
+
+    /// Returns true if a new continuation can be appended to `pendingRequests[cid]`.
+    /// Rejects when either the per-CID waiter list or the global pending-map
+    /// capacity would be exceeded.
+    private func canRegisterPending(cid: String) -> Bool {
+        if let existing = pendingRequests[cid] {
+            return existing.count < config.maxWaitersPerPendingCID
+        }
+        return pendingRequests.count < config.maxPendingRequests
     }
 
     private func resolveVolumeRequest(key: String, result: [String: Data]) {
