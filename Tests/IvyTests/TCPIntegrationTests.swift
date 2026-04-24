@@ -224,10 +224,13 @@ struct TCPIntegrationTests {
             signature: Data(),
             fee: 5
         )
-        try await Task.sleep(for: .seconds(2))
 
-        // Node 2 should have the pin announcement stored (received via TCP)
-        let stored = await ivy2.storedPinAnnouncements(for: "pinned-data-root")
+        var stored: [(publicKey: String, selector: String)] = []
+        for _ in 0..<10 {
+            try await Task.sleep(for: .milliseconds(500))
+            stored = await ivy2.storedPinAnnouncements(for: "pinned-data-root")
+            if !stored.isEmpty { break }
+        }
         #expect(!stored.isEmpty, "Pin announcement should be discoverable on Node 2")
         if let first = stored.first {
             #expect(first.publicKey == kp1.publicKey, "Pinner should be Node 1")
