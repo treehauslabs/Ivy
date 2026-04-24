@@ -10,6 +10,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/treehauslabs/Acorn.git", from: "2.1.0"),
         .package(url: "https://github.com/treehauslabs/Tally.git", from: "1.3.0"),
+        .package(url: "https://github.com/treehauslabs/VolumeBroker.git", from: "1.0.0"),
         .package(url: "https://github.com/apple/swift-nio.git", from: "2.65.0"),
     ],
     targets: [
@@ -18,6 +19,7 @@ let package = Package(
             dependencies: [
                 "Acorn",
                 "Tally",
+                "VolumeBroker",
                 .product(name: "NIOCore", package: "swift-nio"),
                 .product(name: "NIOPosix", package: "swift-nio"),
                 .product(name: "NIOFoundationCompat", package: "swift-nio"),

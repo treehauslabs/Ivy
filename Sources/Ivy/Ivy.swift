@@ -4,6 +4,7 @@ import NIOPosix
 import Acorn
 import Tally
 import Crypto
+import VolumeBroker
 
 public enum IvyError: Error, Sendable {
     case notRunning
@@ -21,6 +22,7 @@ public actor Ivy {
 
     private var connections: [PeerID: PeerConnection] = [:]
     private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
+    public let broker: (any VolumeBroker)?
     private var _worker: NetworkCASWorker?
     private var serverChannel: Channel?
     #if canImport(Network)
@@ -56,8 +58,9 @@ public actor Ivy {
     // Per-peer bandwidth budgeting
     private let sendBudget: SendBudget
 
-    public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
+    public init(config: IvyConfig, broker: (any VolumeBroker)? = nil, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
+        self.broker = broker
         self.localID = PeerID(publicKey: config.publicKey)
         self.tally = Tally(config: config.tallyConfig)
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
@@ -343,7 +346,10 @@ public actor Ivy {
     }
 
     public func publishBlock(cid: String, data: Data) async {
-        if let w = _worker, let near = await w.near {
+        if let broker {
+            let payload = VolumePayload(root: cid, entries: [cid: data])
+            try? await broker.storeVolumeLocal(payload)
+        } else if let w = _worker, let near = await w.near {
             await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
         }
         blockCache[cid] = data
@@ -949,17 +955,15 @@ public actor Ivy {
     private func handleGetZoneInventory(nodeHash: Data, limit: UInt16, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
-        guard let w = _worker, let near = await w.near else {
+        // Zone inventory requires scanning stored CIDs — only available via ProfitWeightedStore legacy path
+        guard let w = _worker, let near = await w.near,
+              let store = near as? ProfitWeightedStore else {
             fireToPeer(peer, .zoneInventory(cids: []))
             return
         }
 
-        if let store = near as? ProfitWeightedStore {
-            let cids = await store.storedCIDsClosestTo(hash: Array(nodeHash), limit: Int(limit))
-            fireToPeer(peer, .zoneInventory(cids: cids))
-        } else {
-            fireToPeer(peer, .zoneInventory(cids: []))
-        }
+        let cids = await store.storedCIDsClosestTo(hash: Array(nodeHash), limit: Int(limit))
+        fireToPeer(peer, .zoneInventory(cids: cids))
     }
 
     private func handleZoneInventory(cids: [String], from peer: PeerID) async {
@@ -1427,7 +1431,6 @@ public actor Ivy {
         return data
     }
 
-    /// Store content locally and announce to the DHT.
     public func save(cid: String, data: Data, pin: Bool = true) async {
         await publishBlock(cid: cid, data: data)
         if pin {
@@ -1609,8 +1612,6 @@ public actor Ivy {
         delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
     }
 
-    /// Handle pushVolume: a high-bandwidth peer proactively sent full volume data.
-    /// Store all items, register membership, record the sender as a provider, then announce metadata to other peers.
     private func handlePushVolume(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
@@ -1620,10 +1621,10 @@ public actor Ivy {
 
         let childCIDs = items.map(\.cid)
         var totalSize: UInt64 = 0
+        var entries: [String: Data] = [:]
 
-        // Store items locally and track membership
         for (cid, data) in items {
-            blockCache[cid] = data
+            entries[cid] = data
             haveSet.insert(cid)
             volumeMembership[cid] = rootCID
             totalSize += UInt64(data.count)
@@ -1631,11 +1632,16 @@ public actor Ivy {
         volumeMembership[rootCID] = rootCID
         recordVolumeProvider(rootCID: rootCID, peer: peer)
 
-        // Store in profit-weighted store for co-location
-        if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
-            await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
-            for (cid, data) in items {
-                await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+        if let broker {
+            let payload = VolumePayload(root: rootCID, entries: entries)
+            try? await broker.storeVolumeLocal(payload)
+        } else {
+            for (cid, data) in items { blockCache[cid] = data }
+            if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
+                await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
+                for (cid, data) in items {
+                    await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+                }
             }
         }
 
@@ -1644,7 +1650,6 @@ public actor Ivy {
         tally.recordReceived(peer: peer, bytes: totalBytes, cpl: cpl)
         tally.recordSuccess(peer: peer)
 
-        // Re-announce as metadata to other peers (they can request via getVolume if interested)
         let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
         broadcastPayload(announcePayload, excluding: peer)
 
@@ -1661,35 +1666,36 @@ public actor Ivy {
         }
     }
 
-    /// Publish a volume: store all items locally, track membership, announce to peers.
     public func publishVolume(rootCID: String, items: [(cid: String, data: Data)]) async {
         let childCIDs = items.map(\.cid)
         let totalSize = UInt64(items.reduce(0) { $0 + $1.data.count })
 
-        // Track membership
-        for child in childCIDs {
-            volumeMembership[child] = rootCID
-        }
+        for child in childCIDs { volumeMembership[child] = rootCID }
         volumeMembership[rootCID] = rootCID
 
-        // Store locally
-        if let w = _worker, let near = await w.near {
-            if let store = near as? ProfitWeightedStore {
-                await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
-                for (cid, data) in items {
-                    await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
-                }
-            } else {
-                for (cid, data) in items {
-                    await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
-                }
-            }
+        var entries: [String: Data] = [:]
+        for (cid, data) in items {
+            entries[cid] = data
+            haveSet.insert(cid)
         }
 
-        // Cache
-        for (cid, data) in items {
-            blockCache[cid] = data
-            haveSet.insert(cid)
+        if let broker {
+            let payload = VolumePayload(root: rootCID, entries: entries)
+            try? await broker.storeVolumeLocal(payload)
+        } else {
+            for (cid, data) in items { blockCache[cid] = data }
+            if let w = _worker, let near = await w.near {
+                if let store = near as? ProfitWeightedStore {
+                    await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
+                    for (cid, data) in items {
+                        await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
+                    }
+                } else {
+                    for (cid, data) in items {
+                        await near.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
+                    }
+                }
+            }
         }
 
         // High-bandwidth push: proactively send full volume data to top-reputation peers
@@ -1737,24 +1743,39 @@ public actor Ivy {
 
     /// Fetch a volume's contents by batch-requesting from a known provider.
     /// Falls back to individual DHT lookups for any CIDs the provider can't serve.
+    public func fetchVolume(rootCID: String, fee: UInt64? = nil) async -> VolumePayload? {
+        if let broker, let payload = await broker.fetchVolume(root: rootCID) {
+            return payload
+        }
+        let result = await fetchVolume(rootCID: rootCID, childCIDs: [rootCID], fee: fee)
+        guard !result.isEmpty else { return nil }
+        return VolumePayload(root: rootCID, entries: result)
+    }
+
     public func fetchVolume(rootCID: String, childCIDs: [String], fee: UInt64? = nil) async -> [String: Data] {
         var result: [String: Data] = [:]
         var missing: [String] = []
 
-        // Check local cache first
-        for cid in childCIDs {
-            if let data = blockCache[cid] {
-                result[cid] = data
-            } else if let data = await getLocalBlock(cid: cid) {
-                result[cid] = data
-            } else {
-                missing.append(cid)
+        // Check broker first
+        if let broker, let payload = await broker.fetchVolumeLocal(root: rootCID) {
+            for cid in childCIDs {
+                if let data = payload.entries[cid] { result[cid] = data }
+                else { missing.append(cid) }
+            }
+        } else {
+            for cid in childCIDs {
+                if let data = blockCache[cid] {
+                    result[cid] = data
+                } else if let data = await getLocalBlock(cid: cid) {
+                    result[cid] = data
+                } else {
+                    missing.append(cid)
+                }
             }
         }
 
         guard !missing.isEmpty else { return result }
 
-        // Try known volume providers first (batch request)
         if let providers = volumeProviders[rootCID] {
             for provider in providers {
                 guard connections[provider] != nil || localPeers[provider] != nil else { continue }
@@ -1773,7 +1794,6 @@ public actor Ivy {
             }
         }
 
-        // For remaining missing CIDs, find providers via DHT
         if !missing.isEmpty {
             let rootHash = Router.hash(rootCID)
             let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
@@ -1785,22 +1805,23 @@ public actor Ivy {
                 for (cid, data) in batchResult {
                     result[cid] = data
                     missing.removeAll { $0 == cid }
-                    // This peer is a volume provider — remember them
                     recordVolumeProvider(rootCID: rootCID, peer: entry.id)
                 }
                 if missing.isEmpty { break }
             }
         }
 
-        // Last resort: individual fee-based DHT lookups for stragglers
         for cid in missing {
             if let data = await get(cid: cid, fee: fee) {
                 result[cid] = data
             }
         }
 
-        // Store volume in distance store for co-location
-        if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
+        // Store fetched volume in broker for local caching
+        if let broker, !result.isEmpty {
+            let payload = VolumePayload(root: rootCID, entries: result)
+            try? await broker.storeVolumeLocal(payload)
+        } else if let w = _worker, let near = await w.near, let store = near as? ProfitWeightedStore {
             await store.registerVolume(rootCID: rootCID, childCIDs: childCIDs)
             for (cid, data) in result {
                 await store.storeVolumeBlock(cid: ContentIdentifier(rawValue: cid), data: data, volumeRootCID: rootCID)
@@ -1892,6 +1913,12 @@ public actor Ivy {
     // MARK: - Private Helpers
 
     private func getLocalBlock(cid: String) async -> Data? {
+        if let broker {
+            if let payload = await broker.fetchVolume(root: cid) {
+                return payload.entries[cid]
+            }
+        }
+        if let cached = blockCache[cid] { return cached }
         guard let w = _worker, let near = await w.near else { return nil }
         return await near.getLocal(cid: ContentIdentifier(rawValue: cid))
     }
