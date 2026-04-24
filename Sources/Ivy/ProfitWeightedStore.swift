@@ -34,10 +34,27 @@ public actor ProfitWeightedStore: AcornCASWorker {
     private var volumeMembership: [String: String] = [:]
     private var volumeChildren: [String: Set<String>] = [:]
 
-    public init(inner: any AcornCASWorker, nodePublicKey: String, maxEntries: Int = 100_000, protectionPolicy: any EvictionProtectionPolicy = NoProtection()) {
+    // Per-chain ownership: root CID → owner chain ID, owner → set of roots.
+    // Optional — callers that pass `owner: nil` register volumes without an
+    // owner and participate in global eviction unchanged. When set, eviction
+    // preferentially targets owners that exceed `maxVolumesPerOwner`, so one
+    // chain can't starve the nexus by churning unprotected CIDs through the
+    // shared CAS. See S4 in lattice-node/UNSTOPPABLE_LATTICE.md.
+    private var volumeOwner: [String: String] = [:]
+    private var ownerVolumes: [String: Set<String>] = [:]
+    private let maxVolumesPerOwner: Int
+
+    public init(
+        inner: any AcornCASWorker,
+        nodePublicKey: String,
+        maxEntries: Int = 100_000,
+        maxVolumesPerOwner: Int = 5_000,
+        protectionPolicy: any EvictionProtectionPolicy = NoProtection()
+    ) {
         self.inner = inner
         self.nodeHash = Router.hash(nodePublicKey)
         self.maxEntries = maxEntries
+        self.maxVolumesPerOwner = maxVolumesPerOwner
         self.cidProfit = BoundedDictionary(capacity: maxEntries)
         self.protectionPolicy = protectionPolicy
     }
@@ -165,7 +182,7 @@ public actor ProfitWeightedStore: AcornCASWorker {
         await inner.storeLocal(cid: cid, data: data)
     }
 
-    public func registerVolume(rootCID: String, childCIDs: [String]) {
+    public func registerVolume(rootCID: String, childCIDs: [String], owner: String? = nil) {
         for child in childCIDs {
             volumeMembership[child] = rootCID
             volumeChildren[rootCID, default: []].insert(child)
@@ -173,11 +190,32 @@ public actor ProfitWeightedStore: AcornCASWorker {
         volumeChildren[rootCID, default: []].insert(rootCID)
         volumeMembership[rootCID] = rootCID
 
+        if let owner {
+            if let prior = volumeOwner[rootCID], prior != owner {
+                ownerVolumes[prior]?.remove(rootCID)
+                if ownerVolumes[prior]?.isEmpty == true {
+                    ownerVolumes.removeValue(forKey: prior)
+                }
+            }
+            volumeOwner[rootCID] = owner
+            ownerVolumes[owner, default: []].insert(rootCID)
+        }
+
         // Membership tracking is pure bookkeeping on top of cidProfit. If the
         // caller registered CIDs that cidProfit already evicted (or never saw),
         // drop them here so the volume dicts stay in sync and don't grow
         // unbounded as the chain mines blocks forever.
         compactVolumeTracking()
+    }
+
+    /// Number of distinct owned volumes currently tracked for `owner`.
+    public func ownedVolumeCount(owner: String) -> Int {
+        ownerVolumes[owner]?.count ?? 0
+    }
+
+    /// Owner (if any) recorded for `rootCID`.
+    public func volumeOwner(rootCID: String) -> String? {
+        volumeOwner[rootCID]
     }
 
     /// Drop a CID from both volume dicts. If a root loses its last member,
@@ -198,6 +236,12 @@ public actor ProfitWeightedStore: AcornCASWorker {
         // cidProfit evicts them.
         if volumeChildren[cid] != nil {
             volumeChildren.removeValue(forKey: cid)
+        }
+        if let owner = volumeOwner.removeValue(forKey: cid) {
+            ownerVolumes[owner]?.remove(cid)
+            if ownerVolumes[owner]?.isEmpty == true {
+                ownerVolumes.removeValue(forKey: owner)
+            }
         }
     }
 
@@ -255,33 +299,56 @@ public actor ProfitWeightedStore: AcornCASWorker {
     private static let evictionSampleSize = 32
 
     /// Find the least profitable non-protected CID via random sampling.
+    /// Same per-owner quota bias as `evictLeastProfitableVolume`: sampled
+    /// keys whose owning volume is over `maxVolumesPerOwner` always beat
+    /// under-quota candidates.
     private func findLeastProfitable() async -> String? {
         guard cidProfit.count > 0 else { return nil }
         let sampledKeys = cidProfit.randomSampleKeys(count: Self.evictionSampleSize)
 
         var worstKey: String?
         var worstScore: UInt64 = .max
+        var worstOwnerOverQuota = false
 
         for key in sampledKeys {
             guard let metrics = cidProfit[key] else { continue }
             if metrics.isProtected { continue }
             if await protectionPolicy.isProtected(key) { continue }
             let score = profitScore(metrics)
-            if score < worstScore {
+            let ownerOverQuota: Bool = {
+                let root = volumeMembership[key] ?? key
+                guard let owner = volumeOwner[root] else { return false }
+                return (ownerVolumes[owner]?.count ?? 0) > maxVolumesPerOwner
+            }()
+            let preferOverPrevious: Bool
+            if ownerOverQuota != worstOwnerOverQuota {
+                preferOverPrevious = ownerOverQuota
+            } else {
+                preferOverPrevious = score < worstScore
+            }
+            if preferOverPrevious {
                 worstScore = score
                 worstKey = key
+                worstOwnerOverQuota = ownerOverQuota
             }
         }
         return worstKey
     }
 
     /// Find and evict the least profitable volume (all members) or standalone CID.
+    ///
+    /// Per-owner quota bias: if any owner has registered more than
+    /// `maxVolumesPerOwner` volumes, sampled candidates belonging to that
+    /// owner win ties and are always preferred over unowned/under-quota
+    /// candidates. This prevents one chain from flooding unprotected CIDs
+    /// through the shared CAS at the expense of other chains' bytes.
     private func evictLeastProfitableVolume() async -> Set<String>? {
         guard cidProfit.count > 0 else { return nil }
         let sampledKeys = cidProfit.randomSampleKeys(count: Self.evictionSampleSize)
 
         var worstRoot: String?
         var worstScore: UInt64 = .max
+        var worstOwnerOverQuota = false
 
         for key in sampledKeys {
             guard let metrics = cidProfit[key] else { continue }
@@ -290,9 +357,23 @@ public actor ProfitWeightedStore: AcornCASWorker {
             if await protectionPolicy.isProtected(root) { continue }
             if await protectionPolicy.isProtected(key) { continue }
             let score = profitScore(metrics)
-            if score < worstScore {
+            let ownerOverQuota: Bool = {
+                guard let owner = volumeOwner[root] else { return false }
+                return (ownerVolumes[owner]?.count ?? 0) > maxVolumesPerOwner
+            }()
+            // An over-quota owner's volume outranks any under-quota candidate
+            // regardless of profit score. Among candidates in the same quota
+            // class, lower profit wins as before.
+            let preferOverPrevious: Bool
+            if ownerOverQuota != worstOwnerOverQuota {
+                preferOverPrevious = ownerOverQuota
+            } else {
+                preferOverPrevious = score < worstScore
+            }
+            if preferOverPrevious {
                 worstScore = score
                 worstRoot = root
+                worstOwnerOverQuota = ownerOverQuota
             }
         }
 
