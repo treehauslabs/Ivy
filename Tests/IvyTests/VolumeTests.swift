@@ -188,14 +188,26 @@ struct VolumeStorageTests {
     func testVolumeMembership() async {
         let store = ProfitWeightedStore(inner: MemStore(), nodePublicKey: "membership-node", maxEntries: 1000)
 
-        let rootCID = "block-42"
-        let children = ["tx-1", "tx-2", "tx-3"]
-        await store.registerVolume(rootCID: rootCID, childCIDs: children)
+        // Volume membership is parasitic on cidProfit: registerVolume
+        // compacts entries whose CIDs aren't stored (see commit 368aa68).
+        // Production callers always write the bytes first, then register.
+        let rootData = Data("block-42-bytes".utf8)
+        let rootCID = ContentIdentifier(for: rootData).rawValue
+        let txData: [(String, Data)] = (1...3).map { i in
+            let d = Data("tx-\(i)-bytes".utf8)
+            return (ContentIdentifier(for: d).rawValue, d)
+        }
+
+        await store.storeLocal(cid: ContentIdentifier(rawValue: rootCID), data: rootData)
+        for (cid, data) in txData {
+            await store.storeLocal(cid: ContentIdentifier(rawValue: cid), data: data)
+        }
+        await store.registerVolume(rootCID: rootCID, childCIDs: txData.map(\.0))
 
         let members = await store.volumeMembers(rootCID: rootCID)
-        #expect(members.contains("tx-1"))
-        #expect(members.contains("tx-2"))
-        #expect(members.contains("tx-3"))
+        for (cid, _) in txData {
+            #expect(members.contains(cid))
+        }
         #expect(members.contains(rootCID)) // Root is self-member
     }
 
