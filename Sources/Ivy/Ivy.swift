@@ -213,14 +213,17 @@ public actor Ivy {
         }
     }
 
-    func fireToPeer(_ peer: PeerID, _ message: Message, earnsFee: Bool = false) {
+    func fireToPeer(_ peer: PeerID, _ message: Message, earnsFee: Bool = false, bypassBudget: Bool = false) {
         if let local = localPeers[peer] {
             local.send(message)
             return
         }
         guard let conn = connections[peer] else { return }
-        // Keepalive and fee-earning messages bypass budget
-        if message.isKeepalive || earnsFee {
+        // Keepalive, fee-earning, and bypass-flagged messages skip the budget
+        // gate. `bypassBudget` covers replies to inbound requests and
+        // consensus-critical gossip follow-ups — throttling those once
+        // `debtPressure` spikes silently strands block resolution mid-mesh.
+        if message.isKeepalive || earnsFee || bypassBudget {
             conn.fireAndForgetMessage(message)
             return
         }
@@ -244,17 +247,18 @@ public actor Ivy {
     }
 
     /// Broadcast a pre-serialized payload to all connected network peers except `excluding`.
-    /// Respects Tally allowance and reputation-weighted send budget.
+    ///
+    /// All current callers broadcast tiny control-plane announcements
+    /// (announceBlock, announceVolume) that drive consensus and content
+    /// discovery. These bypass `sendBudget` — rate-limiting a ~100-byte
+    /// announce once `debtPressure` spikes would silently stall block
+    /// propagation across a healthy mesh. Abuse is still gated by
+    /// `tally.shouldAllow`.
     private func broadcastPayload(_ payload: Data, excluding: PeerID? = nil) {
         for (peer, conn) in connections {
             if let excluded = excluding, peer == excluded { continue }
             guard tally.shouldAllow(peer: peer) else { continue }
-            let rep = tally.reputation(for: peer)
-            Task {
-                let pressure = await ledger.debtPressure(for: peer)
-                guard await sendBudget.shouldSend(to: peer, bytes: payload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
-                conn.fireAndForget(payload)
-            }
+            conn.fireAndForget(payload)
         }
     }
 
@@ -703,7 +707,7 @@ public actor Ivy {
 
     private func handleDHTForward(cid: String, ttl: UInt8, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else {
-            fireToPeer(peer, .dontHave(cid: cid))
+            fireToPeer(peer, .dontHave(cid: cid), bypassBudget: true)
             return
         }
 
@@ -712,14 +716,13 @@ public actor Ivy {
             data = await getLocalBlock(cid: cid)
         }
         if data == nil, let w = _worker {
-            let near = await w.near
-            if let near {
+            if let near = await w.near {
                 data = await near.getLocal(cid: ContentIdentifier(rawValue: cid))
             }
         }
 
         if let data {
-            fireToPeer(peer, .block(cid: cid, data: data))
+            fireToPeer(peer, .block(cid: cid, data: data), bypassBudget: true)
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
         } else if ttl > 0 {
@@ -1325,6 +1328,26 @@ public actor Ivy {
         }
         if sent == 0 { return nil }
 
+        return await withCheckedContinuation { continuation in
+            pendingRequests[cid, default: []].append(continuation)
+            Task {
+                try? await Task.sleep(for: config.requestTimeout)
+                self.resolvePending(cid: cid, data: nil)
+            }
+        }
+    }
+
+    /// Retrieve content from a directly-connected peer without fee accounting.
+    /// Use this when the peer just offered the data to us (gossip follow-up):
+    /// they're completing their own broadcast, so there's no economic round-trip
+    /// to reward. Bypasses handleFeeForward (and its debtPressure throttle) by
+    /// routing through handleDHTForward on the receiver.
+    public func getDirect(cid: String, from peer: PeerID) async -> Data? {
+        if let cached = blockCache[cid] { return cached }
+
+        if connections[peer] == nil && localPeers[peer] == nil { return nil }
+
+        fireToPeer(peer, .dhtForward(cid: cid, ttl: 0), bypassBudget: true)
         return await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
             Task {
