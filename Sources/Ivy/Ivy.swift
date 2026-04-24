@@ -711,8 +711,12 @@ public actor Ivy {
             return
         }
 
-        var data: Data?
-        if haveSet.contains(cid) {
+        // Check blockCache first so nodes that publish via `save` /
+        // `publishBlock` (which populates blockCache + haveSet unconditionally)
+        // can serve direct fetches even when no NetworkCASWorker is wired —
+        // mirrors handleFeeForward's ordering.
+        var data: Data? = blockCache[cid]
+        if data == nil && haveSet.contains(cid) {
             data = await getLocalBlock(cid: cid)
         }
         if data == nil, let w = _worker {
@@ -1342,26 +1346,51 @@ public actor Ivy {
     /// they're completing their own broadcast, so there's no economic round-trip
     /// to reward. Bypasses handleFeeForward (and its debtPressure throttle) by
     /// routing through handleDHTForward on the receiver.
+    ///
+    /// Records success/failure on `peer` in Tally: a peer that announced a
+    /// rootCID (or claimed to hold data via gossip) and then fails to deliver
+    /// takes a reputation hit, so repeated liars eventually fail shouldAllow
+    /// and stop being routed to.
     public func getDirect(cid: String, from peer: PeerID) async -> Data? {
         if let cached = blockCache[cid] { return cached }
 
         if connections[peer] == nil && localPeers[peer] == nil { return nil }
 
+        // recordRequest establishes the ledger entry so the subsequent
+        // recordSuccess / recordFailure can actually mutate reputation —
+        // Tally.recordSuccess/Failure are no-ops if the peer isn't in ledgers.
+        tally.recordRequest(peer: peer)
         fireToPeer(peer, .dhtForward(cid: cid, ttl: 0), bypassBudget: true)
-        return await withCheckedContinuation { continuation in
+        let data: Data? = await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
             Task {
                 try? await Task.sleep(for: config.requestTimeout)
                 self.resolvePending(cid: cid, data: nil)
             }
         }
+        if data != nil {
+            tally.recordSuccess(peer: peer)
+        } else {
+            tally.recordFailure(peer: peer)
+        }
+        return data
     }
 
     /// Retrieve content by CID targeting a specific pinner (from findPins result).
+    ///
+    /// Records success/failure on `target` in Tally: a peer whose pin announce
+    /// we trusted but which then fails to serve the CID is demoted so future
+    /// pin-selection sorts it below honest pinners and shouldAllow rejects it
+    /// once reputation drops enough.
     public func get(cid: String, target: PeerID, fee: UInt64? = nil) async -> Data? {
         let requestFee = fee ?? config.defaultRequestFee
 
         if let cached = blockCache[cid] { return cached }
+
+        // recordRequest establishes the ledger so demotion on failure can
+        // actually register — otherwise recordFailure silently no-ops for a
+        // peer we've never interacted with before.
+        tally.recordRequest(peer: target)
 
         let targetHash = Data(Router.hash(target.publicKey))
         let closest = router.closestPeers(to: Array(targetHash), count: config.maxConcurrentRequests)
@@ -1375,13 +1404,19 @@ public actor Ivy {
         }
         if sent == 0 { return nil }
 
-        return await withCheckedContinuation { continuation in
+        let data: Data? = await withCheckedContinuation { continuation in
             pendingRequests[cid, default: []].append(continuation)
             Task {
                 try? await Task.sleep(for: config.requestTimeout)
                 self.resolvePending(cid: cid, data: nil)
             }
         }
+        if data != nil {
+            tally.recordSuccess(peer: target)
+        } else {
+            tally.recordFailure(peer: target)
+        }
+        return data
     }
 
     /// Store content locally and announce to the DHT.
