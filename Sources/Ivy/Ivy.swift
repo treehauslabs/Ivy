@@ -4,7 +4,11 @@ import NIOPosix
 import Acorn
 import Tally
 import Crypto
-import VolumeBroker
+
+public protocol IvyDataSource: AnyObject, Sendable {
+    func data(for cid: String) async -> Data?
+    func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)]
+}
 
 public enum IvyError: Error, Sendable {
     case notRunning
@@ -19,10 +23,10 @@ public actor Ivy {
     public let group: EventLoopGroup
 
     public weak var delegate: IvyDelegate?
+    public weak var dataSource: IvyDataSource?
 
     private var connections: [PeerID: PeerConnection] = [:]
     private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
-    public let broker: any VolumeBroker
     private var serverChannel: Channel?
     #if canImport(Network)
     private var discovery: LocalDiscovery?
@@ -46,9 +50,8 @@ public actor Ivy {
     private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
 
-    public init(config: IvyConfig, broker: any VolumeBroker, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
+    public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
-        self.broker = broker
         self.localID = PeerID(publicKey: config.publicKey)
         self.tally = Tally(config: config.tallyConfig)
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
@@ -288,8 +291,6 @@ public actor Ivy {
     }
 
     public func publishBlock(cid: String, data: Data) async {
-        let payload = VolumePayload(root: cid, entries: [cid: data])
-        try? await broker.storeVolumeLocal(payload)
         haveSet.insert(cid)
         let payload2 = Message.announceBlock(cid: cid).serialize()
         broadcastPayload(payload2)
@@ -471,10 +472,6 @@ public actor Ivy {
             resolvePending(cid: cid, data: data)
             resolveForwards(cid: cid, data: data, from: peer)
 
-            // Store received block via broker
-            let blockPayload = VolumePayload(root: cid, entries: [cid: data])
-            try? await broker.storeVolumeLocal(blockPayload)
-
             delegate?.ivy(self, didReceiveBlock: cid, data: data, from: peer)
 
         case .dontHave:
@@ -568,9 +565,6 @@ public actor Ivy {
                     result[item.cid] = item.data
                     haveSet.insert(item.cid)
                 }
-                // Store volume via broker
-                let brokerPayload = VolumePayload(root: rootCID, entries: result)
-                try? await broker.storeVolumeLocal(brokerPayload)
                 recordVolumeProvider(rootCID: rootCID, peer: peer)
                 resolveVolumeRequest(key: volumeKey, result: result)
             }
@@ -646,10 +640,6 @@ public actor Ivy {
             firePayloadToPeer(requester, payload)
             tally.recordSent(peer: requester, bytes: data.count, cpl: cpl)
         }
-
-        // Store forwarded content via broker
-        let brokerPayload = VolumePayload(root: cid, entries: [cid: data])
-        Task { try? await broker.storeVolumeLocal(brokerPayload) }
     }
 
     // MARK: - haveCIDs (passive responder only)
@@ -811,10 +801,10 @@ public actor Ivy {
 
     // MARK: - Public API (Application-Facing)
 
-    /// Retrieve content by CID. Checks local storage, then DHT.
+    /// Retrieve content by CID. Checks dataSource, then DHT.
     public func get(cid: String) async -> Data? {
-        // Local storage first
-        if let data = await getLocalBlock(cid: cid) { return data }
+        // DataSource first
+        if let data = await dataSource?.data(for: cid) { return data }
 
         // DHT forward toward the CID hash
         let cidHash = Router.hash(cid)
@@ -848,7 +838,7 @@ public actor Ivy {
     /// takes a reputation hit, so repeated liars eventually fail shouldAllow
     /// and stop being routed to.
     public func getDirect(cid: String, from peer: PeerID) async -> Data? {
-        if let data = await getLocalBlock(cid: cid) { return data }
+        if let data = await dataSource?.data(for: cid) { return data }
 
         if connections[peer] == nil && localPeers[peer] == nil { return nil }
 
@@ -877,7 +867,7 @@ public actor Ivy {
     /// pin-selection sorts it below honest pinners and shouldAllow rejects it
     /// once reputation drops enough.
     public func get(cid: String, target: PeerID) async -> Data? {
-        if let data = await getLocalBlock(cid: cid) { return data }
+        if let data = await dataSource?.data(for: cid) { return data }
 
         tally.recordRequest(peer: target)
 
@@ -907,14 +897,6 @@ public actor Ivy {
             tally.recordFailure(peer: target)
         }
         return data
-    }
-
-    public func save(cid: String, data: Data, pin: Bool = true) async {
-        await publishBlock(cid: cid, data: data)
-        if pin {
-            let expiry = UInt64(Date().timeIntervalSince1970) + 86400
-            publishPinAnnounce(rootCID: cid, selector: "/", expiry: expiry, signature: Data(), fee: 0)
-        }
     }
 
     /// Discover pinners for a CID via findPins.
@@ -950,12 +932,7 @@ public actor Ivy {
     private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
-        var items: [(cid: String, data: Data)] = []
-        for cid in cids {
-            if let data = await getLocalBlock(cid: cid) {
-                items.append((cid: cid, data: data))
-            }
-        }
+        let items = await dataSource?.volumeData(for: rootCID, cids: cids) ?? []
 
         if !items.isEmpty {
             fireToPeer(peer, .blocks(rootCID: rootCID, items: items))
@@ -992,17 +969,12 @@ public actor Ivy {
 
         let childCIDs = items.map(\.cid)
         var totalSize: UInt64 = 0
-        var entries: [String: Data] = [:]
 
         for (cid, data) in items {
-            entries[cid] = data
             haveSet.insert(cid)
             totalSize += UInt64(data.count)
         }
         recordVolumeProvider(rootCID: rootCID, peer: peer)
-
-        let brokerPayload = VolumePayload(root: rootCID, entries: entries)
-        try? await broker.storeVolumeLocal(brokerPayload)
 
         let totalBytes = items.reduce(0) { $0 + $1.data.count }
         let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
@@ -1029,14 +1001,9 @@ public actor Ivy {
         let childCIDs = items.map(\.cid)
         let totalSize = UInt64(items.reduce(0) { $0 + $1.data.count })
 
-        var entries: [String: Data] = [:]
-        for (cid, data) in items {
-            entries[cid] = data
+        for (cid, _) in items {
             haveSet.insert(cid)
         }
-
-        let brokerPayload = VolumePayload(root: rootCID, entries: entries)
-        try? await broker.storeVolumeLocal(brokerPayload)
 
         // High-bandwidth push: proactively send full volume data to top-reputation peers
         // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
@@ -1075,33 +1042,21 @@ public actor Ivy {
         return Array(sorted.prefix(count))
     }
 
-    /// Fetch a volume's contents. Tries broker first, falls back to network fetch.
-    public func fetchVolume(rootCID: String) async -> VolumePayload? {
-        if let payload = await broker.fetchVolume(root: rootCID) {
-            return payload
-        }
-        let result = await fetchVolume(rootCID: rootCID, childCIDs: [rootCID])
-        guard !result.isEmpty else { return nil }
-        return VolumePayload(root: rootCID, entries: result)
+    /// Fetch a volume's contents from the network.
+    public func fetchVolume(rootCID: String) async -> [String: Data] {
+        return await fetchVolume(rootCID: rootCID, childCIDs: [rootCID])
     }
 
     public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
         var result: [String: Data] = [:]
         var missing: [String] = []
 
-        // Check broker first
-        if let payload = await broker.fetchVolumeLocal(root: rootCID) {
-            for cid in childCIDs {
-                if let data = payload.entries[cid] { result[cid] = data }
-                else { missing.append(cid) }
-            }
-        } else {
-            for cid in childCIDs {
-                if let data = await getLocalBlock(cid: cid) {
-                    result[cid] = data
-                } else {
-                    missing.append(cid)
-                }
+        // Check dataSource first
+        for cid in childCIDs {
+            if let data = await getLocalBlock(cid: cid) {
+                result[cid] = data
+            } else {
+                missing.append(cid)
             }
         }
 
@@ -1146,12 +1101,6 @@ public actor Ivy {
             if let data = await get(cid: cid) {
                 result[cid] = data
             }
-        }
-
-        // Store fetched volume in broker for local caching
-        if !result.isEmpty {
-            let brokerPayload = VolumePayload(root: rootCID, entries: result)
-            try? await broker.storeVolumeLocal(brokerPayload)
         }
 
         return result
@@ -1234,10 +1183,7 @@ public actor Ivy {
     // MARK: - Private Helpers
 
     private func getLocalBlock(cid: String) async -> Data? {
-        if let payload = await broker.fetchVolumeLocal(root: cid) {
-            return payload.entries[cid]
-        }
-        return nil
+        return await dataSource?.data(for: cid)
     }
 
     private func resolvePending(cid: String, data: Data?) {

@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 @testable import Ivy
-import VolumeBroker
 @testable import Tally
 import Acorn
 
@@ -25,7 +24,7 @@ private func makeNode(publicKey: String, requestTimeout: Duration = .millisecond
         replicationInterval: .seconds(999),
         zoneSyncInterval: .seconds(999)
     )
-    return Ivy(config: config, broker: MemoryBroker())
+    return Ivy(config: config)
 }
 
 @Suite("Pin announce demotion")
@@ -62,11 +61,14 @@ struct PinAnnounceDemotionTests {
 
         let bID = await b.localID
 
-        // Stash data on B via save, which populates blockCache + haveSet so
-        // handleDHTForward on B can serve the follow-up request.
+        // Stash data on B via dataSource + publishBlock so haveSet is populated
+        // and handleDHTForward on B can serve the follow-up request.
         let cid = "cid-served-by-b"
         let payload = Data("hello".utf8)
-        await b.save(cid: cid, data: payload, pin: true)
+        let ds = DictDataSource()
+        ds[cid] = payload
+        await b.setDataSource(ds)
+        await b.publishBlock(cid: cid, data: payload)
 
         let beforeSuccesses = await a.tally.peerLedger(for: bID)?.successCount ?? 0
 

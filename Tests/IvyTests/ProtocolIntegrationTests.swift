@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 @testable import Ivy
-import VolumeBroker
 @testable import Tally
 
 /// Helper to create a minimal IvyConfig for testing
@@ -35,7 +34,7 @@ struct ProtocolIntegrationTests {
     @Test("Pin announcement stored and discoverable")
     func testPinAnnouncementStored() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config, broker: MemoryBroker())
+        let nodeA = Ivy(config: config)
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -56,7 +55,7 @@ struct ProtocolIntegrationTests {
     @Test("Peer message delivered to delegate")
     func testPeerMessageDelivered() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config, broker: MemoryBroker())
+        let nodeA = Ivy(config: config)
         let collector = MessageCollector()
         await nodeA.setDelegate(collector)
 
@@ -79,9 +78,37 @@ struct ProtocolIntegrationTests {
     }
 }
 
-// Helper extension to set delegate from async context
+// Helper extension to set delegate/dataSource from async context
 extension Ivy {
     func setDelegate(_ delegate: IvyDelegate?) {
         self.delegate = delegate
+    }
+
+    func setDataSource(_ dataSource: IvyDataSource?) {
+        self.dataSource = dataSource
+    }
+}
+
+/// Dict-backed data source for tests
+final class DictDataSource: IvyDataSource, @unchecked Sendable {
+    private var storage: [String: Data] = [:]
+    private let lock = NSLock()
+
+    subscript(cid: String) -> Data? {
+        get { lock.withLock { storage[cid] } }
+        set { lock.withLock { storage[cid] = newValue } }
+    }
+
+    func data(for cid: String) async -> Data? {
+        lock.withLock { storage[cid] }
+    }
+
+    func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)] {
+        lock.withLock {
+            cids.compactMap { cid in
+                if let d = storage[cid] { return (cid: cid, data: d) }
+                return nil
+            }
+        }
     }
 }

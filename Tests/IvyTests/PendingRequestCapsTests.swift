@@ -1,8 +1,6 @@
 import Testing
 import Foundation
 @testable import Ivy
-import VolumeBroker
-
 /// UNSTOPPABLE_LATTICE I11: `pendingRequests` and `pendingVolumeRequests` must
 /// not grow unbounded. A runaway local caller (or peer echoing distinct CIDs
 /// faster than requestTimeout drains) would otherwise allocate continuations
@@ -42,7 +40,7 @@ struct PendingRequestCapsTests {
 
     @Test("fetchBlock returns nil immediately when the pending dict is full")
     func testGlobalPendingCap() async throws {
-        let node = Ivy(config: cappedConfig(maxPending: 2, maxWaiters: 64), broker: MemoryBroker())
+        let node = Ivy(config: cappedConfig(maxPending: 2, maxWaiters: 64))
 
         // Launch two fetches for distinct CIDs. With no peers they register,
         // fire to zero targets, and block on relayTimeout.
@@ -70,7 +68,7 @@ struct PendingRequestCapsTests {
 
     @Test("fetchBlock returns nil immediately when per-CID waiter list is full")
     func testPerCIDWaiterCap() async throws {
-        let node = Ivy(config: cappedConfig(maxPending: 128, maxWaiters: 2), broker: MemoryBroker())
+        let node = Ivy(config: cappedConfig(maxPending: 128, maxWaiters: 2))
 
         // Two concurrent calls for the same CID; the second coalesces onto
         // the first's waiter list.

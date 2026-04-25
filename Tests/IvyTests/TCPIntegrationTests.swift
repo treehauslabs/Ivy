@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 @testable import Ivy
-import VolumeBroker
 import Acorn
 import Tally
 import Crypto
@@ -40,8 +39,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -70,8 +69,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         let collector = AnnouncementCollector()
         await ivy2.setDelegate(collector)
@@ -101,8 +100,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         let collector = BlockCollector()
         await ivy2.setDelegate(collector)
@@ -135,8 +134,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         let collector = GossipCollector()
         await ivy2.setDelegate(collector)
@@ -170,12 +169,15 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
-        // Store data on Node 1
+        // Store data on Node 1 via dataSource
         let testCID = "test-content-for-retrieval"
         let testData = Data("the-actual-content-bytes".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         try await ivy1.start()
@@ -205,8 +207,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -247,8 +249,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         let collector1 = GossipCollector()
         let collector2 = GossipCollector()
@@ -285,7 +287,7 @@ struct TCPIntegrationTests {
         let p1 = nextPort(); let p2 = nextPort()
 
         // Node 1 starts first (no bootstrap)
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
         try await ivy1.start()
 
         // Node 2 starts with Node 1 as bootstrap peer
@@ -293,7 +295,7 @@ struct TCPIntegrationTests {
             port: p2,
             publicKey: kp2.publicKey,
             bootstrapPeers: [PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1)]
-        ), broker: MemoryBroker())
+        ))
         try await ivy2.start()
 
         // Wait for bootstrap connection
@@ -313,13 +315,16 @@ struct TCPIntegrationTests {
         let kp3 = generateKey()
         let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
-        // Store data only on node 1
+        // Store data only on node 1 via dataSource
         let testCID = "relay-tcp-content"
         let testData = Data("only-on-node-1".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         try await ivy1.start()
@@ -351,8 +356,8 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -393,12 +398,15 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
-        // Store 1MB of data on node 1
+        // Store 1MB of data on node 1 via dataSource
         let largeData = Data(repeating: 0xAB, count: 1_048_576)
         let largeCID = "large-data-1mb"
+        let ds1 = DictDataSource()
+        ds1[largeCID] = largeData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: largeCID, data: largeData)
 
         try await ivy1.start()
@@ -426,13 +434,18 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
-        // Store 10 different CIDs on node 1
+        // Store 10 different CIDs on node 1 via dataSource
+        let ds1 = DictDataSource()
         for i in 0..<10 {
-            await ivy1.publishBlock(cid: "concurrent-\(i)", data: Data("data-\(i)".utf8))
+            let cid = "concurrent-\(i)"
+            let data = Data("data-\(i)".utf8)
+            ds1[cid] = data
+            await ivy1.publishBlock(cid: cid, data: data)
         }
+        await ivy1.setDataSource(ds1)
 
         try await ivy1.start()
         try await ivy2.start()
@@ -475,13 +488,16 @@ struct TCPIntegrationTests {
         let kp3 = generateKey()
         let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
-        // Data only on node 1
+        // Data only on node 1 via dataSource
         let testCID = "cache-test-data"
         let testData = Data("should-be-cached-on-relay".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         try await ivy1.start()
@@ -520,12 +536,15 @@ struct TCPIntegrationTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
-        // Node 1 has some data
+        // Node 1 has some data via dataSource
         let testCID = "pin-request-cid"
         let testData = Data("pinned-content".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         let gossipCollector = GossipCollector()
@@ -570,13 +589,16 @@ struct TCPIntegrationTests {
         let kp3 = generateKey()
         let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
-        // Data only on node 1
+        // Data only on node 1 via dataSource
         let testCID = "relay-revenue-cid"
         let testData = Data("relay-revenue-content".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         try await ivy1.start()
@@ -619,9 +641,9 @@ struct TCPIntegrationTests {
         let kp3 = generateKey()
         let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -669,13 +691,16 @@ struct TCPIntegrationTests {
         let kp3 = generateKey()
         let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
-        // Data only on node 1
+        // Data only on node 1 via dataSource
         let testCID = "relay-test-data"
         let testData = Data("relay-gated-content".utf8)
+        let ds1 = DictDataSource()
+        ds1[testCID] = testData
+        await ivy1.setDataSource(ds1)
         await ivy1.publishBlock(cid: testCID, data: testData)
 
         try await ivy1.start()
@@ -707,10 +732,10 @@ struct TCPIntegrationTests {
         let kp4 = generateKey()
         let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort(); let p4 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
-        let ivy4 = Ivy(config: makeConfig(port: p4, publicKey: kp4.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
+        let ivy4 = Ivy(config: makeConfig(port: p4, publicKey: kp4.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -761,8 +786,8 @@ struct NetworkRobustnessTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         try await ivy1.start()
         try await ivy2.start()
@@ -805,9 +830,9 @@ struct NetworkRobustnessTests {
         let kp3 = generateKey()
         let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
-        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         let collector = AnnouncementCollector()
         await ivy1.setDelegate(collector)
@@ -843,14 +868,14 @@ struct NetworkRobustnessTests {
     func testPeerChurn() async throws {
         let kp1 = generateKey()
         let p1 = nextPort()
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
         try await ivy1.start()
 
         // Rapidly connect and disconnect 10 peers
         for _ in 0..<10 {
             let kp = generateKey()
             let p = nextPort()
-            let ivy = Ivy(config: makeConfig(port: p, publicKey: kp.publicKey), broker: MemoryBroker())
+            let ivy = Ivy(config: makeConfig(port: p, publicKey: kp.publicKey))
             try await ivy.start()
             try await ivy.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
             try await Task.sleep(for: .milliseconds(50))
@@ -863,7 +888,7 @@ struct NetworkRobustnessTests {
 
         let kpFinal = generateKey()
         let pFinal = nextPort()
-        let ivyFinal = Ivy(config: makeConfig(port: pFinal, publicKey: kpFinal.publicKey), broker: MemoryBroker())
+        let ivyFinal = Ivy(config: makeConfig(port: pFinal, publicKey: kpFinal.publicKey))
         try await ivyFinal.start()
         try await ivyFinal.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
         try await Task.sleep(for: .milliseconds(500))
@@ -881,8 +906,8 @@ struct NetworkRobustnessTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         let collector = GossipCollector()
         await ivy2.setDelegate(collector)
@@ -918,17 +943,20 @@ struct NetworkRobustnessTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
-        // Store 5 different 10KB payloads on node 1
+        // Store 5 different 10KB payloads on node 1 via dataSource
+        let ds1 = DictDataSource()
         var expected: [String: Data] = [:]
         for i in 0..<5 {
             let cid = "large-vol-\(i)"
             let data = Data(repeating: UInt8(i), count: 10_000)
+            ds1[cid] = data
             await ivy1.publishBlock(cid: cid, data: data)
             expected[cid] = data
         }
+        await ivy1.setDataSource(ds1)
 
         try await ivy1.start()
         try await ivy2.start()
@@ -964,9 +992,9 @@ struct NetworkRobustnessTests {
         let kpB = generateKey()
         let p1 = nextPort(); let pA = nextPort(); let pB = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivyA = Ivy(config: makeConfig(port: pA, publicKey: kpA.publicKey), broker: MemoryBroker())
-        let ivyB = Ivy(config: makeConfig(port: pB, publicKey: kpB.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivyA = Ivy(config: makeConfig(port: pA, publicKey: kpA.publicKey))
+        let ivyB = Ivy(config: makeConfig(port: pB, publicKey: kpB.publicKey))
 
         try await ivy1.start()
         try await ivyA.start()
@@ -1011,8 +1039,8 @@ struct NetworkRobustnessTests {
         let kp2 = generateKey()
         let p1 = nextPort(); let p2 = nextPort()
 
-        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey), broker: MemoryBroker())
-        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey), broker: MemoryBroker())
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         // Collect announcements on node 2 (the sender)
         let collector = AnnouncementCollector()
