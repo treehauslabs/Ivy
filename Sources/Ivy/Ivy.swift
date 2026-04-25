@@ -311,6 +311,17 @@ public actor Ivy {
         broadcastPayload(payload)
     }
 
+    public func sendBlock(cid: String, data: Data) {
+        haveSet.insert(cid)
+        let msg = Message.block(cid: cid, data: data)
+        for (peer, conn) in connections {
+            conn.fireAndForget(msg.serialize())
+        }
+        for (peer, _) in localPeers {
+            fireToPeer(peer, msg, bypassBudget: true)
+        }
+    }
+
     // MARK: - DHT
 
     public func findNode(target: String) async -> [PeerEndpoint] {
