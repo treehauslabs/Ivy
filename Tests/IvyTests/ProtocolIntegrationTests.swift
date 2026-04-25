@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import Ivy
+import VolumeBroker
 @testable import Tally
 
 /// Helper to create a minimal IvyConfig for testing
@@ -34,7 +35,7 @@ struct CreditLineIntegrationTests {
     @Test("Credit line established when local peer connects")
     func testCreditLineOnConnect() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -53,7 +54,7 @@ struct CreditLineIntegrationTests {
     @Test("Pay-on-success: no charge when content not found")
     func testPayOnSuccessNoCharge() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -75,7 +76,7 @@ struct CreditLineIntegrationTests {
     @Test("Fee earned when serving from cache")
     func testFeeEarnedOnCacheHit() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -98,7 +99,7 @@ struct CreditLineIntegrationTests {
     @Test("Pin announcement stored and discoverable")
     func testPinAnnouncementStored() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -119,7 +120,7 @@ struct CreditLineIntegrationTests {
     @Test("Mining settlement reduces debt")
     func testMiningSettlement() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -143,7 +144,7 @@ struct CreditLineIntegrationTests {
     @Test("On-chain settlement clears debt")
     func testOnChainSettlement() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -163,7 +164,7 @@ struct CreditLineIntegrationTests {
     @Test("Peer message delivered to delegate")
     func testPeerMessageDelivered() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let collector = MessageCollector()
         await nodeA.setDelegate(collector)
 
@@ -188,7 +189,7 @@ struct CreditLineIntegrationTests {
     @Test("Balance reconciliation detects divergence")
     func testBalanceReconciliation() async throws {
         let config = testConfig(publicKey: "node-a")
-        let nodeA = Ivy(config: config)
+        let nodeA = Ivy(config: config, broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "node-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)

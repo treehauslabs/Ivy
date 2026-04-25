@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import Ivy
+import VolumeBroker
 @testable import Tally
 import Acorn
 
@@ -19,7 +20,7 @@ func createNetwork(count: Int, thresholdMultiplier: UInt64 = 1000) async -> [Ivy
             replicationInterval: .seconds(999),
             zoneSyncInterval: .seconds(999)
         )
-        nodes.append(Ivy(config: config))
+        nodes.append(Ivy(config: config, broker: MemoryBroker()))
     }
     return nodes
 }
@@ -174,7 +175,7 @@ struct FeeDiscoveryTests {
 
     @Test("feeExhausted tells requester the consumed amount")
     func testFeeExhaustedFeedback() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "fee-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "fee-a"), broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "fee-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -256,7 +257,7 @@ struct SettlementLifecycleTests {
 
     @Test("Mining solutions accumulate to clear debt")
     func testAccumulatedMiningSettlement() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "mine-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "mine-a"), broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "mine-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -289,7 +290,7 @@ struct PinDiscoveryChainTests {
     @Test("Pin announcement stored at one node, discovered from another")
     func testPinDiscoveryAcrossNodes() async throws {
         // A stores pin announcement. B queries A via findPins.
-        let nodeA = Ivy(config: testConfig(publicKey: "pin-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "pin-a"), broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "pin-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -313,7 +314,7 @@ struct PinDiscoveryChainTests {
 
     @Test("Multiple pinners for same CID all discoverable")
     func testMultiplePinners() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "multi-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "multi-a"), broker: MemoryBroker())
         let peerBID = PeerID(publicKey: "multi-b")
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
@@ -342,7 +343,7 @@ struct GossipProtocolTests {
 
     @Test("Block announcement gossip reaches peer")
     func testBlockGossip() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "gossip-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "gossip-a"), broker: MemoryBroker())
         let collector = MessageCollector()
         await nodeA.setDelegate(collector)
 
@@ -367,7 +368,7 @@ struct GossipProtocolTests {
 
     @Test("Transaction gossip reaches peer")
     func testTxGossip() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "tx-a"))
+        let nodeA = Ivy(config: testConfig(publicKey: "tx-a"), broker: MemoryBroker())
         let collector = MessageCollector()
         await nodeA.setDelegate(collector)
 
@@ -400,9 +401,9 @@ struct EndToEndProtocolTests {
     func testThreeNodeEndToEnd() async throws {
         // Topology: A <-> B <-> C
         // C has content. A requests it. B forwards.
-        let nodeA = Ivy(config: testConfig(publicKey: "e2e-a"))
-        let nodeB = Ivy(config: testConfig(publicKey: "e2e-b"))
-        let nodeC = Ivy(config: testConfig(publicKey: "e2e-c"))
+        let nodeA = Ivy(config: testConfig(publicKey: "e2e-a"), broker: MemoryBroker())
+        let nodeB = Ivy(config: testConfig(publicKey: "e2e-b"), broker: MemoryBroker())
+        let nodeC = Ivy(config: testConfig(publicKey: "e2e-c"), broker: MemoryBroker())
 
         let collectorA = MessageCollector()
         await nodeA.setDelegate(collectorA)
@@ -482,8 +483,8 @@ struct EndToEndProtocolTests {
 
     @Test("Routing table allows B to reach C for forwarding")
     func testRoutingTableForForwarding() async throws {
-        let nodeB = Ivy(config: testConfig(publicKey: "rt-b"))
-        let nodeC = Ivy(config: testConfig(publicKey: "rt-c"))
+        let nodeB = Ivy(config: testConfig(publicKey: "rt-b"), broker: MemoryBroker())
+        let nodeC = Ivy(config: testConfig(publicKey: "rt-c"), broker: MemoryBroker())
 
         await connectNodes(nodeB, nodeC)
         try await Task.sleep(for: .milliseconds(100))

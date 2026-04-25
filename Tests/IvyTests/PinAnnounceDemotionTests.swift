@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import Ivy
+import VolumeBroker
 @testable import Tally
 import Acorn
 
@@ -24,7 +25,7 @@ private func makeNode(publicKey: String, requestTimeout: Duration = .millisecond
         replicationInterval: .seconds(999),
         zoneSyncInterval: .seconds(999)
     )
-    return Ivy(config: config)
+    return Ivy(config: config, broker: MemoryBroker())
 }
 
 @Suite("Pin announce demotion")
