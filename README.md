@@ -11,7 +11,7 @@
 
 Ivy is a full-featured peer-to-peer networking stack that replaces blind peer selection with evidence-based trust. Every routing decision — which peer to query, which connection to keep, who gets served under load — is informed by measured behavior: bytes relayed, latency observed, challenges solved. The result is a self-healing network where honest nodes naturally route through honest nodes.
 
-Ivy powers the networking layer for the [Acorn](https://github.com/treehauslabs/Acorn) content-addressed storage ecosystem, with reputation accounting by [Tally](https://github.com/treehauslabs/Tally).
+Ivy powers the networking layer for [Lattice](https://github.com/treehauslabs/lattice-node), with Volume-granular storage by [VolumeBroker](https://github.com/treehauslabs/VolumeBroker) and reputation accounting by [Tally](https://github.com/treehauslabs/Tally).
 
 ---
 
@@ -177,6 +177,10 @@ When a node produces or receives a new block, it gossips a `ANNOUNCE_BLOCK` to c
 
 This creates rapid, protocol-level block propagation without polling.
 
+### Inline Block Push
+
+The `sendBlock(cid:data:)` method broadcasts block data inline to all connected peers, bypassing Tally rate limiting. This is used by the blockchain layer to push freshly mined blocks to peers without requiring a round-trip fetch. The payload is identical to a `BLOCK` response but sent unsolicited as a `BLOCK_PUSH` message.
+
 ### Peer Announces
 
 Periodic announcements (every 5 minutes) carry the node's public key, name hash, and optional application data. The transport layer maintains a path table (up to 10,000 entries) mapping announced destinations to the best known routes.
@@ -320,6 +324,7 @@ Binary, length-prefixed messages over TCP:
 | `FIND_NODE` | `0x05` | 32-byte target hash | → |
 | `NEIGHBORS` | `0x06` | array of (key, host, port) | ← |
 | `ANNOUNCE_BLOCK` | `0x07` | CID (string) | ↔ |
+| `BLOCK_PUSH` | `0x08` | CID + data | ↔ |
 
 ---
 
