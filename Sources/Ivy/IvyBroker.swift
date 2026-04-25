@@ -28,8 +28,7 @@ public actor IvyBroker: VolumeBroker {
         } else {
             expiry = UInt64(Date().timeIntervalSince1970) + 86400
         }
-        let fee = await node.config.relayFee * 2
-        await node.publishPinAnnounce(rootCID: root, selector: "/", expiry: expiry, signature: Data(), fee: fee)
+        await node.publishPinAnnounce(rootCID: root, selector: "/", expiry: expiry, signature: Data(), fee: 0)
     }
 
     public func unpin(root: String, owner: String) throws {}

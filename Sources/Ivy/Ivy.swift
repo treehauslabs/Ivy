@@ -40,16 +40,11 @@ public actor Ivy {
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
     private var _serviceBus: LocalServiceBus?
 
-    // Ivy economic layer
-    public let ledger: CreditLineLedger
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, selector: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
     // Volume tracking: root CID → provider peer(s) for DHT routing
     private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
-
-    // Per-peer bandwidth budgeting
-    private let sendBudget: SendBudget
 
     public init(config: IvyConfig, broker: any VolumeBroker, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
@@ -59,8 +54,6 @@ public actor Ivy {
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
         self.group = group
         self.stunClient = STUNClient(group: group, servers: config.stunServers)
-        self.ledger = CreditLineLedger(localID: PeerID(publicKey: config.publicKey), baseThresholdMultiplier: config.baseThresholdMultiplier)
-        self.sendBudget = SendBudget(baseBytesPerSecond: config.sendBytesPerSecond)
     }
 
     // MARK: - Lifecycle
@@ -125,8 +118,6 @@ public actor Ivy {
         }
         connections.removeAll()
         pendingForwards.removeAll()
-        pendingFeeForwards.removeAll()
-        pendingDirectConnects.removeAll()
     }
 
     // MARK: - Connection Management
@@ -138,7 +129,6 @@ public actor Ivy {
         let conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
         connections[peer] = conn
         router.addPeer(peer, endpoint: endpoint, tally: tally)
-        await ledger.establish(with: peer)
         if let monitor = healthMonitor { await monitor.trackPeer(peer) }
         delegate?.ivy(self, didConnect: peer)
         Task { await handleInbound(conn) }
@@ -163,7 +153,6 @@ public actor Ivy {
         if let monitor = healthMonitor {
             Task { await monitor.removePeer(peer) }
         }
-        Task { await sendBudget.removePeer(peer) }
         delegate?.ivy(self, didDisconnect: peer)
     }
 
@@ -172,16 +161,6 @@ public actor Ivy {
     /// Send a peer message (gossip) to a specific connected peer.
     public func sendMessage(to peer: PeerID, topic: String, payload: Data) {
         fireToPeer(peer, .peerMessage(topic: topic, payload: payload))
-    }
-
-    /// Submit a mining solution to a creditor as settlement proof.
-    public func submitSettlement(to peer: PeerID, nonce: UInt64, hash: Data, blockNonce: UInt64? = nil) {
-        fireToPeer(peer, .miningChallengeSolution(nonce: nonce, hash: hash, blockNonce: blockNonce))
-    }
-
-    /// Submit on-chain settlement proof to a creditor.
-    public func submitSettlementProof(to peer: PeerID, txHash: String, amount: UInt64, chainId: String) {
-        fireToPeer(peer, .settlementProof(txHash: txHash, amount: amount, chainId: chainId))
     }
 
     /// Send a peer message to all connected peers.
@@ -195,27 +174,18 @@ public actor Ivy {
         }
     }
 
-    func fireToPeer(_ peer: PeerID, _ message: Message, earnsFee: Bool = false, bypassBudget: Bool = false) {
+    func fireToPeer(_ peer: PeerID, _ message: Message, bypassBudget: Bool = false) {
         if let local = localPeers[peer] {
             local.send(message)
             return
         }
         guard let conn = connections[peer] else { return }
-        // Keepalive, fee-earning, and bypass-flagged messages skip the budget
-        // gate. `bypassBudget` covers replies to inbound requests and
-        // consensus-critical gossip follow-ups — throttling those once
-        // `debtPressure` spikes silently strands block resolution mid-mesh.
-        if message.isKeepalive || earnsFee || bypassBudget {
+        if message.isKeepalive || bypassBudget {
             conn.fireAndForgetMessage(message)
             return
         }
-        let size = message.estimatedSize()
-        let rep = tally.reputation(for: peer)
-        Task {
-            let pressure = await ledger.debtPressure(for: peer)
-            guard await sendBudget.shouldSend(to: peer, bytes: size, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
-            conn.fireAndForgetMessage(message)
-        }
+        guard tally.shouldAllow(peer: peer) else { return }
+        conn.fireAndForgetMessage(message)
     }
 
     func firePayloadToPeer(_ peer: PeerID, _ payload: Data) {
@@ -229,13 +199,6 @@ public actor Ivy {
     }
 
     /// Broadcast a pre-serialized payload to all connected network peers except `excluding`.
-    ///
-    /// All current callers broadcast tiny control-plane announcements
-    /// (announceBlock, announceVolume) that drive consensus and content
-    /// discovery. These bypass `sendBudget` — rate-limiting a ~100-byte
-    /// announce once `debtPressure` spikes would silently stall block
-    /// propagation across a healthy mesh. Abuse is still gated by
-    /// `tally.shouldAllow`.
     private func broadcastPayload(_ payload: Data, excluding: PeerID? = nil) {
         for (peer, conn) in connections {
             if let excluded = excluding, peer == excluded { continue }
@@ -441,7 +404,6 @@ public actor Ivy {
                 connections[realID] = conn
                 let endpoint = PeerEndpoint(publicKey: publicKey, host: conn.endpoint.host, port: conn.endpoint.port)
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
-                Task { await ledger.establish(with: realID) }
             }
         }
 
@@ -496,18 +458,10 @@ public actor Ivy {
                 await monitor.recordPong(from: peer, nonce: nonce)
             }
 
-        case .wantBlocks(let cids):
-            for cid in cids {
-                await handleBlockRequest(cid: cid, from: peer)
-            }
-
         case .block(let cid, let data):
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordReceived(peer: peer, bytes: data.count, cpl: cpl)
             tally.recordSuccess(peer: peer)
-
-            // Check fee-forwarded requests first
-            await handleFeeForwardResponse(cid: cid, data: data, from: peer)
 
             if haveSet.contains(cid) {
                 resolvePending(cid: cid, data: data)
@@ -526,23 +480,12 @@ public actor Ivy {
         case .dontHave:
             tally.recordFailure(peer: peer)
 
-        case .findNode(let target, let fee):
-            if fee > 0 {
-                await handleFeeNode(target: target, fee: fee, from: peer)
-            } else {
-                let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
-                let endpoints = closest.map { $0.endpoint }
-                fireToPeer(peer, .neighbors(endpoints))
-            }
+        case .findNode(let target, _):
+            let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
+            let endpoints = closest.map { $0.endpoint }
+            fireToPeer(peer, .neighbors(endpoints))
 
         case .neighbors(let endpoints):
-            // Check if this is a response to a fee-forwarded findNode
-            let fnKey = pendingFeeForwards.keys.first { $0.hasPrefix("fn-") }
-            if let key = fnKey, let pending = pendingFeeForwards.removeValue(forKey: key) {
-                // Relay response upstream, earn fee
-                fireToPeer(pending.upstream, .neighbors(endpoints))
-                await ledger.earnFromRelay(peer: pending.upstream, amount: Int64(pending.feeClaimed))
-            }
             for ep in endpoints {
                 let newPeer = PeerID(publicKey: ep.publicKey)
                 if connections[newPeer] == nil && newPeer != localID {
@@ -562,27 +505,11 @@ public actor Ivy {
         case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let signature):
             handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, signature: signature, from: peer)
 
-        case .dhtForward(let cid, let ttl, let fee, let target, let selector):
-            if fee > 0 {
-                await handleFeeForward(cid: cid, fee: fee, target: target, selector: selector, from: peer)
-            } else {
-                await handleDHTForward(cid: cid, ttl: ttl, from: peer)
-            }
-
-        case .getZoneInventory:
-            // Zone sync removed — respond with empty inventory
-            fireToPeer(peer, .zoneInventory(cids: []))
-
-        case .zoneInventory:
-            // Zone sync removed — ignore inbound inventory
-            break
+        case .dhtForward(let cid, let ttl, _, _, _):
+            await handleDHTForward(cid: cid, ttl: ttl, from: peer)
 
         case .haveCIDs(let nonce, let cids):
             handleHaveCIDs(nonce: nonce, cids: cids, from: peer)
-
-        case .haveCIDsResult:
-            // Replication removed — ignore inbound results
-            break
 
         case .pexRequest(let nonce):
             handlePEXRequest(nonce: nonce, from: peer)
@@ -590,17 +517,10 @@ public actor Ivy {
         case .pexResponse(let nonce, let peers):
             handlePEXResponse(nonce: nonce, peers: peers, from: peer)
 
-        // Ivy economic layer
-        case .findPins(let cid, let fee):
-            await handleFindPins(cid: cid, fee: fee, from: peer)
+        case .findPins(let cid, _):
+            await handleFindPins(cid: cid, from: peer)
 
         case .pins:
-            // Check if this is a response to a fee-forwarded findPins
-            let fpKey = pendingFeeForwards.keys.first { $0.hasPrefix("fp-") }
-            if let key = fpKey, let pending = pendingFeeForwards.removeValue(forKey: key) {
-                fireToPeer(pending.upstream, message)
-                await ledger.earnFromRelay(peer: pending.upstream, amount: Int64(pending.feeClaimed))
-            }
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .pinAnnounce(let rootCID, let selector, let publicKey, let expiry, _, _):
@@ -615,11 +535,11 @@ public actor Ivy {
         case .directOffer:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .deliveryAck(let requestId):
-            await handleDeliveryAck(requestId: requestId, from: peer)
+        case .deliveryAck:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .balanceCheck(let sequence, let balance):
-            await handleBalanceCheck(sequence: sequence, balance: balance, from: peer)
+        case .balanceCheck:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .balanceLog:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -627,8 +547,11 @@ public actor Ivy {
         case .peerMessage:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .miningChallengeSolution(let nonce, let hash, let blockNonce):
-            await handleMiningSettlement(nonce: nonce, hash: hash, blockNonce: blockNonce, from: peer)
+        case .miningChallengeSolution:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .settlementProof:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .blocks(let rootCID, let items):
             for item in items {
@@ -654,14 +577,6 @@ public actor Ivy {
 
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .settlementProof(let txHash, let amount, let chainId):
-            await ledger.recordPartialSettlement(peer: peer, workValue: Int64(amount))
-            config.logger.info("On-chain settlement from \(peer.publicKey.prefix(8))…: \(amount) ivy via \(chainId) tx \(txHash.prefix(16))…")
-            if !(await ledger.needsSettlement(peer: peer)) {
-                await ledger.recordSettlement(peer: peer)
-            }
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .getVolume(let rootCID, let cids):
             await handleGetVolume(rootCID: rootCID, cids: cids, from: peer)
 
@@ -670,6 +585,18 @@ public actor Ivy {
 
         case .pushVolume(let rootCID, let items):
             await handlePushVolume(rootCID: rootCID, items: items, from: peer)
+
+        case .wantBlocks:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .getZoneInventory:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .zoneInventory:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .haveCIDsResult:
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         default:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -725,144 +652,6 @@ public actor Ivy {
         Task { try? await broker.storeVolumeLocal(brokerPayload) }
     }
 
-    // MARK: - Fee-Aware Forwarding
-
-    private var relayFee: UInt64 { config.relayFee }
-
-    /// Tracks pending fee-forwarded requests: requestKey → (upstream peer, fee claimed)
-    private var pendingFeeForwards: [String: (upstream: PeerID, feeClaimed: UInt64)] = [:]
-    private static let maxPendingFeeForwards = 10_000
-
-    private func handleFeeForward(cid: String, fee: UInt64, target: Data?, selector: String?, from peer: PeerID) async {
-        // Capacity check: refuse new forwards when relay queue is full
-        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else {
-            fireToPeer(peer, .dontHave(cid: cid))
-            return
-        }
-        // Dual gate: behavioral (Tally) + economic (graduated debt pressure)
-        guard tally.shouldAllow(peer: peer) else {
-            fireToPeer(peer, .dontHave(cid: cid))
-            return
-        }
-        let pressure = await ledger.debtPressure(for: peer)
-        if pressure > 0, Double.random(in: 0..<1) < pressure {
-            fireToPeer(peer, .dontHave(cid: cid))
-            return
-        }
-
-        // Step 1: Check local storage — serve locally if we have it
-        var data: Data?
-        if haveSet.contains(cid) {
-            data = await getLocalBlock(cid: cid)
-        }
-
-        if let data {
-            // We have it — serve and keep the full remaining fee
-            fireToPeer(peer, .block(cid: cid, data: data), earnsFee: true)
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
-            tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
-            // Pay-on-success: charge the upstream peer
-            await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
-            return
-        }
-
-        // Step 2: Check fee budget
-        guard fee > relayFee else {
-            fireToPeer(peer, .feeExhausted(consumed: 0))
-            return
-        }
-
-        // Step 3: Deduct relay fee, forward to closest peer toward target
-        let remainingFee = fee - relayFee
-        let routingTarget: [UInt8]
-        if let target {
-            routingTarget = Array(target)
-        } else {
-            routingTarget = Router.hash(cid)
-        }
-
-        let closest = router.closestPeers(to: routingTarget, count: 3)
-        var forwarded = false
-        for entry in closest {
-            guard entry.id != peer, entry.id != localID else { continue }
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-
-            let requestKey = "\(cid)-\(peer.publicKey.prefix(8))-\(fee)"
-            pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
-
-            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0, fee: remainingFee, target: target, selector: selector))
-            forwarded = true
-            break
-        }
-
-        if !forwarded {
-            fireToPeer(peer, .feeExhausted(consumed: relayFee))
-        }
-    }
-
-    /// Called when a block response comes back through a fee-forwarded path
-    private func handleFeeForwardResponse(cid: String, data: Data, from downstream: PeerID) async {
-        // Find the pending upstream request for this CID
-        let matchingKey = pendingFeeForwards.keys.first { $0.hasPrefix(cid) }
-        guard let key = matchingKey, let pending = pendingFeeForwards.removeValue(forKey: key) else {
-            return
-        }
-
-        // Relay response upstream
-        fireToPeer(pending.upstream, .block(cid: cid, data: data))
-
-        // Pay-on-success: earn from upstream, pay downstream
-        await ledger.earnFromRelay(peer: pending.upstream, amount: Int64(pending.feeClaimed))
-
-        // Store the data via broker
-        haveSet.insert(cid)
-        let brokerPayload = VolumePayload(root: cid, entries: [cid: data])
-        try? await broker.storeVolumeLocal(brokerPayload)
-    }
-
-    // MARK: - Fee-Aware findNode
-
-    private func handleFeeNode(target: Data, fee: UInt64, from peer: PeerID) async {
-        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else { return }
-        guard tally.shouldAllow(peer: peer) else { return }
-        let pressure = await ledger.debtPressure(for: peer)
-        if pressure > 0, Double.random(in: 0..<1) < pressure { return }
-
-        let targetHash = Array(target)
-
-        // Check if we can respond (no known peer closer than us)
-        let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
-        let localDist = Router.xorDistance(router.localHash, targetHash)
-        let canRespond = closest.isEmpty || !Router.isCloser(closest[0].hash, than: localDist, to: targetHash)
-
-        if canRespond || fee <= relayFee {
-            // Respond with our closest known peers — keep the full remaining fee
-            let endpoints = closest.map { $0.endpoint }
-            fireToPeer(peer, .neighbors(endpoints))
-            await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
-            return
-        }
-
-        // Forward to the closest peer we know toward the target
-        let remainingFee = fee - relayFee
-        for entry in closest {
-            guard entry.id != peer, entry.id != localID else { continue }
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-
-            let requestKey = "fn-\(target.prefix(8).map { String(format: "%02x", $0) }.joined())-\(peer.publicKey.prefix(8))"
-            pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
-            fireToPeer(entry.id, .findNode(target: target, fee: remainingFee))
-            return
-        }
-
-        // Can't forward — respond with what we have
-        let endpoints = closest.map { $0.endpoint }
-        fireToPeer(peer, .neighbors(endpoints))
-        await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
-    }
-
     // MARK: - haveCIDs (passive responder only)
 
     private func handleHaveCIDs(nonce: UInt64, cids: [String], from peer: PeerID) {
@@ -889,7 +678,6 @@ public actor Ivy {
     func registerLocalPeer(_ conn: LocalPeerConnection, as peerID: PeerID) {
         localPeers[peerID] = conn
         Task {
-            await ledger.establish(with: peerID)
             await handleLocalInbound(conn, from: peerID)
         }
     }
@@ -982,40 +770,13 @@ public actor Ivy {
 
     // MARK: - Pin Announcements
 
-    private func handleFindPins(cid: String, fee: UInt64, from peer: PeerID) async {
-        guard pendingFeeForwards.count < Self.maxPendingFeeForwards else { return }
+    private func handleFindPins(cid: String, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
-        let pressure = await ledger.debtPressure(for: peer)
-        if pressure > 0, Double.random(in: 0..<1) < pressure { return }
 
         // Check if we store pin announcements for this CID
         let stored = pinAnnouncements[cid] ?? []
-        if !stored.isEmpty || fee <= relayFee {
-            // Respond with what we have — keep the full remaining fee
-            let results = stored.map { (publicKey: $0.publicKey, selector: $0.selector) }
-            fireToPeer(peer, .pins(announcements: results))
-            await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
-            return
-        }
-
-        // Forward toward the CID hash neighborhood
-        let remainingFee = fee - relayFee
-        let cidHash = Router.hash(cid)
-        let closest = router.closestPeers(to: cidHash, count: 3)
-        for entry in closest {
-            guard entry.id != peer, entry.id != localID else { continue }
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-
-            let requestKey = "fp-\(cid.prefix(8))-\(peer.publicKey.prefix(8))"
-            pendingFeeForwards[requestKey] = (upstream: peer, feeClaimed: relayFee)
-            fireToPeer(entry.id, .findPins(cid: cid, fee: remainingFee))
-            return
-        }
-
-        // Can't forward — respond with empty (still success for fee purposes)
-        fireToPeer(peer, .pins(announcements: []))
-        await ledger.earnFromRelay(peer: peer, amount: Int64(fee))
+        let results = stored.map { (publicKey: $0.publicKey, selector: $0.selector) }
+        fireToPeer(peer, .pins(announcements: results))
     }
 
     private func handlePinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, from peer: PeerID) {
@@ -1050,21 +811,19 @@ public actor Ivy {
 
     // MARK: - Public API (Application-Facing)
 
-    /// Retrieve content by CID. Checks local storage, then DHT with fee.
-    public func get(cid: String, fee: UInt64? = nil) async -> Data? {
-        let requestFee = fee ?? config.defaultRequestFee
-
+    /// Retrieve content by CID. Checks local storage, then DHT.
+    public func get(cid: String) async -> Data? {
         // Local storage first
         if let data = await getLocalBlock(cid: cid) { return data }
 
-        // Fee-based DHT forward toward the CID hash
+        // DHT forward toward the CID hash
         let cidHash = Router.hash(cid)
         let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
         var sent = 0
         for entry in closest {
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             guard reachable else { continue }
-            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL, fee: requestFee, target: nil, selector: nil))
+            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL))
             sent += 1
         }
         if sent == 0 { return nil }
@@ -1079,11 +838,10 @@ public actor Ivy {
         }
     }
 
-    /// Retrieve content from a directly-connected peer without fee accounting.
+    /// Retrieve content from a directly-connected peer.
     /// Use this when the peer just offered the data to us (gossip follow-up):
-    /// they're completing their own broadcast, so there's no economic round-trip
-    /// to reward. Bypasses handleFeeForward (and its debtPressure throttle) by
-    /// routing through handleDHTForward on the receiver.
+    /// they're completing their own broadcast, so there's no round-trip
+    /// to reward. Routes through handleDHTForward on the receiver.
     ///
     /// Records success/failure on `peer` in Tally: a peer that announced a
     /// rootCID (or claimed to hold data via gossip) and then fails to deliver
@@ -1094,9 +852,6 @@ public actor Ivy {
 
         if connections[peer] == nil && localPeers[peer] == nil { return nil }
 
-        // recordRequest establishes the ledger entry so the subsequent
-        // recordSuccess / recordFailure can actually mutate reputation —
-        // Tally.recordSuccess/Failure are no-ops if the peer isn't in ledgers.
         tally.recordRequest(peer: peer)
         guard canRegisterPending(cid: cid) else { return nil }
         fireToPeer(peer, .dhtForward(cid: cid, ttl: 0), bypassBudget: true)
@@ -1121,14 +876,9 @@ public actor Ivy {
     /// we trusted but which then fails to serve the CID is demoted so future
     /// pin-selection sorts it below honest pinners and shouldAllow rejects it
     /// once reputation drops enough.
-    public func get(cid: String, target: PeerID, fee: UInt64? = nil) async -> Data? {
-        let requestFee = fee ?? config.defaultRequestFee
-
+    public func get(cid: String, target: PeerID) async -> Data? {
         if let data = await getLocalBlock(cid: cid) { return data }
 
-        // recordRequest establishes the ledger so demotion on failure can
-        // actually register — otherwise recordFailure silently no-ops for a
-        // peer we've never interacted with before.
         tally.recordRequest(peer: target)
 
         let targetHash = Data(Router.hash(target.publicKey))
@@ -1137,7 +887,7 @@ public actor Ivy {
         for entry in closest {
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             guard reachable else { continue }
-            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0, fee: requestFee, target: targetHash, selector: nil))
+            fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0))
             sent += 1
             break
         }
@@ -1163,19 +913,18 @@ public actor Ivy {
         await publishBlock(cid: cid, data: data)
         if pin {
             let expiry = UInt64(Date().timeIntervalSince1970) + 86400
-            publishPinAnnounce(rootCID: cid, selector: "/", expiry: expiry, signature: Data(), fee: config.relayFee * 5)
+            publishPinAnnounce(rootCID: cid, selector: "/", expiry: expiry, signature: Data(), fee: 0)
         }
     }
 
-    /// Discover pinners for a CID via fee-based findPins.
-    public func discoverPinners(cid: String, fee: UInt64? = nil) async -> [(publicKey: String, selector: String)] {
-        let requestFee = fee ?? (config.defaultRequestFee / 2)
+    /// Discover pinners for a CID via findPins.
+    public func discoverPinners(cid: String) async -> [(publicKey: String, selector: String)] {
         let cidHash = Router.hash(cid)
         let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
         for entry in closest {
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             guard reachable else { continue }
-            fireToPeer(entry.id, .findPins(cid: cid, fee: requestFee))
+            fireToPeer(entry.id, .findPins(cid: cid, fee: 0))
         }
         // Return local knowledge; remote results arrive asynchronously via delegate
         return storedPinAnnouncements(for: cid)
@@ -1193,104 +942,6 @@ public actor Ivy {
             }
         }
         return nil
-    }
-
-    // MARK: - Balance Reconciliation
-
-    private func handleBalanceCheck(sequence: UInt64, balance: Int64, from peer: PeerID) async {
-        guard let line = await ledger.creditLine(for: peer) else { return }
-        if line.sequence == sequence && line.balance == balance {
-            return
-        }
-        config.logger.info("Balance divergence with \(peer.publicKey.prefix(8))…: local seq=\(line.sequence) bal=\(line.balance), remote seq=\(sequence) bal=\(balance)")
-    }
-
-    // MARK: - Direct Connect (N-backup)
-
-    /// Tracks direct connect offers: requestId → (upstream chain peers, cid, fee info)
-    private struct DirectConnectState {
-        let cid: String
-        let upstreamChain: [PeerID]  // chain from requester to us (N)
-        let backupData: Data?        // CID-verified backup from Z
-        let timeout: UInt64
-        let feeClaimed: UInt64
-    }
-    private var pendingDirectConnects: [UInt64: DirectConnectState] = [:]
-
-    /// Called by the provider (Z) to initiate direct connect.
-    /// Z sends backup to N (its direct neighbor), then sends directOffer through the chain.
-    public func offerDirectConnect(cid: String, data: Data, requestId: UInt64, timeout: UInt64) {
-        // Find the pending fee forward for this CID to get the upstream chain
-        let matchingKey = pendingFeeForwards.keys.first { $0.hasPrefix(cid) }
-        guard let key = matchingKey, let pending = pendingFeeForwards[key] else { return }
-
-        // Store backup at this node (we are N, Z's direct neighbor)
-
-        pendingDirectConnects[requestId] = DirectConnectState(
-            cid: cid,
-            upstreamChain: [pending.upstream],
-            backupData: data,
-            timeout: timeout,
-            feeClaimed: pending.feeClaimed
-        )
-
-        // Relay directOffer upstream
-        let host = publicAddress?.host ?? "0.0.0.0"
-        let port = publicAddress?.port ?? config.listenPort
-        fireToPeer(pending.upstream, .directOffer(cid: cid, host: host, port: port, size: UInt64(data.count), timeout: timeout))
-
-        // Set timeout for N-backup relay
-        Task {
-            try? await Task.sleep(for: .seconds(Int(timeout)))
-            if let state = self.pendingDirectConnects.removeValue(forKey: requestId) {
-                // Timeout: A didn't ack. Relay backup through chain.
-                if let backup = state.backupData {
-                    self.fireToPeer(state.upstreamChain[0], .block(cid: state.cid, data: backup))
-                    await self.ledger.earnFromRelay(peer: state.upstreamChain[0], amount: Int64(state.feeClaimed))
-                    self.config.logger.info("Direct connect timeout for \(cid.prefix(8))… — relayed N-backup")
-                }
-            }
-        }
-    }
-
-    /// Handle deliveryAck from the requester (A) — confirms direct connect succeeded
-    private func handleDeliveryAck(requestId: UInt64, from peer: PeerID) async {
-        // Find the pending direct connect
-        guard let state = pendingDirectConnects.removeValue(forKey: requestId) else {
-            // Not a direct connect ack — forward to delegate
-            return
-        }
-
-        // Payment: earn relay fee from upstream
-        await ledger.earnFromRelay(peer: state.upstreamChain[0], amount: Int64(state.feeClaimed))
-        config.logger.info("Direct connect ack for \(state.cid.prefix(8))… — payment triggered")
-    }
-
-    // MARK: - Settlement Accounting
-
-    /// Handle mining challenge solution from debtor — verify work and credit balance
-    private func handleMiningSettlement(nonce: UInt64, hash: Data, blockNonce: UInt64?, from peer: PeerID) async {
-        // Calculate work value: 2^(trailingZeroBits(hash) - 16) ivy
-        let trailingZeros = KeyDifficulty.trailingZeroBitsOfHash(hash)
-        guard trailingZeros >= 16 else { return } // Below minimum useful work
-        let workValue = Int64(1) << (trailingZeros - 16)
-
-        // Credit the debtor's balance
-        await ledger.recordPartialSettlement(peer: peer, workValue: workValue)
-
-        let remaining = await ledger.balance(with: peer)
-        config.logger.info("Settlement from \(peer.publicKey.prefix(8))…: work=\(workValue) ivy, remaining=\(remaining)")
-
-        // Check if fully settled
-        if !(await ledger.needsSettlement(peer: peer)) {
-            await ledger.recordSettlement(peer: peer)
-            config.logger.info("Debt fully settled by \(peer.publicKey.prefix(8))…")
-        }
-    }
-
-    /// Issue a mining challenge to a debtor
-    public func issueMiningChallenge(to peer: PeerID, hashPrefix: Data, difficulty: Data, noncePrefix: Data) {
-        fireToPeer(peer, .miningChallenge(hashPrefix: hashPrefix, blockTargetDifficulty: difficulty, noncePrefix: noncePrefix))
     }
 
     // MARK: - Volume-Aware Fetching
@@ -1389,7 +1040,6 @@ public actor Ivy {
 
         // High-bandwidth push: proactively send full volume data to top-reputation peers
         // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
-        // These bypass budget — we're the publisher, pushing to our best peers is self-interested
         let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items).serialize()
         let highBWPeers = selectHighBandwidthPeers(count: config.highBandwidthPeers)
         var pushedPeers: Set<PeerID> = []
@@ -1400,16 +1050,11 @@ public actor Ivy {
             }
         }
 
-        // Announce volume metadata to remaining peers (low-bandwidth mode, budget-gated)
+        // Announce volume metadata to remaining peers
         let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
         for (peer, conn) in connections where !pushedPeers.contains(peer) {
             guard tally.shouldAllow(peer: peer) else { continue }
-            let rep = tally.reputation(for: peer)
-            Task {
-                let pressure = await ledger.debtPressure(for: peer)
-                guard await sendBudget.shouldSend(to: peer, bytes: announcePayload.count, earnsFee: false, isKeepalive: false, reputationScore: rep, debtPressure: pressure) else { return }
-                conn.fireAndForget(announcePayload)
-            }
+            conn.fireAndForget(announcePayload)
         }
         for (_, local) in localPeers {
             local.send(.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize))
@@ -1431,16 +1076,16 @@ public actor Ivy {
     }
 
     /// Fetch a volume's contents. Tries broker first, falls back to network fetch.
-    public func fetchVolume(rootCID: String, fee: UInt64? = nil) async -> VolumePayload? {
+    public func fetchVolume(rootCID: String) async -> VolumePayload? {
         if let payload = await broker.fetchVolume(root: rootCID) {
             return payload
         }
-        let result = await fetchVolume(rootCID: rootCID, childCIDs: [rootCID], fee: fee)
+        let result = await fetchVolume(rootCID: rootCID, childCIDs: [rootCID])
         guard !result.isEmpty else { return nil }
         return VolumePayload(root: rootCID, entries: result)
     }
 
-    public func fetchVolume(rootCID: String, childCIDs: [String], fee: UInt64? = nil) async -> [String: Data] {
+    public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
         var result: [String: Data] = [:]
         var missing: [String] = []
 
@@ -1498,7 +1143,7 @@ public actor Ivy {
         }
 
         for cid in missing {
-            if let data = await get(cid: cid, fee: fee) {
+            if let data = await get(cid: cid) {
                 result[cid] = data
             }
         }
@@ -1548,11 +1193,6 @@ public actor Ivy {
         for cont in continuations {
             cont.resume(returning: result)
         }
-    }
-
-    /// Look up the volume root CID for a given CID.
-    public func volumeRoot(for cid: String) -> String? {
-        nil
     }
 
     /// Get known providers for a volume.
@@ -1640,7 +1280,6 @@ public actor Ivy {
         let handler = PeerChannelHandler(connection: conn)
         _ = channel.pipeline.addHandler(handler)
         connections[unknownID] = conn
-        Task { _ = await ledger.establish(with: unknownID) }
         delegate?.ivy(self, didConnect: unknownID)
         Task {
             sendIdentify(to: conn)

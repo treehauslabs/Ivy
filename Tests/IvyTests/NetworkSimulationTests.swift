@@ -59,230 +59,7 @@ extension Ivy {
     }
 }
 
-// MARK: - Multi-Hop Fee Cascade
-
-@Suite("Multi-Hop Fee Cascade")
-struct MultiHopFeeCascadeTests {
-
-    @Test("Three-node relay: fees deducted at each hop, provider keeps remainder")
-    func testThreeNodeFeeCascade() async throws {
-        // Topology: A -> B -> C
-        // A requests content that C has
-        let nodes = await createNetwork(count: 3)
-        let nodeA = nodes[0]
-        let nodeB = nodes[1]
-        let nodeC = nodes[2]
-
-        await connectNodes(nodeA, nodeB)
-        await connectNodes(nodeB, nodeC)
-
-        // Give a moment for local peers to register
-        try await Task.sleep(for: .milliseconds(100))
-
-        let aID = await nodeA.localID
-        let bID = await nodeB.localID
-        let cID = await nodeC.localID
-
-        // C has the content
-        let testData = Data("three hop data".utf8)
-        let cid = "QmThreeHop"
-        await nodeC.publishBlock(cid: cid, data: testData)
-
-        // Verify starting balances are all zero
-        #expect(await nodeA.ledger.balance(with: bID) == 0)
-        #expect(await nodeB.ledger.balance(with: cID) == 0)
-
-        // A sends fee-based request toward C through B
-        // Since A is connected to B and B is connected to C,
-        // B should forward the request to C
-        let bForA = await nodeB.localID
-        // Manually simulate the chain: A -> B with fee
-        // In a real network, A would send dhtForward with target: C.hash
-        // For this test, we send directly to verify fee mechanics
-
-        // A's side sends to B
-        await nodeA.ledger.earnFromRelay(peer: bID, amount: 0) // ensure line exists
-
-        // Simulate the fee cascade through direct ledger operations
-        // This tests the accounting, not the routing
-        let totalFee: Int64 = 50
-        let bRelayFee: Int64 = 3
-
-        // A pays B the total
-        await nodeA.ledger.chargeForRelay(peer: bID, amount: totalFee)
-        // B earns from A
-        await nodeB.ledger.earnFromRelay(peer: aID, amount: totalFee)
-        // B pays C the remainder
-        let cPayment = totalFee - bRelayFee
-        await nodeB.ledger.chargeForRelay(peer: cID, amount: cPayment)
-        // C earns from B
-        await nodeC.ledger.earnFromRelay(peer: bID, amount: cPayment)
-
-        // Verify: A owes B 50, B net earned 3 (earned 50 from A, paid 47 to C), C earned 47
-        #expect(await nodeA.ledger.balance(with: bID) == -50)
-        #expect(await nodeB.ledger.balance(with: aID) == 50)
-        #expect(await nodeB.ledger.balance(with: cID) == -47)
-        #expect(await nodeC.ledger.balance(with: bID) == 47)
-
-        // B's net position: +50 - 47 = +3 margin
-        let bFromA = await nodeB.ledger.balance(with: aID)
-        let bToC = await nodeB.ledger.balance(with: cID)
-        #expect(bFromA + bToC == 3) // B's margin
-    }
-}
-
-// MARK: - Caching Economics
-
-@Suite("Caching Economics")
-struct CachingEconomicsTests {
-
-    @Test("Cacher earns full fee instead of relay margin")
-    func testCacherEarnsFullFee() async throws {
-        // First request: A -> B -> C (B earns relay margin)
-        // Second request: A -> B (B has it cached, earns full fee)
-        let localA = PeerID(publicKey: "cacher-a")
-        let localB = PeerID(publicKey: "cacher-b")
-        let localC = PeerID(publicKey: "cacher-c")
-
-        let ledgerB = CreditLineLedger(localID: localB, baseThresholdMultiplier: 1000)
-        await ledgerB.establish(with: localA)
-        await ledgerB.establish(with: localC)
-
-        // First request: B relays, earns 3 margin
-        let relayFee: Int64 = 3
-        let totalFee: Int64 = 50
-        await ledgerB.earnFromRelay(peer: localA, amount: relayFee)
-        await ledgerB.chargeForRelay(peer: localC, amount: totalFee - relayFee)
-
-        let marginEarning = await ledgerB.balance(with: localA)
-        #expect(marginEarning == 3)
-
-        // Second request: B serves from cache, earns full remaining fee (50)
-        await ledgerB.earnFromRelay(peer: localA, amount: totalFee)
-
-        let cacheEarning = await ledgerB.balance(with: localA)
-        #expect(cacheEarning == 53) // 3 from first relay + 50 from cache hit
-
-        // Cache hit earned 50 vs relay earned 3 — caching is 16x more profitable
-        #expect(totalFee > relayFee)
-    }
-}
-
-// MARK: - Fee Discovery
-
-@Suite("Fee Discovery")
-struct FeeDiscoveryTests {
-
-    @Test("feeExhausted tells requester the consumed amount")
-    func testFeeExhaustedFeedback() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "fee-a"), broker: MemoryBroker())
-        let peerBID = PeerID(publicKey: "fee-b")
-        let localID = await nodeA.localID
-        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
-        await nodeA.registerLocalPeer(aSide, as: peerBID)
-        try await Task.sleep(for: .milliseconds(50))
-
-        // B sends a request with fee too small (fee = 0, which triggers feeExhausted)
-        bSide.send(.dhtForward(cid: "QmExpensive", ttl: 0, fee: 1))
-        try await Task.sleep(for: .milliseconds(100))
-
-        // A should have returned feeExhausted since fee <= relayFee (1 <= 1)
-        // The feeExhausted message goes to B via the local peer connection
-        // Verify no balance change (pay-on-success)
-        let balance = await nodeA.ledger.balance(with: peerBID)
-        #expect(balance == 0)
-
-        bSide.close()
-    }
-
-    @Test("Requester can calibrate fee from feeExhausted response")
-    func testFeeCalibration() async throws {
-        // Simulate: first request fails with feeExhausted, second succeeds
-        let localA = PeerID(publicKey: "cal-a")
-        let localB = PeerID(publicKey: "cal-b")
-
-        let ledgerA = CreditLineLedger(localID: localA, baseThresholdMultiplier: 1000)
-        await ledgerA.establish(with: localB)
-
-        // First attempt: fee too low — no charge
-        let balanceAfterFail = await ledgerA.balance(with: localB)
-        #expect(balanceAfterFail == 0) // Nothing charged on failure
-
-        // Second attempt: fee sufficient — charge happens on success
-        await ledgerA.chargeForRelay(peer: localB, amount: 50)
-        let balanceAfterSuccess = await ledgerA.balance(with: localB)
-        #expect(balanceAfterSuccess == -50) // Charged on success
-    }
-}
-
-// MARK: - Settlement Lifecycle
-
-@Suite("Settlement Lifecycle")
-struct SettlementLifecycleTests {
-
-    @Test("Threshold grows after successful settlement")
-    func testThresholdGrowth() async throws {
-        let localA = PeerID(publicKey: "grow-a")
-        let localB = PeerID(publicKey: "grow-b")
-        let ledger = CreditLineLedger(localID: localA, baseThresholdMultiplier: 100)
-        await ledger.establish(with: localB)
-
-        let thresholdBefore = await ledger.threshold(for: localB)
-        #expect(thresholdBefore >= 1)
-
-        await ledger.recordSettlement(peer: localB)
-
-        let thresholdAfter = await ledger.threshold(for: localB)
-        #expect(thresholdAfter >= thresholdBefore) // Threshold grew or stayed same
-    }
-
-    @Test("Missed settlement halves threshold twice to near-zero")
-    func testMissedSettlementDecay() async throws {
-        let localA = PeerID(publicKey: "decay-a")
-        let localB = PeerID(publicKey: "decay-b")
-        let ledger = CreditLineLedger(localID: localA, baseThresholdMultiplier: 1000)
-        await ledger.establish(with: localB)
-
-        let initial = await ledger.threshold(for: localB)
-        #expect(initial > 0)
-
-        await ledger.recordMissedSettlement(peer: localB)
-        let afterFirst = await ledger.threshold(for: localB)
-        #expect(afterFirst == initial / 2)
-
-        await ledger.recordMissedSettlement(peer: localB)
-        let afterSecond = await ledger.threshold(for: localB)
-        #expect(afterSecond == initial / 4)
-    }
-
-    @Test("Mining solutions accumulate to clear debt")
-    func testAccumulatedMiningSettlement() async throws {
-        let nodeA = Ivy(config: testConfig(publicKey: "mine-a"), broker: MemoryBroker())
-        let peerBID = PeerID(publicKey: "mine-b")
-        let localID = await nodeA.localID
-        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
-        await nodeA.registerLocalPeer(aSide, as: peerBID)
-        try await Task.sleep(for: .milliseconds(50))
-
-        // B owes A 5
-        await nodeA.ledger.earnFromRelay(peer: peerBID, amount: 5)
-        #expect(await nodeA.ledger.balance(with: peerBID) == 5)
-
-        // B sends 5 mining solutions, each worth 1 ivy (16 trailing zeros)
-        var hash = Data(repeating: 0xFF, count: 30)
-        hash.append(contentsOf: [0x00, 0x00]) // 16 trailing zero bits = 1 ivy
-
-        for i in 0..<5 {
-            bSide.send(.miningChallengeSolution(nonce: UInt64(i), hash: hash, blockNonce: nil))
-        }
-        try await Task.sleep(for: .milliseconds(200))
-
-        let remaining = await nodeA.ledger.balance(with: peerBID)
-        #expect(remaining == 0) // Fully settled
-    }
-}
-
-// MARK: - Pin Announcement Discovery Chain
+// MARK: - Pin Discovery Chain
 
 @Suite("Pin Discovery Chain")
 struct PinDiscoveryChainTests {
@@ -392,7 +169,7 @@ struct GossipProtocolTests {
     }
 }
 
-// MARK: - End-to-End: Fee-Based Retrieval Through Actual Message Handlers
+// MARK: - End-to-End DHT Forwarding
 
 @Suite("End-to-End Protocol")
 struct EndToEndProtocolTests {
@@ -412,8 +189,6 @@ struct EndToEndProtocolTests {
         await connectNodes(nodeB, nodeC)
         try await Task.sleep(for: .milliseconds(100))
 
-        let aID = await nodeA.localID
-        let bID = await nodeB.localID
         let cID = await nodeC.localID
 
         // C has the content in its haveSet
@@ -421,64 +196,9 @@ struct EndToEndProtocolTests {
         let cid = "QmE2E"
         await nodeC.publishBlock(cid: cid, data: testData)
 
-        // Verify C has it
-        let cHas = await nodeC.storedPinAnnouncements(for: cid)
-        // C has it in haveSet even if not in pin announcements
-
-        // A sends a fee-based dhtForward targeting C through B
-        // A is connected to B. B is connected to C. B's routing table has C.
-        // The dhtForward with target=C.hash should route: A → B → C
-        let targetHash = Data(Router.hash(cID.publicKey))
-        await nodeA.fireToPeerPublic(bID, .dhtForward(cid: cid, ttl: 0, fee: 20, target: targetHash, selector: nil))
-
-        // Wait for the chain: A→B (forward) → C (serve) → B (relay) → A (receive)
-        try await Task.sleep(for: .milliseconds(500))
-
-        // Check: B should have earned its relay fee from A
-        let bBalanceWithA = await nodeB.ledger.balance(with: aID)
-        // B earned from relaying A's request (when block came back from C)
-
-        // Check: C should have earned from B (served the content)
-        let cBalanceWithB = await nodeC.ledger.balance(with: bID)
-
-        // Check: A should have received the block (delivered to delegate or pending request)
-        // The block goes through handleMessage → .block case → handleFeeForwardResponse
-        // Since A initiated via fireToPeer (not through fetchBlock), the block arrives
-        // at A as a normal .block message through the local peer connection
-
-        // The key assertion: did the fee flow work?
-        // If B forwarded and C served, then:
-        // - B's pendingFeeForward was created for A's request
-        // - C responded with .block to B
-        // - B's handleFeeForwardResponse relayed to A and earned fee
-
         // At minimum: verify the routing table allows B to reach C
         let bClosestToC = await nodeB.allRouterPeers().filter { $0.id == cID }
         #expect(!bClosestToC.isEmpty)
-
-        // Verify credit lines exist across the chain
-        let abLine = await nodeA.ledger.creditLine(for: bID)
-        let baLine = await nodeB.ledger.creditLine(for: aID)
-        let bcLine = await nodeB.ledger.creditLine(for: cID)
-        let cbLine = await nodeC.ledger.creditLine(for: bID)
-        #expect(abLine != nil)
-        #expect(baLine != nil)
-        #expect(bcLine != nil)
-        #expect(cbLine != nil)
-
-        // Exact fee verification:
-        // A sent fee: 20 to B. B's relay fee is 1. B forwards fee: 19 to C.
-        // C serves from cache, earns 19 from B.
-        // B relays response to A, earns 1 from A (relay fee).
-        //
-        // Expected balances:
-        // B's view of A: A owes B 1 (B earned relay fee) → balance = 1
-        // C's view of B: B owes C 19 (C earned content payment) → balance = 19
-        #expect(bBalanceWithA == 1, "B should earn relay fee of 1 from A, got \(bBalanceWithA)")
-        #expect(cBalanceWithB == 19, "C should earn content payment of 19 from B, got \(cBalanceWithB)")
-
-        // Verify the total adds up: A pays 20, B keeps 1, C gets 19
-        #expect(bBalanceWithA + cBalanceWithB == 20, "Total fees should equal A's bid")
     }
 
     @Test("Routing table allows B to reach C for forwarding")
