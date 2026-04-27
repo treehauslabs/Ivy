@@ -196,42 +196,6 @@ struct MessageTests {
         }
     }
 
-    @Test("GetZoneInventory roundtrip")
-    func testGetZoneInventoryRoundtrip() {
-        let nodeHash = Data(repeating: 0xAB, count: 32)
-        let msg = Message.getZoneInventory(nodeHash: nodeHash, limit: 256)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .getZoneInventory(let nh, let lim) = decoded {
-            #expect(nh == nodeHash)
-            #expect(lim == 256)
-        } else {
-            Issue.record("Expected getZoneInventory")
-        }
-    }
-
-    @Test("ZoneInventory roundtrip")
-    func testZoneInventoryRoundtrip() {
-        let cids = ["cid-abc", "cid-def", "cid-ghi"]
-        let msg = Message.zoneInventory(cids: cids)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .zoneInventory(let c) = decoded {
-            #expect(c == cids)
-        } else {
-            Issue.record("Expected zoneInventory")
-        }
-    }
-
-    @Test("ZoneInventory empty roundtrip")
-    func testZoneInventoryEmpty() {
-        let msg = Message.zoneInventory(cids: [])
-        let decoded = Message.deserialize(msg.serialize())
-        if case .zoneInventory(let c) = decoded {
-            #expect(c.isEmpty)
-        } else {
-            Issue.record("Expected zoneInventory")
-        }
-    }
-
     @Test("HaveCIDs roundtrip")
     func testHaveCIDsRoundtrip() {
         let cids = ["block-1", "block-2", "block-3"]

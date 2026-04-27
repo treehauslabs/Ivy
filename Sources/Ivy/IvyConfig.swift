@@ -21,8 +21,6 @@ public struct IvyConfig: Sendable {
     public let replicationInterval: Duration
     public let replicationMinCopies: Int
     public let replicationSampleSize: Int
-    public let zoneSyncLimit: UInt16
-    public let zoneSyncInterval: Duration
     public let signingKey: Data
     public let logger: any IvyLogger
     public let relayFee: UInt64
@@ -60,8 +58,6 @@ public struct IvyConfig: Sendable {
         replicationInterval: Duration = .seconds(300),
         replicationMinCopies: Int = 3,
         replicationSampleSize: Int = 32,
-        zoneSyncLimit: UInt16 = 256,
-        zoneSyncInterval: Duration = .seconds(1800),
         signingKey: Data = Data(),
         logger: any IvyLogger = NullLogger(),
         relayFee: UInt64 = 1,
@@ -91,8 +87,6 @@ public struct IvyConfig: Sendable {
         self.replicationInterval = replicationInterval
         self.replicationMinCopies = replicationMinCopies
         self.replicationSampleSize = replicationSampleSize
-        self.zoneSyncLimit = zoneSyncLimit
-        self.zoneSyncInterval = zoneSyncInterval
         self.signingKey = signingKey
         self.logger = logger
         self.relayFee = relayFee

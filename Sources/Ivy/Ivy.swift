@@ -550,9 +550,6 @@ public actor Ivy {
         case .feeExhausted:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .directOffer:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .deliveryAck:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
@@ -563,9 +560,6 @@ public actor Ivy {
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .peerMessage:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .miningChallengeSolution:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .settlementProof:
@@ -609,16 +603,7 @@ public actor Ivy {
         case .wantBlocks:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .getZoneInventory:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .zoneInventory:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .haveCIDsResult:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        default:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
         }
     }

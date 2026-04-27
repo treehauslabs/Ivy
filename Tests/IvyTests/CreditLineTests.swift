@@ -262,20 +262,6 @@ struct EconomicMessageTests {
         }
     }
 
-    @Test("directOffer roundtrip")
-    func testDirectOfferRoundtrip() {
-        let msg = Message.directOffer(cid: "QmBig", host: "1.2.3.4", port: 4001, size: 1_000_000, timeout: 30)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .directOffer(let cid, let host, let port, let size, let timeout) = decoded {
-            #expect(cid == "QmBig")
-            #expect(host == "1.2.3.4")
-            #expect(port == 4001)
-            #expect(size == 1_000_000)
-            #expect(timeout == 30)
-        } else {
-            Issue.record("Expected directOffer")
-        }
-    }
 
     @Test("deliveryAck roundtrip")
     func testDeliveryAckRoundtrip() {

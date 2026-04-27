@@ -32,7 +32,6 @@ struct PendingRequestCapsTests {
             ),
             enablePEX: false,
             replicationInterval: .seconds(999),
-            zoneSyncInterval: .seconds(999),
             maxPendingRequests: maxPending,
             maxWaitersPerPendingCID: maxWaiters
         )

@@ -21,8 +21,7 @@ private func makeNode(publicKey: String, requestTimeout: Duration = .millisecond
         requestTimeout: requestTimeout,
         healthConfig: PeerHealthConfig(keepaliveInterval: .seconds(999), staleTimeout: .seconds(999), maxMissedPongs: 99, enabled: false),
         enablePEX: false,
-        replicationInterval: .seconds(999),
-        zoneSyncInterval: .seconds(999)
+        replicationInterval: .seconds(999)
     )
     return Ivy(config: config)
 }

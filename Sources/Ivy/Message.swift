@@ -14,14 +14,9 @@ public enum Message: Sendable {
 
     case wantBlocks(cids: [String])
 
-    case miningChallenge(hashPrefix: Data, blockTargetDifficulty: Data, noncePrefix: Data)
-    case miningChallengeSolution(nonce: UInt64, hash: Data, blockNonce: UInt64?)
-
     case pexRequest(nonce: UInt64)
     case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
 
-    case getZoneInventory(nodeHash: Data, limit: UInt16)
-    case zoneInventory(cids: [String])
     case haveCIDs(nonce: UInt64, cids: [String])
     case haveCIDsResult(nonce: UInt64, have: [String])
 
@@ -31,7 +26,6 @@ public enum Message: Sendable {
     case pinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
     case pinStored(rootCID: String)
     case feeExhausted(consumed: UInt64)
-    case directOffer(cid: String, host: String, port: UInt16, size: UInt64, timeout: UInt64)
     case deliveryAck(requestId: UInt64)
     case balanceCheck(sequence: UInt64, balance: Int64)
     case balanceLog(fromSequence: UInt64, operations: [(sequence: UInt64, amount: Int64, requestId: UInt64)])
@@ -54,16 +48,13 @@ public enum Message: Sendable {
         case neighbors = 6
         case announceBlock = 7
         case identify = 8
-        // tags 9-10 removed (dialBack, dialBackResult — AutoNAT removed)
-        case getZoneInventory = 11
-        case zoneInventory = 12
+        // tags 9-12 removed (dialBack/dialBackResult AutoNAT, getZoneInventory/zoneInventory)
         case haveCIDs = 13
         case haveCIDsResult = 14
         case dhtForward = 16
         // tags 21-31 removed (chain-specific messages)
         case wantBlocks = 26
-        case miningChallenge = 35
-        case miningChallengeSolution = 36
+        // tags 35-36 removed (miningChallenge, miningChallengeSolution)
         case pexRequest = 37
         case pexResponse = 38
         // Ivy economic layer (tags 40-55)
@@ -72,7 +63,7 @@ public enum Message: Sendable {
         case pinAnnounce = 42
         case pinStored = 43
         case feeExhausted = 44
-        case directOffer = 45
+        // tag 45 removed (directOffer)
         case deliveryAck = 46
         case balanceCheck = 47
         case balanceLog = 48
@@ -167,17 +158,6 @@ public enum Message: Sendable {
             for cid in cids {
                 buf.appendLengthPrefixedString(cid)
             }
-        case .miningChallenge(let hashPrefix, let blockTarget, let noncePrefix):
-            buf.append(Tag.miningChallenge.rawValue)
-            buf.appendLengthPrefixedData(hashPrefix)
-            buf.appendLengthPrefixedData(blockTarget)
-            buf.appendLengthPrefixedData(noncePrefix)
-        case .miningChallengeSolution(let nonce, let hash, let blockNonce):
-            buf.append(Tag.miningChallengeSolution.rawValue)
-            buf.appendUInt64(nonce)
-            buf.appendLengthPrefixedData(hash)
-            buf.appendUInt8(blockNonce != nil ? 1 : 0)
-            if let bn = blockNonce { buf.appendUInt64(bn) }
         case .pexRequest(let nonce):
             buf.append(Tag.pexRequest.rawValue)
             buf.appendUInt64(nonce)
@@ -190,14 +170,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(peer.host)
                 buf.appendUInt16(peer.port)
             }
-        case .getZoneInventory(let nodeHash, let limit):
-            buf.append(Tag.getZoneInventory.rawValue)
-            buf.appendLengthPrefixedData(nodeHash)
-            buf.appendUInt16(limit)
-        case .zoneInventory(let cids):
-            buf.append(Tag.zoneInventory.rawValue)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids { buf.appendLengthPrefixedString(cid) }
         case .haveCIDs(let nonce, let cids):
             buf.append(Tag.haveCIDs.rawValue)
             buf.appendUInt64(nonce)
@@ -233,13 +205,6 @@ public enum Message: Sendable {
         case .feeExhausted(let consumed):
             buf.append(Tag.feeExhausted.rawValue)
             buf.appendUInt64(consumed)
-        case .directOffer(let cid, let host, let port, let size, let timeout):
-            buf.append(Tag.directOffer.rawValue)
-            buf.appendLengthPrefixedString(cid)
-            buf.appendLengthPrefixedString(host)
-            buf.appendUInt16(port)
-            buf.appendUInt64(size)
-            buf.appendUInt64(timeout)
         case .deliveryAck(let requestId):
             buf.append(Tag.deliveryAck.rawValue)
             buf.appendUInt64(requestId)
@@ -363,17 +328,6 @@ public enum Message: Sendable {
                 cids.append(cid)
             }
             return .wantBlocks(cids: cids)
-        case .miningChallenge:
-            guard let hashPrefix = reader.readData(),
-                  let blockTarget = reader.readData(),
-                  let noncePrefix = reader.readData() else { return nil }
-            return .miningChallenge(hashPrefix: hashPrefix, blockTargetDifficulty: blockTarget, noncePrefix: noncePrefix)
-        case .miningChallengeSolution:
-            guard let nonce = reader.readUInt64(),
-                  let hash = reader.readData(),
-                  let hasBlockNonce = reader.readUInt8() else { return nil }
-            let blockNonce: UInt64? = hasBlockNonce == 1 ? reader.readUInt64() : nil
-            return .miningChallengeSolution(nonce: nonce, hash: hash, blockNonce: blockNonce)
         case .pexRequest:
             guard let nonce = reader.readUInt64() else { return nil }
             return .pexRequest(nonce: nonce)
@@ -389,19 +343,6 @@ public enum Message: Sendable {
                 peers.append(PeerEndpoint(publicKey: key, host: host, port: port))
             }
             return .pexResponse(nonce: nonce, peers: peers)
-        case .getZoneInventory:
-            guard let nodeHash = reader.readData(),
-                  let limit = reader.readUInt16() else { return nil }
-            return .getZoneInventory(nodeHash: nodeHash, limit: limit)
-        case .zoneInventory:
-            guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .zoneInventory(cids: cids)
         case .haveCIDs:
             guard let nonce = reader.readUInt64(),
                   let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
@@ -448,13 +389,6 @@ public enum Message: Sendable {
         case .feeExhausted:
             guard let consumed = reader.readUInt64() else { return nil }
             return .feeExhausted(consumed: consumed)
-        case .directOffer:
-            guard let cid = reader.readString(),
-                  let host = reader.readString(),
-                  let port = reader.readUInt16(),
-                  let size = reader.readUInt64(),
-                  let timeout = reader.readUInt64() else { return nil }
-            return .directOffer(cid: cid, host: host, port: port, size: size, timeout: timeout)
         case .deliveryAck:
             guard let requestId = reader.readUInt64() else { return nil }
             return .deliveryAck(requestId: requestId)
