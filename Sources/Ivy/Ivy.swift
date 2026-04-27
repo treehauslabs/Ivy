@@ -576,9 +576,12 @@ public actor Ivy {
                 let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
                 tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
             }
-            tally.recordSuccess(peer: peer)
+            if !items.isEmpty { tally.recordSuccess(peer: peer) }
 
-            // Resolve pending volume requests
+            // Resolve pending volume requests. An empty `items` list is a
+            // valid "miss" signal: resolve the waiter immediately so the
+            // requester can move on to the next fetcher / peer instead of
+            // waiting out its timeout.
             let volumeKey = "\(rootCID)-\(peer.publicKey.prefix(8))"
             if pendingVolumeRequests[volumeKey] != nil {
                 var result: [String: Data] = [:]
@@ -586,7 +589,9 @@ public actor Ivy {
                     result[item.cid] = item.data
                     haveSet.insert(item.cid)
                 }
-                recordVolumeProvider(rootCID: rootCID, peer: peer)
+                if !items.isEmpty {
+                    recordVolumeProvider(rootCID: rootCID, peer: peer)
+                }
                 resolveVolumeRequest(key: volumeKey, result: result)
             }
 
@@ -949,14 +954,24 @@ public actor Ivy {
 
     // MARK: - Volume-Aware Fetching
 
-    /// Handle a getVolume request: serve all requested CIDs in a single .blocks() response.
+    /// Handle a getVolume request: serve all requested CIDs in a single
+    /// `.blocks()` response. Always reply — even with an empty `items` list
+    /// — so the requester can fast-fail on a miss and try its next fetcher
+    /// (e.g., the per-chain CompositeFetcher tries nexus then child Ivy).
+    /// Without an explicit miss signal the requester waits the full
+    /// `requestTimeout` per Volume, and a multi-level resolve runs over the
+    /// validator's deadline.
     private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
         let items = await dataSource?.volumeData(for: rootCID, cids: cids) ?? []
 
+        // Bypass budget — Volume serving is the inverse of the budgeted
+        // request side: the requester is the one that pays via tally; once
+        // we accept the question we always answer (with data on hit, with
+        // empty items on miss so the requester can fast-fail).
+        fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
         if !items.isEmpty {
-            fireToPeer(peer, .blocks(rootCID: rootCID, items: items))
             let totalBytes = items.reduce(0) { $0 + $1.data.count }
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
             tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
@@ -1064,8 +1079,50 @@ public actor Ivy {
     }
 
     /// Fetch a volume's contents from the network.
+    ///
+    /// Volume is the unit of network query: callers ask for `rootCID` and
+    /// receive every entry the responder has under that root. Inner CIDs are
+    /// not network-addressable — they only make sense within the Volume that
+    /// contains them. Empty `cids` in the wire request signals "give me all
+    /// entries you have for this root".
     public func fetchVolume(rootCID: String) async -> [String: Data] {
-        return await fetchVolume(rootCID: rootCID, childCIDs: [rootCID])
+        if let entries = await dataSource?.volumeData(for: rootCID, cids: []), !entries.isEmpty {
+            var result: [String: Data] = [:]
+            for item in entries { result[item.cid] = item.data }
+            return result
+        }
+
+        if let providers = providerRecords[rootCID] {
+            for provider in providers {
+                guard connections[provider] != nil || localPeers[provider] != nil else { continue }
+                guard tally.shouldAllow(peer: provider) else { continue }
+                let batch = await requestVolumeFromPeer(rootCID: rootCID, cids: [], peer: provider)
+                if !batch.isEmpty {
+                    tally.recordSuccess(peer: provider)
+                    return batch
+                }
+            }
+        }
+
+        let rootHash = Router.hash(rootCID)
+        let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
+        for entry in closest {
+            guard connections[entry.id] != nil || localPeers[entry.id] != nil else { continue }
+            guard tally.shouldAllow(peer: entry.id) else { continue }
+            let batch = await requestVolumeFromPeer(rootCID: rootCID, cids: [], peer: entry.id)
+            if !batch.isEmpty {
+                recordVolumeProvider(rootCID: rootCID, peer: entry.id)
+                return batch
+            }
+        }
+
+        return [:]
+    }
+
+    /// Public accessor so fetchers can hint that `peer` already serves
+    /// `rootCID` (e.g., the peer that announced a block).
+    public func recordProvider(rootCID: String, peer: PeerID) {
+        recordVolumeProvider(rootCID: rootCID, peer: peer)
     }
 
     public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
