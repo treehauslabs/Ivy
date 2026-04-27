@@ -311,6 +311,16 @@ public actor Ivy {
         broadcastPayload(payload)
     }
 
+    /// Mark CIDs as locally available for DHT-forward serving without
+    /// broadcasting any announcement. Used after recursive Volume storage
+    /// so peers' DHT lookups for any subtree root we hold are answered by
+    /// `handleDHTForward` instead of being silently dropped.
+    public func markAvailable(cids: [String]) {
+        for cid in cids where !cid.isEmpty {
+            haveSet.insert(cid)
+        }
+    }
+
     public func sendBlock(cid: String, data: Data) {
         haveSet.insert(cid)
         let msg = Message.block(cid: cid, data: data)
