@@ -1077,31 +1077,52 @@ public actor Ivy {
             return result
         }
 
+        var candidates: [PeerID] = []
+        var seen: Set<String> = []
         if let providers = providerRecords[rootCID] {
-            for provider in providers {
-                guard connections[provider] != nil || localPeers[provider] != nil else { continue }
-                guard tally.shouldAllow(peer: provider) else { continue }
-                let batch = await requestVolumeFromPeer(rootCID: rootCID, cids: [], peer: provider)
-                if !batch.isEmpty {
-                    tally.recordSuccess(peer: provider)
-                    return batch
-                }
+            for p in providers {
+                guard connections[p] != nil || localPeers[p] != nil else { continue }
+                guard tally.shouldAllow(peer: p) else { continue }
+                if seen.insert(p.publicKey).inserted { candidates.append(p) }
             }
         }
-
         let rootHash = Router.hash(rootCID)
         let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
         for entry in closest {
             guard connections[entry.id] != nil || localPeers[entry.id] != nil else { continue }
             guard tally.shouldAllow(peer: entry.id) else { continue }
-            let batch = await requestVolumeFromPeer(rootCID: rootCID, cids: [], peer: entry.id)
-            if !batch.isEmpty {
-                recordVolumeProvider(rootCID: rootCID, peer: entry.id)
-                return batch
-            }
+            if seen.insert(entry.id.publicKey).inserted { candidates.append(entry.id) }
         }
 
-        return [:]
+        guard !candidates.isEmpty else { return [:] }
+        return await raceVolumeFetch(rootCID: rootCID, peers: candidates)
+    }
+
+    /// Race a Volume request across all candidate peers in parallel. The first
+    /// non-empty response wins; remaining in-flight peer fetches are cancelled
+    /// so the call returns immediately rather than waiting for slow peers to
+    /// time out. Sequential fallback would stall sync for `requestTimeout` per
+    /// dead peer — the race bounds wall-clock fetch latency to the *fastest*
+    /// peer, not the slowest.
+    private func raceVolumeFetch(rootCID: String, peers: [PeerID]) async -> [String: Data] {
+        await withTaskGroup(of: (PeerID, [String: Data]).self) { group in
+            for peer in peers {
+                group.addTask { [self] in
+                    let result = await requestVolumeFromPeer(rootCID: rootCID, cids: [], peer: peer)
+                    return (peer, result)
+                }
+            }
+            var winner: [String: Data] = [:]
+            for await (peer, batch) in group {
+                if !batch.isEmpty && winner.isEmpty {
+                    winner = batch
+                    tally.recordSuccess(peer: peer)
+                    recordVolumeProvider(rootCID: rootCID, peer: peer)
+                    group.cancelAll()
+                }
+            }
+            return winner
+        }
     }
 
     /// Public accessor so fetchers can hint that `peer` already serves
@@ -1170,6 +1191,12 @@ public actor Ivy {
     }
 
     /// Send a getVolume request to a specific peer and wait for the .blocks() response.
+    ///
+    /// Cancellation-aware: if the awaiting Task is cancelled (e.g., a sibling
+    /// peer in `raceVolumeFetch` won), the pending continuation is resolved
+    /// with empty immediately rather than waiting for `requestTimeout`. Without
+    /// this, `group.cancelAll()` would only set the cancelled flag — the
+    /// continuation would still suspend until timeout, defeating the race.
     private func requestVolumeFromPeer(rootCID: String, cids: [String], peer: PeerID) async -> [String: Data] {
         let volumeKey = "\(rootCID)-\(peer.publicKey.prefix(8))"
 
@@ -1179,14 +1206,18 @@ public actor Ivy {
             guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
         }
 
-        return await withCheckedContinuation { continuation in
-            pendingVolumeRequests[volumeKey, default: []].append(continuation)
-            fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                pendingVolumeRequests[volumeKey, default: []].append(continuation)
+                fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
 
-            Task {
-                try? await Task.sleep(for: config.requestTimeout)
-                self.resolveVolumeRequest(key: volumeKey, result: [:])
+                Task {
+                    try? await Task.sleep(for: config.requestTimeout)
+                    self.resolveVolumeRequest(key: volumeKey, result: [:])
+                }
             }
+        } onCancel: {
+            Task { await self.resolveVolumeRequest(key: volumeKey, result: [:]) }
         }
     }
 
