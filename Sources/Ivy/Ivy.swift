@@ -44,11 +44,12 @@ public actor Ivy {
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
     private var _serviceBus: LocalServiceBus?
 
-    private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, selector: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
+    private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
     // Volume tracking: root CID → provider peer(s) for DHT routing
     private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
+    private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
     public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
         self.config = config
@@ -538,11 +539,12 @@ public actor Ivy {
         case .findPins(let cid, _):
             await handleFindPins(cid: cid, from: peer)
 
-        case .pins:
+        case .pins(let cid, let providers):
+            handlePinsResponse(cid: cid, providers: providers, from: peer)
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .pinAnnounce(let rootCID, let selector, let publicKey, let expiry, _, _):
-            handlePinAnnounce(rootCID: rootCID, selector: selector, publicKey: publicKey, expiry: expiry, from: peer)
+        case .pinAnnounce(let rootCID, let publicKey, let expiry, _, _):
+            handlePinAnnounce(rootCID: rootCID, publicKey: publicKey, expiry: expiry, from: peer)
 
         case .pinStored:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -774,18 +776,17 @@ public actor Ivy {
     private func handleFindPins(cid: String, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
 
-        // Check if we store pin announcements for this CID
         let stored = pinAnnouncements[cid] ?? []
-        let results = stored.map { (publicKey: $0.publicKey, selector: $0.selector) }
-        fireToPeer(peer, .pins(announcements: results))
+        let providers = stored.map(\.publicKey)
+        fireToPeer(peer, .pins(cid: cid, providers: providers))
     }
 
-    private func handlePinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, from peer: PeerID) {
+    private func handlePinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, from peer: PeerID) {
         guard tally.shouldAllow(peer: peer) else { return }
 
         var existing = pinAnnouncements[rootCID] ?? []
         existing.removeAll { $0.publicKey == publicKey }
-        existing.append((publicKey: publicKey, selector: selector, expiry: expiry))
+        existing.append((publicKey: publicKey, expiry: expiry))
 
         if existing.count > Int(MessageLimits.maxNeighborCount) {
             existing = Array(existing.suffix(Int(MessageLimits.maxNeighborCount)))
@@ -795,8 +796,32 @@ public actor Ivy {
         fireToPeer(peer, .pinStored(rootCID: rootCID))
     }
 
-    public func publishPinAnnounce(rootCID: String, selector: String, expiry: UInt64, signature: Data, fee: UInt64) {
-        let msg = Message.pinAnnounce(rootCID: rootCID, selector: selector, publicKey: config.publicKey, expiry: expiry, signature: signature, fee: fee)
+    /// Resolve any in-flight findPins waiters with the providers that just
+    /// arrived, and seed them as candidates for future fetches. Provider
+    /// peers may not be in our routing table yet; we just stash the keys
+    /// and let fetchVolume gate on connection-reachability.
+    private func handlePinsResponse(cid: String, providers: [String], from peer: PeerID) {
+        let peerIDs = providers.map { PeerID(publicKey: $0) }
+        if let waiters = pendingFindPins.removeValue(forKey: cid) {
+            for cont in waiters { cont.resume(returning: peerIDs) }
+        }
+        for pk in providers {
+            let pid = PeerID(publicKey: pk)
+            recordVolumeProvider(rootCID: cid, peer: pid)
+        }
+    }
+
+    public func publishPinAnnounce(rootCID: String, expiry: UInt64, signature: Data, fee: UInt64) {
+        // Self-record: when we publish that we pin a CID, we are also a
+        // valid answer to findPins for that CID. Without this, a node that
+        // is itself in the closest-K to the CID hash never appears in its
+        // own responses — IPFS provider records are bidirectional.
+        var existing = pinAnnouncements[rootCID] ?? []
+        existing.removeAll { $0.publicKey == config.publicKey }
+        existing.append((publicKey: config.publicKey, expiry: expiry))
+        pinAnnouncements[rootCID] = existing
+
+        let msg = Message.pinAnnounce(rootCID: rootCID, publicKey: config.publicKey, expiry: expiry, signature: signature, fee: fee)
         let cidHash = Router.hash(rootCID)
         let closest = router.closestPeers(to: cidHash, count: config.kBucketSize)
         for entry in closest {
@@ -806,8 +831,8 @@ public actor Ivy {
         }
     }
 
-    public func storedPinAnnouncements(for cid: String) -> [(publicKey: String, selector: String)] {
-        (pinAnnouncements[cid] ?? []).map { (publicKey: $0.publicKey, selector: $0.selector) }
+    public func storedPinAnnouncements(for cid: String) -> [String] {
+        (pinAnnouncements[cid] ?? []).map(\.publicKey)
     }
 
     // MARK: - Public API (Application-Facing)
@@ -910,17 +935,51 @@ public actor Ivy {
         return data
     }
 
-    /// Discover pinners for a CID via findPins.
-    public func discoverPinners(cid: String) async -> [(publicKey: String, selector: String)] {
-        let cidHash = Router.hash(cid)
+    /// Discover pinners for a CID via findPins. Awaits the first response
+    /// or short timeout, then merges with locally-stored announcements.
+    public func discoverPinners(cid: String) async -> [String] {
+        let discovered = await findPinnersViaDHT(rootCID: cid)
+        var seen: Set<String> = []
+        var out: [String] = []
+        for pk in storedPinAnnouncements(for: cid) where seen.insert(pk).inserted {
+            out.append(pk)
+        }
+        for pid in discovered where seen.insert(pid.publicKey).inserted {
+            out.append(pid.publicKey)
+        }
+        return out
+    }
+
+    /// DHT provider lookup: ask K closest peers (by XOR distance to the CID
+    /// hash) which pinners they know for `rootCID`, await first non-empty
+    /// response or a short timeout, return discovered peers. This is the
+    /// IPFS-style provider record path — distinct from the routing-table
+    /// XOR-closest-peer set which only covers peers we happen to have in
+    /// our buckets, not the broader population that has announced pins.
+    private func findPinnersViaDHT(rootCID: String) async -> [PeerID] {
+        let cidHash = Router.hash(rootCID)
         let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
+        var sent = 0
         for entry in closest {
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             guard reachable else { continue }
-            fireToPeer(entry.id, .findPins(cid: cid, fee: 0))
+            fireToPeer(entry.id, .findPins(cid: rootCID, fee: 0))
+            sent += 1
         }
-        // Return local knowledge; remote results arrive asynchronously via delegate
-        return storedPinAnnouncements(for: cid)
+        guard sent > 0 else { return [] }
+
+        return await withCheckedContinuation { cont in
+            pendingFindPins[rootCID, default: []].append(cont)
+            Task {
+                try? await Task.sleep(for: .milliseconds(500))
+                self.resolvePendingFindPins(rootCID: rootCID, peers: [])
+            }
+        }
+    }
+
+    private func resolvePendingFindPins(rootCID: String, peers: [PeerID]) {
+        guard let waiters = pendingFindPins.removeValue(forKey: rootCID) else { return }
+        for cont in waiters { cont.resume(returning: peers) }
     }
 
     /// Generate a Curve25519 key pair with target difficulty.
@@ -1079,6 +1138,8 @@ public actor Ivy {
 
         var candidates: [PeerID] = []
         var seen: Set<String> = []
+
+        // Locally-remembered providers (learned from past announces / fetches).
         if let providers = providerRecords[rootCID] {
             for p in providers {
                 guard connections[p] != nil || localPeers[p] != nil else { continue }
@@ -1086,6 +1147,33 @@ public actor Ivy {
                 if seen.insert(p.publicKey).inserted { candidates.append(p) }
             }
         }
+
+        // Locally-stored pin announcements (we are likely a closest-K node
+        // for this CID and hold announces published by others).
+        for pk in storedPinAnnouncements(for: rootCID) {
+            let pid = PeerID(publicKey: pk)
+            guard connections[pid] != nil || localPeers[pid] != nil else { continue }
+            guard tally.shouldAllow(peer: pid) else { continue }
+            if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
+        }
+
+        // DHT provider lookup: ask the routing-closest peers which pinners
+        // they know. Skip when we already have enough candidates, since
+        // findPins costs a round trip. Threshold of 2 keeps the race fed
+        // (raceVolumeFetch needs >1 peer for parallel coverage).
+        if candidates.count < 2 {
+            let discovered = await findPinnersViaDHT(rootCID: rootCID)
+            for pid in discovered {
+                guard connections[pid] != nil || localPeers[pid] != nil else { continue }
+                guard tally.shouldAllow(peer: pid) else { continue }
+                if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
+            }
+        }
+
+        // Final fallback: routing-closest peers by XOR distance to the CID
+        // hash. These may or may not actually have the data — Kademlia
+        // closeness ≠ pin holding — but in a small mesh they're often the
+        // same set as direct connections, so this is a useful last try.
         let rootHash = Router.hash(rootCID)
         let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
         for entry in closest {
@@ -1269,6 +1357,10 @@ public actor Ivy {
 
         for (key, _) in pendingVolumeRequests {
             resolveVolumeRequest(key: key, result: [:])
+        }
+
+        for (cid, _) in pendingFindPins {
+            resolvePendingFindPins(rootCID: cid, peers: [])
         }
 
         pendingForwards.removeAll()

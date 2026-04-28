@@ -208,16 +208,13 @@ struct EconomicMessageTests {
 
     @Test("pins roundtrip")
     func testPinsRoundtrip() {
-        let msg = Message.pins(announcements: [
-            (publicKey: "pk1", selector: "/"),
-            (publicKey: "pk2", selector: "/photos")
-        ])
+        let msg = Message.pins(cid: "QmRoot", providers: ["pk1", "pk2"])
         let decoded = Message.deserialize(msg.serialize())
-        if case .pins(let announcements) = decoded {
-            #expect(announcements.count == 2)
-            #expect(announcements[0].publicKey == "pk1")
-            #expect(announcements[0].selector == "/")
-            #expect(announcements[1].selector == "/photos")
+        if case .pins(let cid, let providers) = decoded {
+            #expect(cid == "QmRoot")
+            #expect(providers.count == 2)
+            #expect(providers[0] == "pk1")
+            #expect(providers[1] == "pk2")
         } else {
             Issue.record("Expected pins")
         }
@@ -226,11 +223,10 @@ struct EconomicMessageTests {
     @Test("pinAnnounce roundtrip")
     func testPinAnnounceRoundtrip() {
         let sig = Data([1, 2, 3, 4])
-        let msg = Message.pinAnnounce(rootCID: "QmRoot", selector: "/", publicKey: "myKey", expiry: 999999, signature: sig, fee: 50)
+        let msg = Message.pinAnnounce(rootCID: "QmRoot", publicKey: "myKey", expiry: 999999, signature: sig, fee: 50)
         let decoded = Message.deserialize(msg.serialize())
-        if case .pinAnnounce(let root, let sel, let pk, let exp, let s, let fee) = decoded {
+        if case .pinAnnounce(let root, let pk, let exp, let s, let fee) = decoded {
             #expect(root == "QmRoot")
-            #expect(sel == "/")
             #expect(pk == "myKey")
             #expect(exp == 999999)
             #expect(s == sig)

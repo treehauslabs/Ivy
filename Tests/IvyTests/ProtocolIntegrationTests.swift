@@ -41,13 +41,12 @@ struct ProtocolIntegrationTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // B publishes a pin announcement through A
-        bSide.send(.pinAnnounce(rootCID: "QmRoot", selector: "/", publicKey: "pinner-z", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(.pinAnnounce(rootCID: "QmRoot", publicKey: "pinner-z", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
         try await Task.sleep(for: .milliseconds(100))
 
         let stored = await nodeA.storedPinAnnouncements(for: "QmRoot")
         #expect(stored.count == 1)
-        #expect(stored[0].publicKey == "pinner-z")
-        #expect(stored[0].selector == "/")
+        #expect(stored[0] == "pinner-z")
         bSide.close()
     }
 

@@ -22,8 +22,8 @@ public enum Message: Sendable {
 
     // Ivy economic layer
     case findPins(cid: String, fee: UInt64)
-    case pins(announcements: [(publicKey: String, selector: String)])
-    case pinAnnounce(rootCID: String, selector: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
+    case pins(cid: String, providers: [String])
+    case pinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
     case pinStored(rootCID: String)
     case feeExhausted(consumed: UInt64)
     case deliveryAck(requestId: UInt64)
@@ -184,17 +184,16 @@ public enum Message: Sendable {
             buf.append(Tag.findPins.rawValue)
             buf.appendLengthPrefixedString(cid)
             buf.appendUInt64(fee)
-        case .pins(let announcements):
+        case .pins(let cid, let providers):
             buf.append(Tag.pins.rawValue)
-            buf.appendUInt16(UInt16(announcements.count))
-            for a in announcements {
-                buf.appendLengthPrefixedString(a.publicKey)
-                buf.appendLengthPrefixedString(a.selector)
+            buf.appendLengthPrefixedString(cid)
+            buf.appendUInt16(UInt16(providers.count))
+            for pk in providers {
+                buf.appendLengthPrefixedString(pk)
             }
-        case .pinAnnounce(let rootCID, let selector, let publicKey, let expiry, let signature, let fee):
+        case .pinAnnounce(let rootCID, let publicKey, let expiry, let signature, let fee):
             buf.append(Tag.pinAnnounce.rawValue)
             buf.appendLengthPrefixedString(rootCID)
-            buf.appendLengthPrefixedString(selector)
             buf.appendLengthPrefixedString(publicKey)
             buf.appendUInt64(expiry)
             buf.appendLengthPrefixedData(signature)
@@ -368,21 +367,22 @@ public enum Message: Sendable {
                   let fee = reader.readUInt64() else { return nil }
             return .findPins(cid: cid, fee: fee)
         case .pins:
-            guard let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
-            var announcements = [(publicKey: String, selector: String)]()
+            guard let cid = reader.readString(),
+                  let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
+            var providers = [String]()
+            providers.reserveCapacity(Int(count))
             for _ in 0..<count {
-                guard let pk = reader.readString(), let sel = reader.readString() else { return nil }
-                announcements.append((publicKey: pk, selector: sel))
+                guard let pk = reader.readString() else { return nil }
+                providers.append(pk)
             }
-            return .pins(announcements: announcements)
+            return .pins(cid: cid, providers: providers)
         case .pinAnnounce:
             guard let rootCID = reader.readString(),
-                  let selector = reader.readString(),
                   let publicKey = reader.readString(),
                   let expiry = reader.readUInt64(),
                   let signature = reader.readData(),
                   let fee = reader.readUInt64() else { return nil }
-            return .pinAnnounce(rootCID: rootCID, selector: selector, publicKey: publicKey, expiry: expiry, signature: signature, fee: fee)
+            return .pinAnnounce(rootCID: rootCID, publicKey: publicKey, expiry: expiry, signature: signature, fee: fee)
         case .pinStored:
             guard let rootCID = reader.readString() else { return nil }
             return .pinStored(rootCID: rootCID)

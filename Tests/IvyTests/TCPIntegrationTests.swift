@@ -223,13 +223,12 @@ struct TCPIntegrationTests {
         let expiry = UInt64(Date().timeIntervalSince1970) + 86400
         await ivy1.publishPinAnnounce(
             rootCID: "pinned-data-root",
-            selector: "/",
             expiry: expiry,
             signature: Data(),
             fee: 5
         )
 
-        var stored: [(publicKey: String, selector: String)] = []
+        var stored: [String] = []
         for _ in 0..<10 {
             try await Task.sleep(for: .milliseconds(500))
             stored = await ivy2.storedPinAnnouncements(for: "pinned-data-root")
@@ -237,7 +236,7 @@ struct TCPIntegrationTests {
         }
         #expect(!stored.isEmpty, "Pin announcement should be discoverable on Node 2")
         if let first = stored.first {
-            #expect(first.publicKey == kp1.publicKey, "Pinner should be Node 1")
+            #expect(first == kp1.publicKey, "Pinner should be Node 1")
         }
 
         await ivy1.stop()
@@ -565,7 +564,6 @@ struct TCPIntegrationTests {
         let expiry = UInt64(Date().timeIntervalSince1970) + 86400
         await ivy1.publishPinAnnounce(
             rootCID: testCID,
-            selector: "/",
             expiry: expiry,
             signature: Data(),
             fee: 5
@@ -576,7 +574,7 @@ struct TCPIntegrationTests {
         let stored = await ivy2.storedPinAnnouncements(for: testCID)
         #expect(!stored.isEmpty, "Pin announcement should be discoverable on Node 2 after pin request")
         if let first = stored.first {
-            #expect(first.publicKey == kp1.publicKey, "Pinner should be Node 1")
+            #expect(first == kp1.publicKey, "Pinner should be Node 1")
         }
 
         await ivy1.stop()
@@ -660,7 +658,6 @@ struct TCPIntegrationTests {
         let expiry = UInt64(Date().timeIntervalSince1970) + 86400
         await ivy1.publishPinAnnounce(
             rootCID: pinCID,
-            selector: "/all",
             expiry: expiry,
             signature: Data(),
             fee: 5
@@ -674,10 +671,10 @@ struct TCPIntegrationTests {
         let totalDiscovered = stored2.count + stored3.count
         #expect(totalDiscovered >= 1, "At least one node should discover Node 1 as pinner")
         if let first2 = stored2.first {
-            #expect(first2.publicKey == kp1.publicKey, "Node 2 should see Node 1 as pinner")
+            #expect(first2 == kp1.publicKey, "Node 2 should see Node 1 as pinner")
         }
         if let first3 = stored3.first {
-            #expect(first3.publicKey == kp1.publicKey, "Node 3 should see Node 1 as pinner")
+            #expect(first3 == kp1.publicKey, "Node 3 should see Node 1 as pinner")
         }
 
         await ivy1.stop()

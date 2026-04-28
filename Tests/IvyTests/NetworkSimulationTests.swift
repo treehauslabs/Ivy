@@ -73,7 +73,7 @@ struct PinDiscoveryChainTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Store a pin announcement at A (as if a pinner published it)
-        bSide.send(.pinAnnounce(rootCID: "QmDiscovery", selector: "/data", publicKey: "pinner-x", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(.pinAnnounce(rootCID: "QmDiscovery", publicKey: "pinner-x", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
         try await Task.sleep(for: .milliseconds(100))
 
         // Now B queries for it
@@ -83,8 +83,7 @@ struct PinDiscoveryChainTests {
         // Verify A stored it
         let stored = await nodeA.storedPinAnnouncements(for: "QmDiscovery")
         #expect(stored.count == 1)
-        #expect(stored[0].publicKey == "pinner-x")
-        #expect(stored[0].selector == "/data")
+        #expect(stored[0] == "pinner-x")
     }
 
     @Test("Multiple pinners for same CID all discoverable")
@@ -97,15 +96,15 @@ struct PinDiscoveryChainTests {
         try await Task.sleep(for: .milliseconds(50))
 
         // Two different pinners announce for the same CID
-        bSide.send(.pinAnnounce(rootCID: "QmShared", selector: "/", publicKey: "pinner-1", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(.pinAnnounce(rootCID: "QmShared", publicKey: "pinner-1", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
         try await Task.sleep(for: .milliseconds(50))
-        bSide.send(.pinAnnounce(rootCID: "QmShared", selector: "/photos", publicKey: "pinner-2", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(.pinAnnounce(rootCID: "QmShared", publicKey: "pinner-2", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
         try await Task.sleep(for: .milliseconds(100))
 
         let stored = await nodeA.storedPinAnnouncements(for: "QmShared")
         #expect(stored.count == 2)
 
-        let keys = Set(stored.map { $0.publicKey })
+        let keys = Set(stored)
         #expect(keys.contains("pinner-1"))
         #expect(keys.contains("pinner-2"))
     }
