@@ -651,8 +651,8 @@ public actor Ivy {
     }
 
     private func hasCreditCapacity(peer: PeerID) async -> Bool {
-        let capacity = await creditLedger.creditLine(for: peer)?.availableCapacity ?? Int64.max
-        return capacity > 0
+        guard let line = await creditLedger.creditLine(for: peer) else { return true }
+        return !line.needsSettlement
     }
 
     // MARK: - DHT Forwarding
@@ -1438,6 +1438,33 @@ public actor Ivy {
     /// Get known providers for a volume.
     public func providers(for rootCID: String) -> [PeerID] {
         providerRecords[rootCID] ?? []
+    }
+
+    // MARK: - Provider Expiry
+
+    public func evictExpiredProviders() {
+        let now = UInt64(Date().timeIntervalSince1970)
+        let rootCIDs = Array(pinAnnouncements.keys)
+
+        for rootCID in rootCIDs {
+            guard var announcements = pinAnnouncements[rootCID] else { continue }
+            announcements.removeAll { $0.expiry <= now }
+            if announcements.isEmpty {
+                pinAnnouncements.removeValue(forKey: rootCID)
+                providerRecords.removeValue(forKey: rootCID)
+            } else {
+                pinAnnouncements[rootCID] = announcements
+                let liveKeys = Set(announcements.map(\.publicKey))
+                if var providers = providerRecords[rootCID] {
+                    providers.removeAll { !liveKeys.contains($0.publicKey) }
+                    if providers.isEmpty {
+                        providerRecords.removeValue(forKey: rootCID)
+                    } else {
+                        providerRecords[rootCID] = providers
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Cleanup
