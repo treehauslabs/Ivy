@@ -1440,28 +1440,42 @@ public actor Ivy {
         providerRecords[rootCID] ?? []
     }
 
-    // MARK: - Provider Expiry
+    // MARK: - Expiry
 
-    public func evictExpiredProviders() {
+    public func evict() {
+        evictExpiredPins()
+        evictExpiredProviders()
+    }
+
+    private func evictExpiredPins() {
         let now = UInt64(Date().timeIntervalSince1970)
         let rootCIDs = Array(pinAnnouncements.keys)
-
         for rootCID in rootCIDs {
             guard var announcements = pinAnnouncements[rootCID] else { continue }
             announcements.removeAll { $0.expiry <= now }
             if announcements.isEmpty {
                 pinAnnouncements.removeValue(forKey: rootCID)
-                providerRecords.removeValue(forKey: rootCID)
             } else {
                 pinAnnouncements[rootCID] = announcements
-                let liveKeys = Set(announcements.map(\.publicKey))
-                if var providers = providerRecords[rootCID] {
-                    providers.removeAll { !liveKeys.contains($0.publicKey) }
-                    if providers.isEmpty {
-                        providerRecords.removeValue(forKey: rootCID)
-                    } else {
-                        providerRecords[rootCID] = providers
-                    }
+            }
+        }
+    }
+
+    private func evictExpiredProviders() {
+        let rootCIDs = Array(providerRecords.keys)
+        for rootCID in rootCIDs {
+            let liveKeys: Set<String>
+            if let announcements = pinAnnouncements[rootCID] {
+                liveKeys = Set(announcements.map(\.publicKey))
+            } else {
+                liveKeys = []
+            }
+            if var providers = providerRecords[rootCID] {
+                providers.removeAll { !liveKeys.contains($0.publicKey) }
+                if providers.isEmpty {
+                    providerRecords.removeValue(forKey: rootCID)
+                } else {
+                    providerRecords[rootCID] = providers
                 }
             }
         }
