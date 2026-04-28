@@ -46,6 +46,10 @@ public actor Ivy {
 
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
+    private var nodeRecordCache: BoundedDictionary<String, NodeRecord> = BoundedDictionary(capacity: 5_000)
+    private var localNodeRecord: NodeRecord?
+    private var localRecordSeq: UInt64 = 0
+
     // Volume tracking: root CID → provider peer(s) for DHT routing
     private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
@@ -403,6 +407,9 @@ public actor Ivy {
             listenAddrs: listenAddrs,
             signature: signature
         ))
+        if let record = localNodeRecord {
+            conn.fireAndForgetMessage(.nodeRecord(record: record))
+        }
     }
 
     private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], signature: Data, from peer: PeerID) {
@@ -436,6 +443,7 @@ public actor Ivy {
             if let best = observedAddresses.max(by: { $0.value < $1.value }), best.value >= 2 {
                 if publicAddress != best.key {
                     publicAddress = best.key
+                    updateNodeRecord()
                     delegate?.ivy(self, didDiscoverPublicAddress: best.key)
                 }
             }
@@ -607,6 +615,12 @@ public actor Ivy {
 
         case .haveCIDsResult:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
+        case .nodeRecord(let record):
+            handleNodeRecord(record, from: peer)
+
+        case .getNodeRecord(let publicKey):
+            handleGetNodeRecord(publicKey: publicKey, from: peer)
         }
     }
 
@@ -833,6 +847,71 @@ public actor Ivy {
 
     public func storedPinAnnouncements(for cid: String) -> [String] {
         (pinAnnouncements[cid] ?? []).map(\.publicKey)
+    }
+
+    // MARK: - Node Records
+
+    private func handleNodeRecord(_ record: NodeRecord, from peer: PeerID) {
+        guard tally.shouldAllow(peer: peer) else { return }
+        guard record.verify() else { return }
+        guard record.serialize().count <= NodeRecord.maxSize else { return }
+        if let existing = nodeRecordCache[record.publicKey] {
+            guard record.sequenceNumber > existing.sequenceNumber else { return }
+        }
+        nodeRecordCache[record.publicKey] = record
+    }
+
+    private func handleGetNodeRecord(publicKey: String, from peer: PeerID) {
+        guard tally.shouldAllow(peer: peer) else { return }
+        if publicKey == config.publicKey, let local = localNodeRecord {
+            fireToPeer(peer, .nodeRecord(record: local))
+        } else if let cached = nodeRecordCache[publicKey] {
+            fireToPeer(peer, .nodeRecord(record: cached))
+        }
+    }
+
+    public func updateNodeRecord() {
+        guard let addr = publicAddress else { return }
+        localRecordSeq += 1
+        localNodeRecord = NodeRecord.create(
+            publicKey: config.publicKey,
+            host: addr.host,
+            port: addr.port,
+            sequenceNumber: localRecordSeq,
+            signingKey: config.signingKey
+        )
+        if let record = localNodeRecord {
+            nodeRecordCache[config.publicKey] = record
+        }
+    }
+
+    public func publishNodeRecord() {
+        guard let record = localNodeRecord else { return }
+        let msg = Message.nodeRecord(record: record)
+        let keyHash = Router.hash(config.publicKey)
+        let closest = router.closestPeers(to: keyHash, count: config.kBucketSize)
+        for entry in closest {
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
+            fireToPeer(entry.id, msg)
+        }
+    }
+
+    public func lookupNodeRecord(publicKey: String) async -> NodeRecord? {
+        if let cached = nodeRecordCache[publicKey] { return cached }
+        let keyHash = Router.hash(publicKey)
+        let closest = router.closestPeers(to: keyHash, count: config.maxConcurrentRequests)
+        for entry in closest {
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            guard reachable else { continue }
+            fireToPeer(entry.id, .getNodeRecord(publicKey: publicKey))
+        }
+        try? await Task.sleep(for: .milliseconds(500))
+        return nodeRecordCache[publicKey]
+    }
+
+    public func nodeRecord(for publicKey: String) -> NodeRecord? {
+        nodeRecordCache[publicKey]
     }
 
     // MARK: - Public API (Application-Facing)

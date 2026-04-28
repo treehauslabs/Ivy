@@ -38,6 +38,10 @@ public enum Message: Sendable {
     case announceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64)
     case pushVolume(rootCID: String, items: [(cid: String, data: Data)])
 
+    // Node records (ENR-style identity-to-endpoint mapping)
+    case nodeRecord(record: NodeRecord)
+    case getNodeRecord(publicKey: String)
+
     private enum Tag: UInt8 {
         case ping = 0
         case pong = 1
@@ -74,6 +78,9 @@ public enum Message: Sendable {
         case getVolume = 53
         case announceVolume = 54
         case pushVolume = 55
+        // Node records
+        case nodeRecord = 56
+        case getNodeRecord = 57
     }
 
     /// True for messages that keep the connection alive — always sent regardless of budget.
@@ -256,6 +263,12 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(item.cid)
                 buf.appendLengthPrefixedData(item.data)
             }
+        case .nodeRecord(let record):
+            buf.append(Tag.nodeRecord.rawValue)
+            buf.append(record.serialize())
+        case .getNodeRecord(let publicKey):
+            buf.append(Tag.getNodeRecord.rawValue)
+            buf.appendLengthPrefixedString(publicKey)
         }
         return buf
     }
@@ -459,6 +472,12 @@ public enum Message: Sendable {
                 items.append((cid: cid, data: data))
             }
             return .pushVolume(rootCID: rootCID, items: items)
+        case .nodeRecord:
+            guard let record = NodeRecord.deserialize(&reader) else { return nil }
+            return .nodeRecord(record: record)
+        case .getNodeRecord:
+            guard let publicKey = reader.readString() else { return nil }
+            return .getNodeRecord(publicKey: publicKey)
         }
     }
 
