@@ -55,6 +55,8 @@ public actor Ivy {
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
     private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
+    public let creditLedger: CreditLineLedger
+
     public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton, tally: Tally? = nil) {
         self.config = config
         self.localID = PeerID(publicKey: config.publicKey)
@@ -62,6 +64,10 @@ public actor Ivy {
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
         self.group = group
         self.stunClient = STUNClient(group: group, servers: config.stunServers)
+        self.creditLedger = CreditLineLedger(
+            localID: PeerID(publicKey: config.publicKey),
+            baseThresholdMultiplier: config.baseThresholdMultiplier
+        )
     }
 
     // MARK: - Lifecycle
@@ -137,6 +143,7 @@ public actor Ivy {
         let conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
         connections[peer] = conn
         router.addPeer(peer, endpoint: endpoint, tally: tally)
+        await creditLedger.establish(with: peer)
         if let monitor = healthMonitor { await monitor.trackPeer(peer) }
         delegate?.ivy(self, didConnect: peer)
         Task { await handleInbound(conn) }
@@ -438,6 +445,7 @@ public actor Ivy {
                 connections[realID] = conn
                 let endpoint = PeerEndpoint(publicKey: publicKey, host: conn.endpoint.host, port: conn.endpoint.port)
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
+                Task { await self.creditLedger.establish(with: realID) }
             }
         }
 
@@ -497,6 +505,7 @@ public actor Ivy {
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordReceived(peer: peer, bytes: data.count, cpl: cpl)
             tally.recordSuccess(peer: peer)
+            await meterReceived(peer: peer, bytes: data.count)
 
             if haveSet.contains(cid) {
                 resolvePending(cid: cid, data: data)
@@ -580,11 +589,14 @@ public actor Ivy {
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .blocks(let rootCID, let items):
+            var totalReceived = 0
             for item in items {
                 let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
                 tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
+                totalReceived += item.data.count
             }
             if !items.isEmpty { tally.recordSuccess(peer: peer) }
+            if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
 
             // Resolve pending volume requests. An empty `items` list is a
             // valid "miss" signal: resolve the waiter immediately so the
@@ -628,10 +640,25 @@ public actor Ivy {
         }
     }
 
+    // MARK: - Credit Line Metering
+
+    private func meterSent(peer: PeerID, bytes: Int) async {
+        await creditLedger.earnFromRelay(peer: peer, amount: Int64(bytes))
+    }
+
+    private func meterReceived(peer: PeerID, bytes: Int) async {
+        await creditLedger.chargeForRelay(peer: peer, amount: Int64(bytes))
+    }
+
+    private func hasCreditCapacity(peer: PeerID) async -> Bool {
+        let capacity = await creditLedger.creditLine(for: peer)?.availableCapacity ?? Int64.max
+        return capacity > 0
+    }
+
     // MARK: - DHT Forwarding
 
     private func handleDHTForward(cid: String, ttl: UInt8, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else {
+        guard tally.shouldAllow(peer: peer), await hasCreditCapacity(peer: peer) else {
             fireToPeer(peer, .dontHave(cid: cid), bypassBudget: true)
             return
         }
@@ -645,6 +672,7 @@ public actor Ivy {
             fireToPeer(peer, .block(cid: cid, data: data), bypassBudget: true)
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
+            await meterSent(peer: peer, bytes: data.count)
         } else if ttl > 0 {
             pendingForwards[cid, default: []].append(peer)
             let cidHash = Router.hash(cid)
@@ -699,6 +727,7 @@ public actor Ivy {
     func registerLocalPeer(_ conn: LocalPeerConnection, as peerID: PeerID) {
         localPeers[peerID] = conn
         Task {
+            await creditLedger.establish(with: peerID)
             await handleLocalInbound(conn, from: peerID)
         }
     }
@@ -1089,19 +1118,16 @@ public actor Ivy {
     /// `requestTimeout` per Volume, and a multi-level resolve runs over the
     /// validator's deadline.
     private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
+        guard tally.shouldAllow(peer: peer), await hasCreditCapacity(peer: peer) else { return }
 
         let items = await dataSource?.volumeData(for: rootCID, cids: cids) ?? []
 
-        // Bypass budget — Volume serving is the inverse of the budgeted
-        // request side: the requester is the one that pays via tally; once
-        // we accept the question we always answer (with data on hit, with
-        // empty items on miss so the requester can fast-fail).
         fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
         if !items.isEmpty {
             let totalBytes = items.reduce(0) { $0 + $1.data.count }
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
             tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
+            await meterSent(peer: peer, bytes: totalBytes)
         }
     }
 

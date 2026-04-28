@@ -216,10 +216,8 @@ struct TCPIntegrationTests {
         try await ivy2.connect(to: PeerEndpoint(
             publicKey: kp1.publicKey, host: "127.0.0.1", port: p1
         ))
-        // Wait for identify exchange so both nodes are in each other's routing tables
-        try await Task.sleep(for: .seconds(2))
+        try await Task.sleep(for: .seconds(3))
 
-        // Node 1 publishes a pin announcement
         let expiry = UInt64(Date().timeIntervalSince1970) + 86400
         await ivy1.publishPinAnnounce(
             rootCID: "pinned-data-root",
