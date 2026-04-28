@@ -55,10 +55,10 @@ public actor Ivy {
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
     private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
-    public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton) {
+    public init(config: IvyConfig, group: EventLoopGroup = MultiThreadedEventLoopGroup.singleton, tally: Tally? = nil) {
         self.config = config
         self.localID = PeerID(publicKey: config.publicKey)
-        self.tally = Tally(config: config.tallyConfig)
+        self.tally = tally ?? Tally(config: config.tallyConfig)
         self.router = Router(localID: PeerID(publicKey: config.publicKey), k: config.kBucketSize)
         self.group = group
         self.stunClient = STUNClient(group: group, servers: config.stunServers)
@@ -149,6 +149,10 @@ public actor Ivy {
         peers.append(contentsOf: connections.keys)
         peers.append(contentsOf: localPeers.keys)
         return peers
+    }
+
+    public var connectedPeerEndpoints: [PeerEndpoint] {
+        connections.values.map { $0.endpoint }
     }
 
     public var directPeerCount: Int { connections.count }
