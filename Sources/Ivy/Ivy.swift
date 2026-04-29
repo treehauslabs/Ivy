@@ -488,6 +488,7 @@ public actor Ivy {
         delegate?.ivy(self, didDisconnect: peer)
 
         if !peer.publicKey.hasPrefix("inbound-") {
+            config.logger.info("Connection to \(String(peer.publicKey.prefix(16)))… dropped — scheduling reconnect")
             Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(500))
                 try? await self?.connect(to: endpoint)
@@ -626,7 +627,7 @@ public actor Ivy {
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .getVolume(let rootCID, let cids):
-            await handleGetVolume(rootCID: rootCID, cids: cids, from: peer)
+            Task { await self.handleGetVolume(rootCID: rootCID, cids: cids, from: peer) }
 
         case .announceVolume(let rootCID, let childCIDs, let totalSize):
             await handleAnnounceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
