@@ -60,7 +60,7 @@ public struct IvyConfig: Sendable {
         replicationSampleSize: Int = 32,
         signingKey: Data = Data(),
         logger: any IvyLogger = NullLogger(),
-        relayFee: UInt64 = 1,
+        relayFee: UInt64 = 0,
         baseThresholdMultiplier: UInt64 = 100,
         defaultRequestFee: UInt64 = 20,
         highBandwidthPeers: Int = 3,
