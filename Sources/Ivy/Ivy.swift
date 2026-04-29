@@ -482,9 +482,17 @@ public actor Ivy {
             await handleMessage(message, from: conn.id)
         }
         let peer = conn.id
+        let endpoint = conn.endpoint
         connections.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
         delegate?.ivy(self, didDisconnect: peer)
+
+        if !peer.publicKey.hasPrefix("inbound-") {
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(500))
+                try? await self?.connect(to: endpoint)
+            }
+        }
     }
 
     private func handleMessage(_ message: Message, from peer: PeerID) async {
