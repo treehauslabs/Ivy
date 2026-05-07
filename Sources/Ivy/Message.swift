@@ -9,7 +9,7 @@ public enum Message: Sendable {
     case neighbors([PeerEndpoint])
     case announceBlock(cid: String)
 
-    case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], signature: Data)
+    case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data)
     case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
 
     case wantBlocks(cids: [String])
@@ -25,13 +25,10 @@ public enum Message: Sendable {
     case pins(cid: String, providers: [String])
     case pinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
     case pinStored(rootCID: String)
-    case feeExhausted(consumed: UInt64)
+    // tags 44, 47, 48, 51 removed (feeExhausted, balanceCheck, balanceLog, settlementProof)
     case deliveryAck(requestId: UInt64)
-    case balanceCheck(sequence: UInt64, balance: Int64)
-    case balanceLog(fromSequence: UInt64, operations: [(sequence: UInt64, amount: Int64, requestId: UInt64)])
     case peerMessage(topic: String, payload: Data)
     case blocks(rootCID: String, items: [(cid: String, data: Data)])
-    case settlementProof(txHash: String, amount: UInt64, chainId: String)
 
     // Volume-aware fetching (tags 53-56)
     case getVolume(rootCID: String, cids: [String])
@@ -66,14 +63,12 @@ public enum Message: Sendable {
         case pins = 41
         case pinAnnounce = 42
         case pinStored = 43
-        case feeExhausted = 44
-        // tag 45 removed (directOffer)
+        // tags 44, 45 removed (feeExhausted, directOffer)
         case deliveryAck = 46
-        case balanceCheck = 47
-        case balanceLog = 48
+        // tags 47, 48 removed (balanceCheck, balanceLog)
         case peerMessage = 49
         case blocks = 50
-        case settlementProof = 51
+        // tag 51 removed (settlementProof)
         // Volume-aware fetching
         case getVolume = 53
         case announceVolume = 54
@@ -139,7 +134,7 @@ public enum Message: Sendable {
         case .announceBlock(let cid):
             buf.append(Tag.announceBlock.rawValue)
             buf.appendLengthPrefixedString(cid)
-        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let signature):
+        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let chainPorts, let signature):
             buf.append(Tag.identify.rawValue)
             buf.appendLengthPrefixedString(publicKey)
             buf.appendLengthPrefixedString(observedHost)
@@ -147,6 +142,11 @@ public enum Message: Sendable {
             buf.appendUInt16(UInt16(listenAddrs.count))
             for (host, port) in listenAddrs {
                 buf.appendLengthPrefixedString(host)
+                buf.appendUInt16(port)
+            }
+            buf.appendUInt16(UInt16(chainPorts.count))
+            for (chain, port) in chainPorts.sorted(by: { $0.key < $1.key }) {
+                buf.appendLengthPrefixedString(chain)
                 buf.appendUInt16(port)
             }
             buf.appendLengthPrefixedData(signature)
@@ -208,25 +208,9 @@ public enum Message: Sendable {
         case .pinStored(let rootCID):
             buf.append(Tag.pinStored.rawValue)
             buf.appendLengthPrefixedString(rootCID)
-        case .feeExhausted(let consumed):
-            buf.append(Tag.feeExhausted.rawValue)
-            buf.appendUInt64(consumed)
         case .deliveryAck(let requestId):
             buf.append(Tag.deliveryAck.rawValue)
             buf.appendUInt64(requestId)
-        case .balanceCheck(let sequence, let balance):
-            buf.append(Tag.balanceCheck.rawValue)
-            buf.appendUInt64(sequence)
-            buf.appendUInt64(UInt64(bitPattern: balance))
-        case .balanceLog(let fromSequence, let operations):
-            buf.append(Tag.balanceLog.rawValue)
-            buf.appendUInt64(fromSequence)
-            buf.appendUInt16(UInt16(operations.count))
-            for op in operations {
-                buf.appendUInt64(op.sequence)
-                buf.appendUInt64(UInt64(bitPattern: op.amount))
-                buf.appendUInt64(op.requestId)
-            }
         case .peerMessage(let topic, let payload):
             buf.append(Tag.peerMessage.rawValue)
             buf.appendLengthPrefixedString(topic)
@@ -239,11 +223,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(item.cid)
                 buf.appendLengthPrefixedData(item.data)
             }
-        case .settlementProof(let txHash, let amount, let chainId):
-            buf.append(Tag.settlementProof.rawValue)
-            buf.appendLengthPrefixedString(txHash)
-            buf.appendUInt64(amount)
-            buf.appendLengthPrefixedString(chainId)
         case .getVolume(let rootCID, let cids):
             buf.append(Tag.getVolume.rawValue)
             buf.appendLengthPrefixedString(rootCID)
@@ -320,8 +299,16 @@ public enum Message: Sendable {
                       let port = reader.readUInt16() else { return nil }
                 addrs.append((host, port))
             }
+            var chainPorts = [String: UInt16]()
+            if let cpCount = reader.readUInt16(), cpCount <= MessageLimits.maxChainPorts {
+                for _ in 0..<cpCount {
+                    guard let chain = reader.readString(),
+                          let port = reader.readUInt16() else { return nil }
+                    chainPorts[chain] = port
+                }
+            }
             guard let signature = reader.readData() else { return nil }
-            return .identify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: addrs, signature: signature)
+            return .identify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: addrs, chainPorts: chainPorts, signature: signature)
         case .dhtForward:
             guard let cid = reader.readString(),
                   let ttl = reader.readUInt8() else { return nil }
@@ -399,27 +386,9 @@ public enum Message: Sendable {
         case .pinStored:
             guard let rootCID = reader.readString() else { return nil }
             return .pinStored(rootCID: rootCID)
-        case .feeExhausted:
-            guard let consumed = reader.readUInt64() else { return nil }
-            return .feeExhausted(consumed: consumed)
         case .deliveryAck:
             guard let requestId = reader.readUInt64() else { return nil }
             return .deliveryAck(requestId: requestId)
-        case .balanceCheck:
-            guard let sequence = reader.readUInt64(),
-                  let rawBalance = reader.readUInt64() else { return nil }
-            return .balanceCheck(sequence: sequence, balance: Int64(bitPattern: rawBalance))
-        case .balanceLog:
-            guard let fromSequence = reader.readUInt64(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTransactionCount else { return nil }
-            var ops = [(sequence: UInt64, amount: Int64, requestId: UInt64)]()
-            for _ in 0..<count {
-                guard let seq = reader.readUInt64(),
-                      let rawAmt = reader.readUInt64(),
-                      let rid = reader.readUInt64() else { return nil }
-                ops.append((sequence: seq, amount: Int64(bitPattern: rawAmt), requestId: rid))
-            }
-            return .balanceLog(fromSequence: fromSequence, operations: ops)
         case .peerMessage:
             guard let topic = reader.readString(),
                   let payload = reader.readData() else { return nil }
@@ -435,11 +404,6 @@ public enum Message: Sendable {
                 items.append((cid: cid, data: data))
             }
             return .blocks(rootCID: rootCID, items: items)
-        case .settlementProof:
-            guard let txHash = reader.readString(),
-                  let amount = reader.readUInt64(),
-                  let chainId = reader.readString() else { return nil }
-            return .settlementProof(txHash: txHash, amount: amount, chainId: chainId)
         case .getVolume:
             guard let rootCID = reader.readString(),
                   let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }

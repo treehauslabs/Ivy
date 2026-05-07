@@ -801,8 +801,7 @@ struct NetworkRobustnessTests {
         await ivy2.fireToPeer(peer1, .findNode(target: Data(), fee: 0))
         await ivy2.fireToPeer(peer1, .peerMessage(topic: "", payload: Data()))
         await ivy2.fireToPeer(peer1, .peerMessage(topic: String(repeating: "x", count: 10000), payload: Data(repeating: 0, count: 10000)))
-        await ivy2.fireToPeer(peer1, .feeExhausted(consumed: UInt64.max))
-        await ivy2.fireToPeer(peer1, .balanceCheck(sequence: UInt64.max, balance: Int64.min))
+        await ivy2.fireToPeer(peer1, .deliveryAck(requestId: UInt64.max))
 
         try await Task.sleep(for: .seconds(1))
 

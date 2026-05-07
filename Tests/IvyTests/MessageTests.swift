@@ -242,14 +242,17 @@ struct MessageTests {
             observedHost: "1.2.3.4",
             observedPort: 4001,
             listenAddrs: [("0.0.0.0", 4001)],
+            chainPorts: ["chain-a": 9001, "chain-b": 9002],
             signature: sig
         )
         let decoded = Message.deserialize(msg.serialize())
-        if case .identify(let pk, let host, let port, let addrs, let s) = decoded {
+        if case .identify(let pk, let host, let port, let addrs, let cp, let s) = decoded {
             #expect(pk == "pk_test")
             #expect(host == "1.2.3.4")
             #expect(port == 4001)
             #expect(addrs.count == 1)
+            #expect(cp["chain-a"] == 9001)
+            #expect(cp["chain-b"] == 9002)
             #expect(s == sig)
         } else {
             Issue.record("Expected identify")
@@ -258,9 +261,9 @@ struct MessageTests {
 
     @Test("Identify with empty signature roundtrip")
     func testIdentifyEmptySignature() {
-        let msg = Message.identify(publicKey: "pk", observedHost: "h", observedPort: 80, listenAddrs: [], signature: Data())
+        let msg = Message.identify(publicKey: "pk", observedHost: "h", observedPort: 80, listenAddrs: [], chainPorts: [:], signature: Data())
         let decoded = Message.deserialize(msg.serialize())
-        if case .identify(_, _, _, _, let s) = decoded {
+        if case .identify(_, _, _, _, _, let s) = decoded {
             #expect(s.isEmpty)
         } else {
             Issue.record("Expected identify")

@@ -24,6 +24,8 @@ public actor Ivy {
 
     public weak var delegate: IvyDelegate?
     public weak var dataSource: IvyDataSource?
+    public var chainPorts: [String: UInt16] = [:]
+    private var peerChainPorts: [PeerID: [String: UInt16]] = [:]
 
     private var connections: [PeerID: PeerConnection] = [:]
     private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
@@ -162,12 +164,26 @@ public actor Ivy {
         connections.values.map { $0.endpoint }
     }
 
+    /// Chain ports advertised by each connected peer via identify messages.
+    /// Keyed by peer ID, value is [directory: port].
+    public var connectedPeerChainPorts: [PeerID: [String: UInt16]] {
+        peerChainPorts.filter { connections[$0.key] != nil }
+    }
+
     public var directPeerCount: Int { connections.count }
+
+    /// Register a child chain's listen port so it is included in future
+    /// identify messages. Remote peers use this to discover the exact port
+    /// for a given chain directory without deterministic calculation.
+    public func setChainPort(directory: String, port: UInt16) {
+        chainPorts[directory] = port
+    }
 
     public func disconnect(_ peer: PeerID) {
         if let conn = connections.removeValue(forKey: peer) {
             conn.cancel()
         }
+        peerChainPorts.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
         if let monitor = healthMonitor {
             Task { await monitor.removePeer(peer) }
@@ -416,6 +432,7 @@ public actor Ivy {
             observedHost: observedHost,
             observedPort: observedPort,
             listenAddrs: listenAddrs,
+            chainPorts: chainPorts,
             signature: signature
         ))
         if let record = localNodeRecord {
@@ -423,7 +440,7 @@ public actor Ivy {
         }
     }
 
-    private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], signature: Data, from peer: PeerID) {
+    private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) {
         let realID = PeerID(publicKey: publicKey)
 
         // Verify identity signature if present
@@ -447,6 +464,12 @@ public actor Ivy {
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
                 Task { await self.creditLedger.establish(with: realID) }
             }
+            // Migrate chainPorts from the provisional key to the real key
+            peerChainPorts.removeValue(forKey: peer)
+        }
+
+        if !chainPorts.isEmpty {
+            peerChainPorts[realID] = chainPorts
         }
 
         if observedHost != "0.0.0.0" && observedHost != "unknown" {
@@ -551,8 +574,8 @@ public actor Ivy {
             }
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
 
-        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let signature):
-            handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, signature: signature, from: peer)
+        case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let chainPorts, let signature):
+            handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, chainPorts: chainPorts, signature: signature, from: peer)
 
         case .dhtForward(let cid, let ttl, _, _, _):
             await handleDHTForward(cid: cid, ttl: ttl, from: peer)
@@ -579,22 +602,10 @@ public actor Ivy {
         case .pinStored:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .feeExhausted:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .deliveryAck:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .balanceCheck:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .balanceLog:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .peerMessage:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .settlementProof:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .blocks(let rootCID, let items):
@@ -1127,8 +1138,7 @@ public actor Ivy {
     /// `requestTimeout` per Volume, and a multi-level resolve runs over the
     /// validator's deadline.
     private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer), await hasCreditCapacity(peer: peer) else { return }
-
+        // v2: Volume serving is never gated — essential for chain health
         let items = await dataSource?.volumeData(for: rootCID, cids: cids) ?? []
 
         fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)

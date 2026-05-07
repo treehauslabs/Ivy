@@ -247,18 +247,6 @@ struct EconomicMessageTests {
         }
     }
 
-    @Test("feeExhausted roundtrip")
-    func testFeeExhaustedRoundtrip() {
-        let msg = Message.feeExhausted(consumed: 42)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .feeExhausted(let consumed) = decoded {
-            #expect(consumed == 42)
-        } else {
-            Issue.record("Expected feeExhausted")
-        }
-    }
-
-
     @Test("deliveryAck roundtrip")
     func testDeliveryAckRoundtrip() {
         let msg = Message.deliveryAck(requestId: 12345)
@@ -267,35 +255,6 @@ struct EconomicMessageTests {
             #expect(rid == 12345)
         } else {
             Issue.record("Expected deliveryAck")
-        }
-    }
-
-    @Test("balanceCheck roundtrip")
-    func testBalanceCheckRoundtrip() {
-        let msg = Message.balanceCheck(sequence: 97, balance: -42)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .balanceCheck(let seq, let bal) = decoded {
-            #expect(seq == 97)
-            #expect(bal == -42)
-        } else {
-            Issue.record("Expected balanceCheck")
-        }
-    }
-
-    @Test("balanceLog roundtrip")
-    func testBalanceLogRoundtrip() {
-        let msg = Message.balanceLog(fromSequence: 10, operations: [
-            (sequence: 11, amount: -5, requestId: 100),
-            (sequence: 12, amount: 3, requestId: 101)
-        ])
-        let decoded = Message.deserialize(msg.serialize())
-        if case .balanceLog(let from, let ops) = decoded {
-            #expect(from == 10)
-            #expect(ops.count == 2)
-            #expect(ops[0].amount == -5)
-            #expect(ops[1].amount == 3)
-        } else {
-            Issue.record("Expected balanceLog")
         }
     }
 
@@ -389,16 +348,4 @@ struct EconomicMessageTests {
         }
     }
 
-    @Test("settlementProof roundtrip")
-    func testSettlementProofRoundtrip() {
-        let msg = Message.settlementProof(txHash: "0xabc123", amount: 500, chainId: "nexus-mainnet")
-        let decoded = Message.deserialize(msg.serialize())
-        if case .settlementProof(let hash, let amount, let chain) = decoded {
-            #expect(hash == "0xabc123")
-            #expect(amount == 500)
-            #expect(chain == "nexus-mainnet")
-        } else {
-            Issue.record("Expected settlementProof")
-        }
-    }
 }
