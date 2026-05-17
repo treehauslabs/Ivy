@@ -1257,6 +1257,15 @@ public actor Ivy {
     /// not network-addressable — they only make sense within the Volume that
     /// contains them. Empty `cids` in the wire request signals "give me all
     /// entries you have for this root".
+    /// Fallback: ask every connected peer for a volume when normal routing
+    /// fails (e.g., provider records are empty after restart). Used only when
+    /// fetchVolume returns nothing.
+    public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
+        let peers = Array(connections.keys) + Array(localPeers.keys)
+        guard !peers.isEmpty else { return [:] }
+        return await raceVolumeFetch(rootCID: rootCID, peers: peers)
+    }
+
     public func fetchVolume(rootCID: String) async -> [String: Data] {
         if let entries = await dataSource?.volumeData(for: rootCID, cids: []), !entries.isEmpty {
             var result: [String: Data] = [:]
