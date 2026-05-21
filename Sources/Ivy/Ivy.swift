@@ -443,17 +443,20 @@ public actor Ivy {
     private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) {
         let realID = PeerID(publicKey: publicKey)
 
-        // Verify identity signature if present
-        if !signature.isEmpty {
-            if let pubKeyBytes = hexDecode(publicKey), pubKeyBytes.count == 32,
-               let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubKeyBytes) {
-                let material = Data(publicKey.utf8) + Data(observedHost.utf8)
-                if !verifyKey.isValidSignature(signature, for: material) {
-                    config.logger.warning("Identity verification failed for \(publicKey.prefix(16))… — disconnecting")
-                    disconnect(peer)
-                    return
-                }
-            }
+        // Require a valid identity signature. An empty or missing signature allows
+        // any peer to claim any public key — reject it outright.
+        guard !signature.isEmpty,
+              let pubKeyBytes = hexDecode(publicKey), pubKeyBytes.count == 32,
+              let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubKeyBytes) else {
+            config.logger.warning("Identify rejected from \(peer.publicKey.prefix(16))…: missing or invalid pubkey/signature")
+            disconnect(peer)
+            return
+        }
+        let material = Data(publicKey.utf8) + Data(observedHost.utf8)
+        guard verifyKey.isValidSignature(signature, for: material) else {
+            config.logger.warning("Identity verification failed for \(publicKey.prefix(16))… — disconnecting")
+            disconnect(peer)
+            return
         }
 
         if peer.publicKey.hasPrefix("inbound-") && peer != realID {
