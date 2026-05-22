@@ -148,16 +148,30 @@ Three additions to the Ivy message protocol, all implementable over the existing
 
 No changes to the wire protocol format. These are new topics on the existing `peerMessage` channel.
 
-### 4.5 Default Enforcement
+### 4.5 Griefing Resistance: Reputation-Gated Credit
 
-There is no way to force on-chain settlement. The only weapons are:
-- Stop serving the peer (`hasCreditCapacity` already implements this)
-- Reduce future credit (`recordMissedSettlement` halves threshold)
-- Reputation loss in Tally
+The naive model — extend `base_credit` to any connected peer based solely on key difficulty — is vulnerable to griefing: a malicious node generates many identities, extracts `base_credit` from each victim peer, and disappears. Even with `minPeerKeyBits = 24` (~1 minute per key), if `base_credit` has any real value this is profitable at scale.
 
-**This is a real limitation.** The maximum extractable value per identity is bounded by the credit threshold, calibrated to key difficulty. For the system to be self-sustaining, defaulting must be unprofitable: the one-time gain from defaulting must be less than the expected future revenue from the relationship.
+**The solution: initial credit is only extended to nodes that have already established reputation.** A fresh node with no history gets effectively zero credit — enough for a few control messages to begin building reputation, nothing more. Credit grows as reputation is established.
 
-With `minPeerKeyBits = 24`, generating an identity costs ~2^24 SHA256 operations (~1 minute). If `base_credit` is large relative to the cost of generating a new identity, Sybil attacks are profitable. Either `minPeerKeyBits` must be high, `base_credit` must be low, or collateral is required for credit lines above a minimum. This parameter must be tuned before enabling credit on mainnet.
+Reputation can be earned many ways, and the system should recognize all of them:
+
+- **Settlement history** — the most direct signal. A node that has settled debts reliably over many interactions has earned trust through demonstrated behavior.
+- **Key difficulty** — computation invested in identity generation. Already implemented via `KeyDifficulty.baseTrust`. Provides a small initial floor that is expensive to fake at scale.
+- **Uptime** — a node that has been reachable and responsive for months is less likely to vanish overnight than one that appeared yesterday.
+- **Service volume** — a node that has successfully served many requests (tracked by Tally's success rate signal) has skin in the game. It would lose future earning potential by defaulting.
+- **Staked collateral** — a node that has locked tokens on-chain as collateral earns proportionally higher credit limits from peers who verify the stake. This is optional but enables fast trust bootstrapping for new nodes with capital.
+- **Vouching** — a highly trusted node (a coordinator) can vouch for a new node, extending a fraction of its own reputation. The vouchor bears partial responsibility if the vouched node defaults. This is analogous to a letter of credit.
+
+The practical implementation: Tally already aggregates multiple reputation signals (reciprocity, latency, success rate, PoW floor). The credit limit formula is:
+
+```
+creditLimit(peer) = baseThresholdMultiplier × tallyScore(peer)
+```
+
+where `tallyScore` incorporates all the above signals. A fresh peer with no history gets `tallyScore ≈ 0`, meaning near-zero credit. A long-standing peer with perfect settlement history gets `tallyScore ≈ 1.0`, meaning the full `baseThresholdMultiplier`.
+
+**The griefing economics are fundamentally changed.** An attacker who wants to extract meaningful credit must first build meaningful reputation — which requires being a genuine participant for a meaningful period of time. By that point, the expected future revenue from continued participation exceeds the one-time gain from defaulting. The system is self-enforcing without needing collateral for the common case.
 
 ---
 
@@ -165,7 +179,9 @@ With `minPeerKeyBits = 24`, generating an identity costs ~2^24 SHA256 operations
 
 The most important thing to understand about this system is not the mechanics — it is what the mechanics produce.
 
-Every node starts with a credit line calibrated to its key difficulty. As it builds a history of reliable service and settlement, thresholds grow. Peers extend more credit because the node has proven it is reliable. The node can now serve more traffic, earn more fees, and extend credit to its own peers. Trust compounds.
+Every node starts with near-zero effective credit — just enough to begin participating. As it builds reputation through reliable service, successful settlements, uptime, and volume, peers extend more credit. The node can now serve more traffic, earn more fees, and extend credit to its own peers. Trust compounds.
+
+Critically, this makes griefing expensive. An attacker cannot extract meaningful credit from the network without first building meaningful reputation, which requires genuine participation over time. By the time an attacker has enough reputation to extract significant value, defecting is irrational — the expected future revenue from continued honest participation exceeds the one-time gain from defaulting.
 
 Over time the network self-organizes into a natural hierarchy — not because anyone designed it that way, but because trust flows toward nodes that have demonstrated reliability at scale.
 
