@@ -267,7 +267,103 @@ For large transfers between strangers, the exposure is real and atomicity would 
 
 ---
 
-## 7. What This System Does Not Do
+## 7. Progressive Monetization
+
+The credit and fee system has two independent load-management knobs:
+
+- **`relayFee`** — the per-byte price charged for relay services. Manages instantaneous load. A node near capacity raises its fee to shed marginal requests immediately.
+- **Credit limits** — how much balance a peer can accumulate before settlement is required. Manages relationship quality over time. A node tightens credit as its services become more valuable, ensuring capacity flows to peers most likely to settle.
+
+These are distinct and serve different purposes. A high relay fee with a high credit limit means: *"I'm valuable and busy, but I'll carry your balance if you've earned my trust."* A zero fee with a low credit limit means: *"Free to use, but I don't know you yet."*
+
+### 7.1 The Right Default Is Zero
+
+`relayFee = 0` is the correct default for a network in its early stages. The priority is participation — get nodes connected, get data flowing, build reputation graphs. Charging for relay before the network is congested would suppress adoption for no benefit. There is no scarcity to price.
+
+This is not a temporary workaround. It is intentional design. The economic layer should only be activated when it is solving a real problem: bandwidth scarcity, storage cost, or infrastructure investment that needs to be recouped. Turning on fees before those problems exist is premature.
+
+### 7.2 The Progression
+
+```
+Phase: Bootstrap
+  Traffic:    sparse
+  Reputation: thin
+  Policy:     relayFee = 0, high credit limits
+  Goal:       maximize participation, build trust graphs
+
+Phase: Growth  
+  Traffic:    moderate, some congestion at popular nodes
+  Reputation: established for active nodes
+  Policy:     relayFee > 0 at congested nodes (operator choice),
+              credit limits tighten for low-reputation peers
+  Goal:       manage load at bottlenecks, reward reliable peers
+
+Phase: Mature
+  Traffic:    dense, bandwidth is genuinely scarce
+  Reputation: rich history across the network
+  Policy:     competitive fee market emerges,
+              credit extended primarily through reputation and vouching
+  Goal:       efficient allocation of scarce capacity
+```
+
+The transition between phases is not a protocol event — it is an organic market response. Individual nodes raise fees when they are congested. Other nodes that want their traffic pay the fee or find cheaper alternatives. There is no governance decision, no flag day, no coordinated upgrade. The fee market emerges from individual responses to local conditions.
+
+### 7.3 Reputation Replaces Fees in Trusted Relationships
+
+For well-established peer pairs with large credit lines, fees matter less. A node that has been a reliable partner for months and has a large credit line gets service even under load — the credit relationship is worth more than any individual request fee. High-reputation peers are effectively prepaid customers.
+
+This creates a natural incentive to build reputation early. Nodes that establish trust before the network is congested will get preferential service when congestion arrives. Waiting until congestion to build reputation means paying market rates in a competitive fee environment.
+
+### 7.4 Honest Caveat
+
+This model only works if the network actually gets congested. If there is always spare capacity, relay fees never need to rise and the credit system is largely academic. The economic layer becomes meaningful only at scale.
+
+This is the correct sequencing. Do not build the monetization layer before the network exists to monetize. Activate it when real scarcity arrives, not as an aspiration.
+
+---
+
+## 8. Peer Introduction and Reputation-Filtered Exchange
+
+Peer exchange (PEX) is already implemented in Ivy: when a node needs more peers, it asks its existing connections for introductions. Currently it returns whoever is nearest in XOR space regardless of reputation. You are being introduced to strangers by a stranger.
+
+### 8.1 The Minimal Fix
+
+Filtering PEX by reputation requires almost no implementation work and substantially improves the quality of introductions:
+
+```swift
+// Current: return k closest peers regardless of reputation
+router.closestPeers(to: target, count: k)
+
+// Better: filter to peers above a reputation threshold
+router.closestPeers(to: target, count: k * 3)
+    .filter { tally.reputation(for: $0.id) >= minReputation }
+    .prefix(k)
+```
+
+This alone means new nodes start with connections to peers that their introducer has found reliable — not random participants. It costs nothing and changes the structure of the connection graph from random to trust-correlated.
+
+### 8.2 Vouching: The Signed Version
+
+Reputation-filtered PEX is passive — the introducer shares good peers but bears no explicit accountability. Vouching is the accountable version: the introducer signs the introduction and stakes a fraction of its reputation on the vouched node's behavior.
+
+```
+Voucher signs: "I introduce NodeX. If NodeX defaults within T days,
+               reduce my credit limit with you by fraction f."
+```
+
+The vouchor has skin in the game. This makes introductions meaningful rather than cheap. A coordinator that vouches carelessly loses its own credit standing.
+
+Vouching is a strict superset of peer exchange — it is PEX with reputation accountability attached. The existing PEX mechanism is phase 1; signed vouching is the structured version on top once phase 1 is established.
+
+### 8.3 What This Produces
+
+The connection graph acquires semantic structure. Well-behaved nodes cluster together through mutual introduction. A node that defaults gets cut from the vouching graph and cannot re-enter through the same channel — it needs either a fresh identity (expensive via key difficulty) or a new vouching path through a different coordinator.
+
+This is the same structure as professional referral networks, where your reputation for introductions is part of your professional reputation. It works in human networks at scale; it works here for the same reason.
+
+---
+
+## 10. What This System Does Not Do
 
 **It does not guarantee data delivery.** Credit lines pay for service attempts. CID mismatch is detectable via cashew self-authentication, but the credit adjustment for a failed delivery is a social convention, not a protocol enforcement.
 
@@ -279,26 +375,34 @@ For large transfers between strangers, the exposure is real and atomicity would 
 
 ---
 
-## 8. Implementation Phases
+## 11. Implementation Phases
 
-### Phase 1 — Bilateral settlement (ready to build)
+### Phase 0 — Reputation-filtered PEX (days, do first)
 
-1. **Signed checkpoints** — `BalanceCheckpoint` struct and exchange protocol. Self-contained. 2–3 days.
-2. **Settlement protocol** — `CreditOffer`, `SettlementProposal` message types, on-chain transaction construction for Nexus settlement. 1–2 weeks.
-3. **Testnet validation** — set `relayFee > 0` on testnet nodes, validate end-to-end.
-4. **Unit of account decision** — work-denominated ivy vs. Lattice tokens. Must be made before Phase 1 ships.
+Filter peer exchange by Tally reputation threshold. No new protocol. Returns peers the introducer has found reliable rather than random XOR neighbors. This changes the structure of the connection graph immediately and is a prerequisite for everything that follows.
 
-### Phase 2 — Coordinator-mediated routing
+### Phase 1 — Bilateral settlement (weeks)
 
-Coordinator nodes emerge naturally from Phase 1 as high-trust nodes build large credit lines. Routing through coordinators is simply chaining two bilateral settlements. No new protocol required — just path-finding logic that identifies which connected coordinator has a trust line with the target node. Buildable once Phase 1 is stable.
+1. **Unit of account decision** — work-denominated ivy vs. Lattice tokens. Must be resolved before anything else ships.
+2. **Signed checkpoints** — `BalanceCheckpoint` struct and exchange protocol. 2–3 days.
+3. **Settlement protocol** — `CreditOffer`, `SettlementProposal` message types, on-chain transaction construction for Nexus settlement. 1–2 weeks.
+4. **Testnet validation** — keep `relayFee = 0`, validate settlement end-to-end with synthetic load.
 
-### Phase 3 — Full atomic routing (not yet)
+### Phase 2 — Activate fees at congested nodes (organic, operator-driven)
 
-HTLC-equivalent atomicity for routing between untrusted parties. Requires smart contract capabilities or a dedicated settlement chain. Not currently buildable on Lattice. Long-term future work.
+No protocol change. Operators of high-traffic nodes raise `relayFee` when they observe genuine congestion. The credit system handles the accounting. Fee market emerges from individual decisions, not a coordinated upgrade.
+
+### Phase 3 — Coordinator-mediated routing and signed vouching
+
+Coordinator nodes have emerged naturally from Phase 1 as high-trust nodes with large credit lines. Multi-hop routing chains two bilateral settlements through a coordinator. Signed vouching adds accountability to peer introductions. Buildable once Phase 1 is stable.
+
+### Phase 4 — Full atomic routing (long-term)
+
+HTLC-equivalent atomicity for routing between untrusted parties. Requires smart contract capabilities or a dedicated settlement chain. Not currently buildable on Lattice.
 
 ---
 
-## 9. Relationship to Existing Documents
+## 12. Relationship to Existing Documents
 
 This paper supersedes the settlement-related sections of `P2P_ECONOMIC_MODEL.md` and provides the implementation roadmap missing from `WHITEPAPER.md`. The core DHT economics, per-hop charging model, and pinning contract design in `WHITEPAPER.md` remain correct and are not duplicated here.
 
@@ -306,7 +410,7 @@ The central addition is the **stratified trust network** framing — explaining 
 
 ---
 
-## 10. Open Questions
+## 13. Open Questions
 
 1. **Unit of account**: Work-denominated ivy or Lattice tokens? See §3.
 2. **Base credit calibration**: What is the right `base_credit` such that defaulting is unprofitable relative to key generation cost?
