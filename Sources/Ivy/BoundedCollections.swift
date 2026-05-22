@@ -160,3 +160,33 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
         keys_.removeLast()
     }
 }
+
+/// Lazy-refill token bucket for per-peer rate limiting.
+/// `tryConsume` returns false when starved; state is updated on every call
+/// so idle peers retain their full capacity until the next message.
+struct TokenBucket: Sendable {
+    var tokens: Double
+    var lastRefill: ContinuousClock.Instant
+    let capacity: Double
+    let refillPerSec: Double
+
+    init(capacity: Double, refillPerSec: Double) {
+        self.tokens = capacity
+        self.lastRefill = .now
+        self.capacity = capacity
+        self.refillPerSec = refillPerSec
+    }
+
+    mutating func tryConsume(_ cost: Double = 1) -> Bool {
+        let now = ContinuousClock.Instant.now
+        let elapsed = Double((now - lastRefill).components.seconds)
+            + Double((now - lastRefill).components.attoseconds) / 1e18
+        if elapsed > 0 {
+            tokens = min(capacity, tokens + elapsed * refillPerSec)
+            lastRefill = now
+        }
+        guard tokens >= cost else { return false }
+        tokens -= cost
+        return true
+    }
+}

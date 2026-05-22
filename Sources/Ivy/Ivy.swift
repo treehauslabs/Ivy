@@ -39,6 +39,12 @@ public actor Ivy {
     private(set) public var publicAddress: ObservedAddress?
     private var observedAddresses: BoundedDictionary<ObservedAddress, Int> = BoundedDictionary(capacity: 256)
     private var pendingForwards: [String: [PeerID]] = [:]
+    private static let maxPendingForwards = 4_096
+    /// Per-peer token bucket for announceBlock gossip. Prevents a single peer
+    /// from driving unbounded outbound broadcast amplification.
+    private var announceBuckets: [PeerID: TokenBucket] = [:]
+    private static let announceGossipCapacity: Double = 200
+    private static let announceGossipRefillPerSec: Double = 50
     private var pexTask: Task<Void, Never>?
     private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
     private var healthMonitor: PeerHealthMonitor?
@@ -141,6 +147,15 @@ public actor Ivy {
     public func connect(to endpoint: PeerEndpoint) async throws {
         let peer = PeerID(publicKey: endpoint.publicKey)
         guard connections[peer] == nil else { return }
+        // Enforce /16-subnet diversity on every outbound dial, not just during
+        // periodic refresh. Without this, an attacker can occupy all outbound
+        // slots in the 60-second window between refresh cycles [Heilman 2015].
+        // Limit: 2 connections per /16 subnet (first two octets of host IP).
+        let targetSubnet = Self.ipSubnet(endpoint.host)
+        let sameSubnetCount = connections.values.filter {
+            Self.ipSubnet($0.endpoint.host) == targetSubnet
+        }.count
+        guard sameSubnetCount < 2 else { return }
 
         let conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
         connections[peer] = conn
@@ -458,6 +473,18 @@ public actor Ivy {
             disconnect(peer)
             return
         }
+        // Enforce minimum key PoW to raise the cost of Sybil routing-table
+        // poisoning. Each bit doubles the expected key-generation work, making
+        // it progressively harder to generate keys that XOR-cluster near a
+        // target CID for DHT capture.
+        if config.minPeerKeyBits > 0 {
+            let bits = KeyDifficulty.trailingZeroBits(of: publicKey)
+            guard bits >= config.minPeerKeyBits else {
+                config.logger.warning("Peer \(publicKey.prefix(16))… has \(bits) key PoW bits, need \(config.minPeerKeyBits) — disconnecting")
+                disconnect(peer)
+                return
+            }
+        }
 
         if peer.publicKey.hasPrefix("inbound-") && peer != realID {
             if let conn = connections.removeValue(forKey: peer) {
@@ -569,7 +596,20 @@ public actor Ivy {
             }
 
         case .announceBlock(let cid):
-            if !haveSet.contains(cid) {
+            // Rate-limit per-peer broadcast relaying. One announce triggers N
+            // outbound broadcasts; without this cap a single peer drives
+            // unbounded uplink amplification across all N connected peers.
+            var announceBucket = announceBuckets[peer] ?? TokenBucket(
+                capacity: Self.announceGossipCapacity,
+                refillPerSec: Self.announceGossipRefillPerSec
+            )
+            let announceAdmitted = announceBucket.tryConsume()
+            announceBuckets[peer] = announceBucket
+            if announceBuckets.count > 2 * (config.tallyConfig.maxPeers ?? 256) {
+                // Shed oldest-first to prevent unbounded growth on heavy churn
+                if let first = announceBuckets.first { announceBuckets.removeValue(forKey: first.key) }
+            }
+            if announceAdmitted, !haveSet.contains(cid) {
                 haveSet.insert(cid)
                 fireToPeer(peer, .dhtForward(cid: cid, ttl: 0))
                 let payload = Message.announceBlock(cid: cid).serialize()
@@ -697,6 +737,9 @@ public actor Ivy {
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
             await meterSent(peer: peer, bytes: data.count)
         } else if ttl > 0 {
+            // Cap pendingForwards to prevent unbounded memory growth and the
+            // associated O(n) cleanup scan that stalls the actor on disconnect.
+            guard pendingForwards.count < Self.maxPendingForwards else { return }
             pendingForwards[cid, default: []].append(peer)
             let cidHash = Router.hash(cid)
             let closest = router.closestPeers(to: cidHash, count: 3)
@@ -1359,6 +1402,14 @@ public actor Ivy {
         recordVolumeProvider(rootCID: rootCID, peer: peer)
     }
 
+    /// P-1003: batch variant — record one peer as provider for multiple CIDs in
+    /// a single actor hop instead of N sequential `recordProvider` calls.
+    public func recordProviders(rootCIDs: [String], peer: PeerID) {
+        for cid in rootCIDs where !cid.isEmpty {
+            recordVolumeProvider(rootCID: cid, peer: peer)
+        }
+    }
+
     public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
         var result: [String: Data] = [:]
         var missing: [String] = []
@@ -1627,4 +1678,12 @@ public actor Ivy {
         self.discovery = d
     }
     #endif
+
+    /// Extract the /16 subnet prefix from an IP address (first two octets).
+    /// Used for diversity enforcement: max 2 connections per /16 subnet.
+    private static func ipSubnet(_ host: String) -> String {
+        let parts = host.split(separator: ".")
+        guard parts.count >= 2 else { return host }
+        return "\(parts[0]).\(parts[1])"
+    }
 }
