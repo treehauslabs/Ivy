@@ -460,8 +460,16 @@ public actor Ivy {
 
         // Require a valid identity signature. An empty or missing signature allows
         // any peer to claim any public key — reject it outright.
+        // Strip the 2-byte Multikey ed25519 prefix (ed01) if present so that
+        // both raw 32-byte hex keys and Multikey-encoded keys are accepted.
+        let rawPublicKey: String
+        if publicKey.hasPrefix("ed01") && publicKey.count == 68 {
+            rawPublicKey = String(publicKey.dropFirst(4))
+        } else {
+            rawPublicKey = publicKey
+        }
         guard !signature.isEmpty,
-              let pubKeyBytes = hexDecode(publicKey), pubKeyBytes.count == 32,
+              let pubKeyBytes = hexDecode(rawPublicKey), pubKeyBytes.count == 32,
               let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubKeyBytes) else {
             config.logger.warning("Identify rejected from \(peer.publicKey.prefix(16))…: missing or invalid pubkey/signature")
             disconnect(peer)
