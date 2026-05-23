@@ -494,7 +494,7 @@ public actor Ivy {
             }
         }
 
-        if peer.publicKey.hasPrefix("inbound-") && peer != realID {
+        if peer != realID {
             if let conn = connections.removeValue(forKey: peer) {
                 conn.id = realID
                 connections[realID] = conn
@@ -502,8 +502,20 @@ public actor Ivy {
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
                 Task { await self.creditLedger.establish(with: realID) }
             }
-            // Migrate chainPorts from the provisional key to the real key
+            // Migrate chainPorts and any pending volume requests from old key to real key
             peerChainPorts.removeValue(forKey: peer)
+            // Re-key any pending volume requests so responses on the new PeerID match.
+            let oldPrefix = peer.publicKey.prefix(8)
+            let newPrefix = realID.publicKey.prefix(8)
+            if oldPrefix != newPrefix {
+                let oldKeys = pendingVolumeRequests.keys.filter { $0.hasSuffix("-\(oldPrefix)") }
+                for oldKey in oldKeys {
+                    let newKey = String(oldKey.dropLast(oldPrefix.count)) + newPrefix
+                    if let waiters = pendingVolumeRequests.removeValue(forKey: oldKey) {
+                        pendingVolumeRequests[newKey] = waiters
+                    }
+                }
+            }
         }
 
         if !chainPorts.isEmpty {
