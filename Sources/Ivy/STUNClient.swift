@@ -89,10 +89,24 @@ final class STUNResponseHandler: ChannelInboundHandler, @unchecked Sendable {
     private var continuation: CheckedContinuation<ObservedAddress?, Never>?
 
     func waitForResponse() async -> ObservedAddress? {
-        await withCheckedContinuation { cont in
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                lock.lock()
+                if Task.isCancelled {
+                    continuation = nil
+                    lock.unlock()
+                    cont.resume(returning: nil)
+                } else {
+                    continuation = cont
+                    lock.unlock()
+                }
+            }
+        } onCancel: {
             lock.lock()
-            continuation = cont
+            let cont = continuation
+            continuation = nil
             lock.unlock()
+            cont?.resume(returning: nil)
         }
     }
 
