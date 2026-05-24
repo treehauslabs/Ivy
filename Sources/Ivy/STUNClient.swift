@@ -67,13 +67,13 @@ public actor STUNClient {
                     try? await Task.sleep(for: .seconds(3))
                     return nil
                 }
+                // Take the FIRST result from either task. If the timeout fires
+                // first (returns nil), cancelAll so waitForResponse() isn't left
+                // suspended forever with an unresumable continuation.
                 for await result in group {
-                    if result != nil {
-                        group.cancelAll()
-                        return result
-                    }
+                    group.cancelAll()
+                    return result
                 }
-                group.cancelAll()
                 return nil
             }
         } catch {
