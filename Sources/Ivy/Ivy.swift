@@ -1595,6 +1595,17 @@ public actor Ivy {
                 pendingForwards[cid] = peers
             }
         }
+
+        // Resolve any pending volume requests waiting on this peer so their
+        // continuations are not leaked when the peer disconnects. Without this,
+        // requestVolumeFromPeer continuations sit in pendingVolumeRequests until
+        // the per-request timeout fires, causing tasks awaiting CAS data to hang
+        // for the full timeout duration after a disconnect.
+        let peerKeySuffix = "-\(peer.publicKey.prefix(8))"
+        let keysForPeer = pendingVolumeRequests.keys.filter { $0.hasSuffix(peerKeySuffix) }
+        for key in keysForPeer {
+            resolveVolumeRequest(key: key, result: [:])
+        }
     }
 
     func cleanupAllPending() {
