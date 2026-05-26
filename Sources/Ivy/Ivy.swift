@@ -729,15 +729,16 @@ public actor Ivy {
             // Resolve pending volume requests keyed by rootCID (content-addressing
             // invariant: peer identity is irrelevant, any valid response satisfies
             // all waiters for this content).
-            if pendingVolumeRequests[rootCID] != nil {
+            // Only resolve with actual data. Empty items (Byzantine peer claiming
+            // HAVE but delivering nothing) must not poison all waiters — another
+            // honest peer may still respond before the timeout.
+            if !items.isEmpty, pendingVolumeRequests[rootCID] != nil {
                 var result: [String: Data] = [:]
                 for item in items {
                     result[item.cid] = item.data
                     haveSet.insert(item.cid)
                 }
-                if !items.isEmpty {
-                    recordVolumeProvider(rootCID: rootCID, peer: peer)
-                }
+                recordVolumeProvider(rootCID: rootCID, peer: peer)
                 resolveVolumeRequest(key: rootCID, result: result)
             }
 
@@ -762,6 +763,9 @@ public actor Ivy {
 
         case .haveCIDsResult(let nonce, let have):
             handleHaveCIDsResultActive(nonce: nonce, from: peer, have: have)
+            // A DONT_HAVE response is a soft miss signal. Repeated DONT_HAVEs
+            // degrade the peer's routing priority (Bitswap heuristic).
+            if have.isEmpty { tally.recordFailure(peer: peer) }
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
         case .nodeRecord(let record):
