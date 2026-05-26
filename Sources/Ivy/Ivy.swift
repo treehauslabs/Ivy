@@ -1555,7 +1555,7 @@ public actor Ivy {
     /// which peer key suffix they're stored under. Used by onCancel to handle
     /// cases where the peer's PeerID changed (key migration) after the request
     /// was registered.
-    private func resolveVolumeRequestsForRoot(rootCID: String) {
+    func resolveVolumeRequestsForRoot(rootCID: String) {
         let prefix = "\(rootCID)-"
         let matchingKeys = pendingVolumeRequests.keys.filter { $0.hasPrefix(prefix) }
         for key in matchingKeys {

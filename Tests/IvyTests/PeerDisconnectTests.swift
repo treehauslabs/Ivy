@@ -72,6 +72,59 @@ struct PeerDisconnectTests {
         )
     }
 
+    /// Regression: onCancel used the exact volumeKey which includes the peer's
+    /// short public key. If the peer reconnected with a different PeerID mid-sync
+    /// (key migration in handlePeerIdentityConfirm), the continuation moved to a
+    /// new key. The old onCancel called resolveVolumeRequest(key: oldKey) which
+    /// found nothing, leaving the migrated continuation unresolved → leak.
+    ///
+    /// The fix: onCancel now calls resolveVolumeRequestsForRoot(rootCID:) which
+    /// matches all keys with the "\(rootCID)-" prefix regardless of peer suffix.
+    @Test("resolveVolumeRequestsForRoot resolves continuations regardless of peer key suffix")
+    func testResolveByRootCIDHandlesKeyMigration() async throws {
+        let config = IvyConfig(
+            publicKey: "root-resolve-a",
+            listenPort: 0,
+            bootstrapPeers: [],
+            enableLocalDiscovery: false,
+            requestTimeout: .seconds(10),
+            healthConfig: PeerHealthConfig(
+                keepaliveInterval: .seconds(999),
+                staleTimeout: .seconds(999),
+                maxMissedPongs: 99,
+                enabled: false
+            ),
+            enablePEX: false,
+            replicationInterval: .seconds(999)
+        )
+        let node = Ivy(config: config)
+        let silentPeerID = PeerID(publicKey: "silent-keymigrate0")
+        let silentConn = LocalPeerConnection(id: await node.localID)
+        await node.registerLocalPeer(silentConn, as: silentPeerID)
+        await node.addToRouter(silentPeerID, endpoint: PeerEndpoint(publicKey: silentPeerID.publicKey, host: "local", port: 0))
+
+        try await Task.sleep(for: .milliseconds(30))
+
+        // Start a fetch — continuation stored under "test-root-cid-<8chars>"
+        let fetchTask = Task {
+            await node.fetchVolumeFromAllPeers(rootCID: "test-root-cid")
+        }
+        try await Task.sleep(for: .milliseconds(80))
+
+        // Simulate what onCancel does after a key migration:
+        // resolveVolumeRequestsForRoot matches by rootCID prefix, so the
+        // continuation is found even if the peer's key suffix changed.
+        let start = ContinuousClock.now
+        await node.resolveVolumeRequestsForRoot(rootCID: "test-root-cid")
+
+        let result = await fetchTask.value
+        let elapsed = ContinuousClock.now - start
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(500),
+            "resolveVolumeRequestsForRoot must resolve immediately — got \(elapsed)")
+    }
+
     /// All pending volume requests resolve when cleanupAllPending is called,
     /// ensuring no continuations are leaked on Ivy teardown.
     @Test("cleanupAllPending resolves all pending volume requests")
