@@ -60,6 +60,27 @@ public actor Ivy {
 
     // Volume tracking: root CID → provider peer(s) for DHT routing
     private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
+
+    // CONTENT-ADDRESSING INVARIANT
+    // ─────────────────────────────────────────────────────────────────────────
+    // All data in this network is content-addressed: a CID is the cryptographic
+    // hash of its content. This has one fundamental consequence for pending
+    // request tracking:
+    //
+    //   The KEY is always the CONTENT (CID), never the PEER.
+    //
+    // Any peer that holds a CID can serve it; the response is identical
+    // regardless of source. Therefore:
+    //
+    //   1. pendingVolumeRequests is keyed by rootCID — not by (rootCID, peer).
+    //   2. The FIRST peer to respond satisfies ALL waiters for that rootCID.
+    //   3. Requests should be broadcast to all candidates simultaneously;
+    //      there is no value in sequential fallback or per-peer cancellation.
+    //   4. Cancellation and timeout operate on the CID, not on peer connections.
+    //
+    // Peer identity is tracked only for tally/reputation and DHT routing
+    // (who to ask), never for demultiplexing responses (what was asked).
+    // ─────────────────────────────────────────────────────────────────────────
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
     private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
@@ -864,16 +885,20 @@ public actor Ivy {
         let target = peerList.randomElement()!
         let nonce = UInt64.random(in: 0...UInt64.max)
 
-        let discovered: [PeerEndpoint] = await withCheckedContinuation { cont in
-            pendingPEX[nonce] = cont
-            fireToPeer(target, .pexRequest(nonce: nonce))
-
-            Task {
-                try? await Task.sleep(for: .seconds(10))
-                if let pending = self.pendingPEX.removeValue(forKey: nonce) {
-                    pending.resume(returning: [])
+        let discovered: [PeerEndpoint] = await withTaskCancellationHandler {
+            await withCheckedContinuation { cont in
+                guard !Task.isCancelled else { cont.resume(returning: []); return }
+                pendingPEX[nonce] = cont
+                fireToPeer(target, .pexRequest(nonce: nonce))
+                Task {
+                    try? await Task.sleep(for: .seconds(10))
+                    if let pending = self.pendingPEX.removeValue(forKey: nonce) {
+                        pending.resume(returning: [])
+                    }
                 }
             }
+        } onCancel: {
+            Task { await self.resolvePendingPEX(nonce: nonce) }
         }
 
         for ep in discovered {
@@ -1187,6 +1212,12 @@ public actor Ivy {
                 try? await Task.sleep(for: .milliseconds(500))
                 self.resolvePendingFindPins(rootCID: rootCID, peers: [])
             }
+        }
+    }
+
+    private func resolvePendingPEX(nonce: UInt64) {
+        if let cont = pendingPEX.removeValue(forKey: nonce) {
+            cont.resume(returning: [])
         }
     }
 
