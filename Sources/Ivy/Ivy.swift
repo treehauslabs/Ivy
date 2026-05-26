@@ -1539,12 +1539,14 @@ public actor Ivy {
     }
 
     private func handleNotHave(rootCID: String, from peer: PeerID) {
-        // Treat notHave as an empty-result response: removes this peer from
-        // consideration and lets the timeout/other-peers path resolve normally.
-        // Record a soft failure so persistent liars are deprioritised.
+        // Peer cannot serve this volume. Record a failure so persistent liars
+        // are deprioritised, then resolve the waiter immediately so the caller
+        // doesn't wait the full requestTimeout. If other peers still have the
+        // content they will have already received getVolume; if none respond
+        // the caller receives [:] as fast as possible.
         tally.recordFailure(peer: peer)
-        // Don't resolve the waiter — other peers may still respond. The
-        // timeout will resolve with empty if no other peer delivers.
+        // Resolve the pending waiter now rather than waiting for requestTimeout.
+        resolveVolumeRequest(key: rootCID, result: [:])
     }
 
     private func cancelHaveCheck(nonce: UInt64) {
