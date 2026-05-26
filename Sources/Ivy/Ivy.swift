@@ -262,8 +262,13 @@ public actor Ivy {
     func fetchBlock(cid: String) async -> Data? {
         if let existing = pendingRequests[cid] {
             guard existing.count < config.maxWaitersPerPendingCID else { return nil }
-            return await withCheckedContinuation { continuation in
-                pendingRequests[cid, default: []].append(continuation)
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                    pendingRequests[cid, default: []].append(continuation)
+                }
+            } onCancel: {
+                Task { await self.resolvePending(cid: cid, data: nil) }
             }
         }
 
@@ -275,31 +280,36 @@ public actor Ivy {
     }
 
     private func fetchViaDHT(cid: String) async -> Data? {
-        await withCheckedContinuation { continuation in
-            pendingRequests[cid] = [continuation]
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                pendingRequests[cid] = [continuation]
 
-            let cidHash = Router.hash(cid)
-            let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
-            var sent = 0
-            for entry in closest {
-                let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-                guard reachable else { continue }
-                fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL))
-                tally.recordRequest(peer: entry.id)
-                sent += 1
-            }
+                let cidHash = Router.hash(cid)
+                let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
+                var sent = 0
+                for entry in closest {
+                    let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+                    guard reachable else { continue }
+                    fireToPeer(entry.id, .dhtForward(cid: cid, ttl: config.defaultTTL))
+                    tally.recordRequest(peer: entry.id)
+                    sent += 1
+                }
 
-            if sent == 0 {
-                for (peer, _) in connections.prefix(3) {
-                    fireToPeer(peer, .dhtForward(cid: cid, ttl: config.defaultTTL))
-                    tally.recordRequest(peer: peer)
+                if sent == 0 {
+                    for (peer, _) in connections.prefix(3) {
+                        fireToPeer(peer, .dhtForward(cid: cid, ttl: config.defaultTTL))
+                        tally.recordRequest(peer: peer)
+                    }
+                }
+
+                Task {
+                    try? await Task.sleep(for: config.relayTimeout)
+                    self.resolvePending(cid: cid, data: nil)
                 }
             }
-
-            Task {
-                try? await Task.sleep(for: config.relayTimeout)
-                self.resolvePending(cid: cid, data: nil)
-            }
+        } onCancel: {
+            Task { await self.resolvePending(cid: cid, data: nil) }
         }
     }
 
@@ -321,19 +331,24 @@ public actor Ivy {
         guard pendingRequests[cid] == nil, pendingRequests.count < config.maxPendingRequests else {
             return nil
         }
-        return await withCheckedContinuation { continuation in
-            pendingRequests[cid] = [continuation]
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                guard !Task.isCancelled else { continuation.resume(returning: nil); return }
+                pendingRequests[cid] = [continuation]
 
-            for entry in closest {
-                guard connections[entry.id] != nil else { continue }
-                fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0))
-                tally.recordRequest(peer: entry.id)
-            }
+                for entry in closest {
+                    guard connections[entry.id] != nil else { continue }
+                    fireToPeer(entry.id, .dhtForward(cid: cid, ttl: 0))
+                    tally.recordRequest(peer: entry.id)
+                }
 
-            Task {
-                try? await Task.sleep(for: config.requestTimeout)
-                self.resolvePending(cid: cid, data: nil)
+                Task {
+                    try? await Task.sleep(for: config.requestTimeout)
+                    self.resolvePending(cid: cid, data: nil)
+                }
             }
+        } onCancel: {
+            Task { await self.resolvePending(cid: cid, data: nil) }
         }
     }
 
@@ -1507,6 +1522,16 @@ public actor Ivy {
 
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
+                // If the task was already cancelled when we enter the continuation
+                // body (e.g. raceVolumeFetch called group.cancelAll() just before
+                // this task started), resume immediately rather than storing the
+                // continuation — otherwise the onCancel handler already fired with
+                // an empty pendingVolumeRequests[volumeKey] and nobody will ever
+                // resume this continuation.
+                guard !Task.isCancelled else {
+                    continuation.resume(returning: [:])
+                    return
+                }
                 pendingVolumeRequests[volumeKey, default: []].append(continuation)
                 fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
 
@@ -1605,6 +1630,26 @@ public actor Ivy {
         let keysForPeer = pendingVolumeRequests.keys.filter { $0.hasSuffix(peerKeySuffix) }
         for key in keysForPeer {
             resolveVolumeRequest(key: key, result: [:])
+        }
+    }
+
+    /// Safety net: resolve all pending continuations when the actor is torn down.
+    /// Prevents SWIFT TASK CONTINUATION MISUSE warnings when an Ivy instance is
+    /// released while fetches are in flight (e.g. during test teardown or network
+    /// reconfiguration). The `withTaskCancellationHandler` paths handle the common
+    /// case; deinit catches anything that slips through.
+    deinit {
+        for (_, continuations) in pendingRequests {
+            for cont in continuations { cont.resume(returning: nil) }
+        }
+        for (_, continuations) in pendingVolumeRequests {
+            for cont in continuations { cont.resume(returning: [:]) }
+        }
+        for (_, cont) in pendingPEX {
+            cont.resume(returning: [])
+        }
+        for (_, continuations) in pendingFindPins {
+            for cont in continuations { cont.resume(returning: []) }
         }
     }
 
