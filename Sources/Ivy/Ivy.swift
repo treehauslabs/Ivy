@@ -1541,7 +1541,25 @@ public actor Ivy {
                 }
             }
         } onCancel: {
-            Task { await self.resolveVolumeRequest(key: volumeKey, result: [:]) }
+            // Resolve by rootCID prefix rather than the exact volumeKey. The key
+            // embeds the peer's short public key which can change if the peer
+            // reconnects with a different PeerID mid-sync (key migration in
+            // handlePeerIdentityConfirm). If the key migrated after this closure
+            // captured volumeKey, resolving by exact key misses the continuation.
+            let root = rootCID
+            Task { await self.resolveVolumeRequestsForRoot(rootCID: root) }
+        }
+    }
+
+    /// Resolves all pending volume requests for a given rootCID regardless of
+    /// which peer key suffix they're stored under. Used by onCancel to handle
+    /// cases where the peer's PeerID changed (key migration) after the request
+    /// was registered.
+    func resolveVolumeRequestsForRoot(rootCID: String) {
+        let prefix = "\(rootCID)-"
+        let matchingKeys = pendingVolumeRequests.keys.filter { $0.hasPrefix(prefix) }
+        for key in matchingKeys {
+            resolveVolumeRequest(key: key, result: [:])
         }
     }
 
