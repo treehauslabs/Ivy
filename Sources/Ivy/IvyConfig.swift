@@ -37,6 +37,11 @@ public struct IvyConfig: Sendable {
     /// the same CID legitimately fan-in to one pending request; this caps
     /// the fan-in so one hot CID can't grow one continuation list forever.
     public let maxWaitersPerPendingCID: Int
+    /// How long to wait for haveCIDsResult responses before proceeding to the
+    /// want-block phase with whatever responders have been collected. Should be
+    /// long enough for a round trip to the farthest peer (~300ms cross-region)
+    /// but short enough to bound latency on cache hits.
+    public let haveCheckTimeout: Duration
     /// Minimum trailing-zero bits of SHA256(publicKey) required to accept a
     /// peer's identify message. Each additional bit doubles the expected work
     /// to generate a valid peer key, making Sybil routing-table poisoning
@@ -72,7 +77,8 @@ public struct IvyConfig: Sendable {
         sendBytesPerSecond: Int = 1_048_576,
         maxPendingRequests: Int = 4_096,
         maxWaitersPerPendingCID: Int = 64,
-        minPeerKeyBits: Int = 0
+        minPeerKeyBits: Int = 0,
+        haveCheckTimeout: Duration = .milliseconds(300)
     ) {
         self.publicKey = publicKey
         self.listenPort = listenPort
@@ -103,5 +109,6 @@ public struct IvyConfig: Sendable {
         self.maxPendingRequests = maxPendingRequests
         self.maxWaitersPerPendingCID = maxWaitersPerPendingCID
         self.minPeerKeyBits = minPeerKeyBits
+        self.haveCheckTimeout = haveCheckTimeout
     }
 }
