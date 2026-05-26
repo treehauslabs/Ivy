@@ -342,6 +342,76 @@ struct WantHaveProtocolTests {
             "Honest peer's data must win — Byzantine empty-blocks must not resolve waiters with [:]")
     }
 
+    // MARK: - Gap 1: notHave signal (Bitcoin NOTFOUND equivalent)
+
+    /// When a confirmed HAVE peer sends notHave for a volume request, the fetch
+    /// must resolve quickly rather than waiting for the full requestTimeout.
+    @Test("notHave signal resolves fetch without waiting for requestTimeout")
+    func testNotHaveResolvesImmediately() async throws {
+        let node = makeNode(publicKey: "requester-nothave",
+                            haveCheckTimeout: .milliseconds(20),
+                            requestTimeout: .seconds(10))
+        let nodeID = await node.localID
+
+        let lyingPeer = PeerID(publicKey: "lying-have-notserve0")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: lyingPeer)
+        await node.registerLocalPeer(local, as: lyingPeer)
+        await node.addToRouter(lyingPeer, endpoint: PeerEndpoint(publicKey: lyingPeer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootCID = "bafyrei-nothave-root"
+        Task {
+            for await msg in remote.messages {
+                if case .haveCIDs(let nonce, _) = msg {
+                    remote.send(.haveCIDsResult(nonce: nonce, have: [rootCID]))
+                } else if case .getVolume(let cid, _) = msg {
+                    remote.send(.notHave(rootCID: cid))
+                }
+            }
+        }
+
+        let start = ContinuousClock.now
+        let result = await node.fetchVolumeFromAllPeers(rootCID: rootCID)
+        let elapsed = ContinuousClock.now - start
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(500),
+            "notHave must resolve fetch quickly, not wait requestTimeout=10s — got \(elapsed)")
+    }
+
+    /// notHave must record a tally failure so repeated liars get deprioritised.
+    @Test("notHave records tally failure for the lying peer")
+    func testNotHaveRecordsTallyFailure() async throws {
+        let node = makeNode(publicKey: "requester-nothave-tally",
+                            haveCheckTimeout: .milliseconds(20),
+                            requestTimeout: .milliseconds(100))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "nothave-tally-peer00")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if case .haveCIDs(let nonce, _) = msg {
+                    remote.send(.haveCIDsResult(nonce: nonce, have: ["bafyrei-tally-cid"]))
+                } else if case .getVolume(let cid, _) = msg {
+                    remote.send(.notHave(rootCID: cid))
+                }
+            }
+        }
+
+        _ = await node.fetchVolumeFromAllPeers(rootCID: "bafyrei-tally-cid")
+        let repAfter = tally.reputation(for: peer)
+        #expect(repAfter <= repBefore,
+            "notHave must not improve peer reputation — before=\(repBefore) after=\(repAfter)")
+    }
+
     // MARK: - Scenario 7: Consecutive DONT_HAVEs degrade peer reputation
 
     /// A peer that consistently returns DONT_HAVE should accumulate failures

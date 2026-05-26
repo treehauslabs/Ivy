@@ -32,6 +32,9 @@ public enum Message: Sendable {
 
     // Volume-aware fetching (tags 53-56)
     case getVolume(rootCID: String, cids: [String])
+    /// Negative response to getVolume: sender cannot serve this rootCID (evicted/unavailable).
+    /// Requester should retry with a different peer rather than waiting for requestTimeout.
+    case notHave(rootCID: String)
     case announceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64)
     case pushVolume(rootCID: String, items: [(cid: String, data: Data)])
 
@@ -71,6 +74,7 @@ public enum Message: Sendable {
         // tag 51 removed (settlementProof)
         // Volume-aware fetching
         case getVolume = 53
+        case notHave = 58
         case announceVolume = 54
         case pushVolume = 55
         // Node records
@@ -228,6 +232,9 @@ public enum Message: Sendable {
             buf.appendLengthPrefixedString(rootCID)
             buf.appendUInt16(UInt16(cids.count))
             for cid in cids { buf.appendLengthPrefixedString(cid) }
+        case .notHave(let rootCID):
+            buf.append(Tag.notHave.rawValue)
+            buf.appendLengthPrefixedString(rootCID)
         case .announceVolume(let rootCID, let childCIDs, let totalSize):
             buf.append(Tag.announceVolume.rawValue)
             buf.appendLengthPrefixedString(rootCID)
@@ -414,6 +421,9 @@ public enum Message: Sendable {
                 cids.append(cid)
             }
             return .getVolume(rootCID: rootCID, cids: cids)
+        case .notHave:
+            guard let rootCID = reader.readString() else { return nil }
+            return .notHave(rootCID: rootCID)
         case .announceVolume:
             guard let rootCID = reader.readString(),
                   let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }

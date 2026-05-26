@@ -768,6 +768,13 @@ public actor Ivy {
             if have.isEmpty { tally.recordFailure(peer: peer) }
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
+        case .notHave(let rootCID):
+            // Peer cannot serve this volume (evicted/unavailable). Resolve the
+            // pending waiter immediately so the requester does not wait for
+            // requestTimeout — it can retry with a different peer.
+            handleNotHave(rootCID: rootCID, from: peer)
+            delegate?.ivy(self, didReceiveMessage: message, from: peer)
+
         case .nodeRecord(let record):
             handleNodeRecord(record, from: peer)
 
@@ -1529,6 +1536,15 @@ public actor Ivy {
         if let nonce {
             pendingHaveResults[nonce]?.responders.append(peer)
         }
+    }
+
+    private func handleNotHave(rootCID: String, from peer: PeerID) {
+        // Treat notHave as an empty-result response: removes this peer from
+        // consideration and lets the timeout/other-peers path resolve normally.
+        // Record a soft failure so persistent liars are deprioritised.
+        tally.recordFailure(peer: peer)
+        // Don't resolve the waiter — other peers may still respond. The
+        // timeout will resolve with empty if no other peer delivers.
     }
 
     private func cancelHaveCheck(nonce: UInt64) {
