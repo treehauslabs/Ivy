@@ -1352,7 +1352,14 @@ public actor Ivy {
         return Array(sorted.prefix(count))
     }
 
-    /// Fetch from all directly connected peers — no DHT lookup.
+    /// Emergency broadcast fetch: sends `want` to ALL directly connected peers
+    /// with no DHT lookup and no maxWantCandidates cap.
+    ///
+    /// Use this only as a last-resort fallback (e.g. when IvyFetcher.fetch
+    /// exhausts all local stores and needs to try every available peer).
+    /// For normal volume fetching, prefer `fetchVolume` which uses DHT routing
+    /// first and caps broadcast fan-out at maxWantCandidates.
+    ///
     /// Registers the continuation before any async work so cleanupAllPending
     /// can cancel it immediately without waiting for a DHT timeout.
     public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
