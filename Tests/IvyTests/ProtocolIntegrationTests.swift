@@ -109,4 +109,8 @@ final class DictDataSource: IvyDataSource, @unchecked Sendable {
             }
         }
     }
+
+    func hasVolume(rootCID: String) async -> Bool {
+        lock.withLock { storage[rootCID] != nil }
+    }
 }

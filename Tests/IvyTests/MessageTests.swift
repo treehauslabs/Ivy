@@ -196,41 +196,37 @@ struct MessageTests {
         }
     }
 
-    @Test("HaveCIDs roundtrip")
-    func testHaveCIDsRoundtrip() {
-        let cids = ["block-1", "block-2", "block-3"]
-        let msg = Message.haveCIDs(nonce: 42424242, cids: cids)
+    @Test("Want roundtrip")
+    func testWantRoundtrip() {
+        let rootCIDs = ["block-1", "block-2", "block-3"]
+        let msg = Message.want(rootCIDs: rootCIDs)
         let decoded = Message.deserialize(msg.serialize())
-        if case .haveCIDs(let nonce, let c) = decoded {
-            #expect(nonce == 42424242)
-            #expect(c == cids)
+        if case .want(let cids) = decoded {
+            #expect(cids == rootCIDs)
         } else {
-            Issue.record("Expected haveCIDs")
+            Issue.record("Expected want")
         }
     }
 
-    @Test("HaveCIDsResult roundtrip")
-    func testHaveCIDsResultRoundtrip() {
-        let have = ["block-1", "block-3"]
-        let msg = Message.haveCIDsResult(nonce: 99887766, have: have)
+    @Test("Want single CID roundtrip")
+    func testWantSingleCID() {
+        let msg = Message.want(rootCIDs: ["bafy-single-cid"])
         let decoded = Message.deserialize(msg.serialize())
-        if case .haveCIDsResult(let nonce, let h) = decoded {
-            #expect(nonce == 99887766)
-            #expect(h == have)
+        if case .want(let cids) = decoded {
+            #expect(cids == ["bafy-single-cid"])
         } else {
-            Issue.record("Expected haveCIDsResult")
+            Issue.record("Expected want")
         }
     }
 
-    @Test("HaveCIDsResult empty roundtrip")
-    func testHaveCIDsResultEmpty() {
-        let msg = Message.haveCIDsResult(nonce: 1, have: [])
+    @Test("Want empty roundtrip")
+    func testWantEmpty() {
+        let msg = Message.want(rootCIDs: [])
         let decoded = Message.deserialize(msg.serialize())
-        if case .haveCIDsResult(let nonce, let h) = decoded {
-            #expect(nonce == 1)
-            #expect(h.isEmpty)
+        if case .want(let cids) = decoded {
+            #expect(cids.isEmpty)
         } else {
-            Issue.record("Expected haveCIDsResult")
+            Issue.record("Expected want")
         }
     }
 
@@ -270,15 +266,4 @@ struct MessageTests {
         }
     }
 
-    @Test("WantBlocks roundtrip")
-    func testWantBlocksRoundtrip() {
-        let cids = ["cid-1", "cid-2", "cid-3"]
-        let msg = Message.wantBlocks(cids: cids)
-        let decoded = Message.deserialize(msg.serialize())
-        if case .wantBlocks(let c) = decoded {
-            #expect(c == cids)
-        } else {
-            Issue.record("Expected wantBlocks")
-        }
-    }
 }

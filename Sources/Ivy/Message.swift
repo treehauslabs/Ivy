@@ -12,13 +12,10 @@ public enum Message: Sendable {
     case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data)
     case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
 
-    case wantBlocks(cids: [String])
+    case want(rootCIDs: [String])
 
     case pexRequest(nonce: UInt64)
     case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
-
-    case haveCIDs(nonce: UInt64, cids: [String])
-    case haveCIDsResult(nonce: UInt64, have: [String])
 
     // Ivy economic layer
     case findPins(cid: String, fee: UInt64)
@@ -30,10 +27,9 @@ public enum Message: Sendable {
     case peerMessage(topic: String, payload: Data)
     case blocks(rootCID: String, items: [(cid: String, data: Data)])
 
-    // Volume-aware fetching (tags 53-56)
-    case getVolume(rootCID: String, cids: [String])
-    /// Negative response to getVolume: sender cannot serve this rootCID (evicted/unavailable).
-    /// Requester should retry with a different peer rather than waiting for requestTimeout.
+    // Volume-aware fetching
+    /// Negative response to want: sender cannot serve this rootCID.
+    /// Requester tracks candidate exhaustion and resolves early when all candidates notHave.
     case notHave(rootCID: String)
     case announceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64)
     case pushVolume(rootCID: String, items: [(cid: String, data: Data)])
@@ -53,11 +49,10 @@ public enum Message: Sendable {
         case announceBlock = 7
         case identify = 8
         // tags 9-12 removed (dialBack/dialBackResult AutoNAT, getZoneInventory/zoneInventory)
-        case haveCIDs = 13
-        case haveCIDsResult = 14
+        // tags 13, 14 removed (haveVolumes, haveVolumesResult — replaced by want/blocks)
         case dhtForward = 16
         // tags 21-31 removed (chain-specific messages)
-        case wantBlocks = 26
+        case want = 26
         // tags 35-36 removed (miningChallenge, miningChallengeSolution)
         case pexRequest = 37
         case pexResponse = 38
@@ -72,8 +67,7 @@ public enum Message: Sendable {
         case peerMessage = 49
         case blocks = 50
         // tag 51 removed (settlementProof)
-        // Volume-aware fetching
-        case getVolume = 53
+        // tags 53 removed (getVolume — replaced by want/blocks)
         case notHave = 58
         case announceVolume = 54
         case pushVolume = 55
@@ -96,6 +90,7 @@ public enum Message: Sendable {
         case .block(let cid, let data): return 7 + cid.utf8.count + data.count
         case .dontHave(let cid): return 3 + cid.utf8.count
         case .announceBlock(let cid): return 3 + cid.utf8.count
+        case .want(let rootCIDs): return 3 + rootCIDs.reduce(0) { $0 + 2 + $1.utf8.count }
         case .dhtForward(let cid, _, _, _, _): return 4 + cid.utf8.count
         case .blocks(let rootCID, let items):
             return 5 + rootCID.utf8.count + items.reduce(0) { $0 + 6 + $1.cid.utf8.count + $1.data.count }
@@ -163,10 +158,10 @@ public enum Message: Sendable {
             if let target { buf.appendLengthPrefixedData(target) }
             buf.appendUInt8(selector != nil ? 1 : 0)
             if let selector { buf.appendLengthPrefixedString(selector) }
-        case .wantBlocks(let cids):
-            buf.append(Tag.wantBlocks.rawValue)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids {
+        case .want(let rootCIDs):
+            buf.append(Tag.want.rawValue)
+            buf.appendUInt16(UInt16(rootCIDs.count))
+            for cid in rootCIDs {
                 buf.appendLengthPrefixedString(cid)
             }
         case .pexRequest(let nonce):
@@ -181,16 +176,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(peer.host)
                 buf.appendUInt16(peer.port)
             }
-        case .haveCIDs(let nonce, let cids):
-            buf.append(Tag.haveCIDs.rawValue)
-            buf.appendUInt64(nonce)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids { buf.appendLengthPrefixedString(cid) }
-        case .haveCIDsResult(let nonce, let have):
-            buf.append(Tag.haveCIDsResult.rawValue)
-            buf.appendUInt64(nonce)
-            buf.appendUInt16(UInt16(have.count))
-            for cid in have { buf.appendLengthPrefixedString(cid) }
         case .findPins(let cid, let fee):
             buf.append(Tag.findPins.rawValue)
             buf.appendLengthPrefixedString(cid)
@@ -227,11 +212,6 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(item.cid)
                 buf.appendLengthPrefixedData(item.data)
             }
-        case .getVolume(let rootCID, let cids):
-            buf.append(Tag.getVolume.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids { buf.appendLengthPrefixedString(cid) }
         case .notHave(let rootCID):
             buf.append(Tag.notHave.rawValue)
             buf.appendLengthPrefixedString(rootCID)
@@ -325,7 +305,7 @@ public enum Message: Sendable {
             var selector: String? = nil
             if let hasSel = reader.readUInt8(), hasSel == 1 { selector = reader.readString() }
             return .dhtForward(cid: cid, ttl: ttl, fee: fee, target: target, selector: selector)
-        case .wantBlocks:
+        case .want:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
             var cids = [String]()
             cids.reserveCapacity(Int(count))
@@ -333,7 +313,7 @@ public enum Message: Sendable {
                 guard let cid = reader.readString() else { return nil }
                 cids.append(cid)
             }
-            return .wantBlocks(cids: cids)
+            return .want(rootCIDs: cids)
         case .pexRequest:
             guard let nonce = reader.readUInt64() else { return nil }
             return .pexRequest(nonce: nonce)
@@ -349,26 +329,6 @@ public enum Message: Sendable {
                 peers.append(PeerEndpoint(publicKey: key, host: host, port: port))
             }
             return .pexResponse(nonce: nonce, peers: peers)
-        case .haveCIDs:
-            guard let nonce = reader.readUInt64(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .haveCIDs(nonce: nonce, cids: cids)
-        case .haveCIDsResult:
-            guard let nonce = reader.readUInt64(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var have = [String]()
-            have.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                have.append(cid)
-            }
-            return .haveCIDsResult(nonce: nonce, have: have)
         case .findPins:
             guard let cid = reader.readString(),
                   let fee = reader.readUInt64() else { return nil }
@@ -411,16 +371,6 @@ public enum Message: Sendable {
                 items.append((cid: cid, data: data))
             }
             return .blocks(rootCID: rootCID, items: items)
-        case .getVolume:
-            guard let rootCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .getVolume(rootCID: rootCID, cids: cids)
         case .notHave:
             guard let rootCID = reader.readString() else { return nil }
             return .notHave(rootCID: rootCID)

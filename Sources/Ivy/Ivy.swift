@@ -8,6 +8,9 @@ import Crypto
 public protocol IvyDataSource: AnyObject, Sendable {
     func data(for cid: String) async -> Data?
     func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)]
+    /// Returns true if this node holds a complete-enough copy of the volume rooted
+    /// at rootCID to serve a want request. Checks MemoryBroker first, then DiskBroker.
+    func hasVolume(rootCID: String) async -> Bool
 }
 
 public enum IvyError: Error, Sendable {
@@ -24,6 +27,7 @@ public actor Ivy {
 
     public weak var delegate: IvyDelegate?
     public weak var dataSource: IvyDataSource?
+    public func setDataSource(_ ds: IvyDataSource?) { dataSource = ds }
     public var chainPorts: [String: UInt16] = [:]
     private var peerChainPorts: [PeerID: [String: UInt16]] = [:]
 
@@ -84,14 +88,9 @@ public actor Ivy {
     private var pendingVolumeRequests: [String: [CheckedContinuation<[String: Data], Never>]] = [:]
     private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
-    // Phase-1 (want-have) pending checks.
-    // Keyed by nonce; accumulates responders within haveCheckTimeout then resolves.
-    private struct HaveCheckEntry {
-        let rootCID: String
-        var responders: [PeerID] = []
-        let continuation: CheckedContinuation<[PeerID], Never>
-    }
-    private var pendingHaveResults: [UInt64: HaveCheckEntry] = [:]
+    // Tracks which peers a `want` was sent to per rootCID.
+    // When all candidates have responded (blocks or notHave), resolves immediately.
+    private var pendingWantCandidates: [String: Set<PeerID>] = [:]
 
     public let creditLedger: CreditLineLedger
 
@@ -688,8 +687,8 @@ public actor Ivy {
         case .dhtForward(let cid, let ttl, _, _, _):
             await handleDHTForward(cid: cid, ttl: ttl, from: peer)
 
-        case .haveCIDs(let nonce, let cids):
-            handleHaveCIDs(nonce: nonce, cids: cids, from: peer)
+        case .want(let rootCIDs):
+            Task { await self.handleWant(rootCIDs: rootCIDs, from: peer) }
 
         case .pexRequest(let nonce):
             handlePEXRequest(nonce: nonce, from: peer)
@@ -739,18 +738,11 @@ public actor Ivy {
                     haveSet.insert(item.cid)
                 }
                 recordVolumeProvider(rootCID: rootCID, peer: peer)
+                pendingWantCandidates.removeValue(forKey: rootCID)
                 resolveVolumeRequest(key: rootCID, result: result)
             }
 
-            // Accumulate want-have responders for phase 1 checks.
-            if !items.isEmpty {
-                handleHaveCIDsResultActive(from: peer, have: [rootCID])
-            }
-
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .getVolume(let rootCID, let cids):
-            Task { await self.handleGetVolume(rootCID: rootCID, cids: cids, from: peer) }
 
         case .announceVolume(let rootCID, let childCIDs, let totalSize):
             await handleAnnounceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
@@ -758,20 +750,7 @@ public actor Ivy {
         case .pushVolume(let rootCID, let items):
             await handlePushVolume(rootCID: rootCID, items: items, from: peer)
 
-        case .wantBlocks:
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
-        case .haveCIDsResult(let nonce, let have):
-            handleHaveCIDsResultActive(nonce: nonce, from: peer, have: have)
-            // A DONT_HAVE response is a soft miss signal. Repeated DONT_HAVEs
-            // degrade the peer's routing priority (Bitswap heuristic).
-            if have.isEmpty { tally.recordFailure(peer: peer) }
-            delegate?.ivy(self, didReceiveMessage: message, from: peer)
-
         case .notHave(let rootCID):
-            // Peer cannot serve this volume (evicted/unavailable). Resolve the
-            // pending waiter immediately so the requester does not wait for
-            // requestTimeout — it can retry with a different peer.
             handleNotHave(rootCID: rootCID, from: peer)
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
@@ -847,18 +826,25 @@ public actor Ivy {
         }
     }
 
-    // MARK: - haveCIDs (passive responder only)
+    // MARK: - want (passive responder)
 
-    private func handleHaveCIDs(nonce: UInt64, cids: [String], from peer: PeerID) {
+    private func handleWant(rootCIDs: [String], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
-
-        var have = [String]()
-        for cid in cids {
-            if haveSet.contains(cid) {
-                have.append(cid)
+        for rootCID in rootCIDs {
+            let have = await dataSource?.hasVolume(rootCID: rootCID) ?? false
+            if have {
+                let items = await dataSource?.volumeData(for: rootCID, cids: []) ?? []
+                fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
+                if !items.isEmpty {
+                    let totalBytes = items.reduce(0) { $0 + $1.data.count }
+                    let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
+                    tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
+                    await meterSent(peer: peer, bytes: totalBytes)
+                }
+            } else {
+                fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
             }
         }
-        fireToPeer(peer, .haveCIDsResult(nonce: nonce, have: have))
     }
 
     // MARK: - Local Peers
@@ -1266,26 +1252,6 @@ public actor Ivy {
 
     // MARK: - Volume-Aware Fetching
 
-    /// Handle a getVolume request: serve all requested CIDs in a single
-    /// `.blocks()` response. Always reply — even with an empty `items` list
-    /// — so the requester can fast-fail on a miss and try its next fetcher
-    /// (e.g., the per-chain CompositeFetcher tries nexus then child Ivy).
-    /// Without an explicit miss signal the requester waits the full
-    /// `requestTimeout` per Volume, and a multi-level resolve runs over the
-    /// validator's deadline.
-    private func handleGetVolume(rootCID: String, cids: [String], from peer: PeerID) async {
-        // v2: Volume serving is never gated — essential for chain health
-        let items = await dataSource?.volumeData(for: rootCID, cids: cids) ?? []
-
-        fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
-        if !items.isEmpty {
-            let totalBytes = items.reduce(0) { $0 + $1.data.count }
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
-            tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
-            await meterSent(peer: peer, bytes: totalBytes)
-        }
-    }
-
     /// Handle announceVolume: record provider, gossip to other peers.
     private func handleAnnounceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64, from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
@@ -1386,20 +1352,13 @@ public actor Ivy {
         return Array(sorted.prefix(count))
     }
 
-    /// Fetch a volume's contents from the network.
-    ///
-    /// Volume is the unit of network query: callers ask for `rootCID` and
-    /// receive every entry the responder has under that root. Inner CIDs are
-    /// not network-addressable — they only make sense within the Volume that
-    /// contains them. Empty `cids` in the wire request signals "give me all
-    /// entries you have for this root".
-    /// Fallback: ask every connected peer for a volume when normal routing
-    /// fails (e.g., provider records are empty after restart). Used only when
-    /// fetchVolume returns nothing.
+    /// Fetch from all directly connected peers — no DHT lookup.
+    /// Registers the continuation before any async work so cleanupAllPending
+    /// can cancel it immediately without waiting for a DHT timeout.
     public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
-        let peers = Array(connections.keys) + Array(localPeers.keys)
-        guard !peers.isEmpty else { return [:] }
-        return await fetchVolumeWithWantHave(rootCID: rootCID, candidates: peers)
+        let candidates = Array(connections.keys) + Array(localPeers.keys)
+        guard !candidates.isEmpty else { return [:] }
+        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
     }
 
     public func fetchVolume(rootCID: String) async -> [String: Data] {
@@ -1408,70 +1367,17 @@ public actor Ivy {
             for item in entries { result[item.cid] = item.data }
             return result
         }
-
-        var candidates: [PeerID] = []
-        var seen: Set<String> = []
-
-        // Locally-remembered providers (learned from past announces / fetches).
-        if let providers = providerRecords[rootCID] {
-            for p in providers {
-                guard connections[p] != nil || localPeers[p] != nil else { continue }
-                guard tally.shouldAllow(peer: p) else { continue }
-                if seen.insert(p.publicKey).inserted { candidates.append(p) }
-            }
-        }
-
-        // Locally-stored pin announcements (we are likely a closest-K node
-        // for this CID and hold announces published by others).
-        for pk in storedPinAnnouncements(for: rootCID) {
-            let pid = PeerID(publicKey: pk)
-            guard connections[pid] != nil || localPeers[pid] != nil else { continue }
-            guard tally.shouldAllow(peer: pid) else { continue }
-            if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
-        }
-
-        // DHT provider lookup: ask the routing-closest peers which pinners
-        // they know. Skip when we already have enough candidates, since
-        // findPins costs a round trip. Threshold of 2 keeps the race fed
-        // (raceVolumeFetch needs >1 peer for parallel coverage).
-        if candidates.count < 2 {
-            let discovered = await findPinnersViaDHT(rootCID: rootCID)
-            for pid in discovered {
-                guard connections[pid] != nil || localPeers[pid] != nil else { continue }
-                guard tally.shouldAllow(peer: pid) else { continue }
-                if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
-            }
-        }
-
-        // Final fallback: routing-closest peers by XOR distance to the CID
-        // hash. These may or may not actually have the data — Kademlia
-        // closeness ≠ pin holding — but in a small mesh they're often the
-        // same set as direct connections, so this is a useful last try.
-        let rootHash = Router.hash(rootCID)
-        let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
-        for entry in closest {
-            guard connections[entry.id] != nil || localPeers[entry.id] != nil else { continue }
-            guard tally.shouldAllow(peer: entry.id) else { continue }
-            if seen.insert(entry.id.publicKey).inserted { candidates.append(entry.id) }
-        }
-
-        guard !candidates.isEmpty else { return [:] }
-        return await fetchVolumeWithWantHave(rootCID: rootCID, candidates: candidates)
+        return await fetchVolumeFromNetwork(rootCID: rootCID)
     }
 
-    /// Two-phase content fetch following the content-addressing invariant.
+    /// Single-phase content fetch. Sends `want([rootCID])` to candidates and
+    /// waits for the first `blocks` response. Candidates are selected in order:
+    /// 1. Locally-known providers (provider records + pin announcements + DHT)
+    /// 2. All direct peers capped at maxWantCandidates
     ///
-    /// Phase 1 (want-have): send a cheap `haveCIDs` query to all candidates.
-    /// Collect responders within `haveCheckTimeout`. We ask everyone but only
-    /// pay data-transfer cost for peers that confirm they have the content.
-    ///
-    /// Phase 2 (want-block): send `getVolume` only to confirmed holders.
-    /// Key the pending waiter by `rootCID` (not peer) — first response from
-    /// any holder wakes all waiters for this content.
-    ///
-    /// Coalescing: if a waiter for this `rootCID` already exists, join it
-    /// without sending any new network messages.
-    private func fetchVolumeWithWantHave(rootCID: String, candidates: [PeerID]) async -> [String: Data] {
+    /// Coalescing: if a waiter for this rootCID already exists, joins it without
+    /// sending new messages. First responder wakes all coalesced waiters.
+    private func fetchVolumeFromNetwork(rootCID: String) async -> [String: Data] {
         // Coalesce: join an existing in-flight request for the same content.
         if let existing = pendingVolumeRequests[rootCID] {
             guard existing.count < config.maxWaitersPerPendingCID else { return [:] }
@@ -1485,42 +1391,83 @@ public actor Ivy {
             }
         }
 
-        // Phase 1 — want-have: discover who actually has this content.
-        let nonce = UInt64.random(in: 0...UInt64.max)
-        let responders: [PeerID] = await withTaskCancellationHandler {
-            await withCheckedContinuation { (cont: CheckedContinuation<[PeerID], Never>) in
-                guard !Task.isCancelled else { cont.resume(returning: []); return }
-                pendingHaveResults[nonce] = HaveCheckEntry(rootCID: rootCID, continuation: cont)
-                for peer in candidates {
-                    fireToPeer(peer, .haveCIDs(nonce: nonce, cids: [rootCID]))
-                }
-                Task {
-                    try? await Task.sleep(for: config.haveCheckTimeout)
-                    if let entry = self.pendingHaveResults.removeValue(forKey: nonce) {
-                        // Timeout: use confirmed holders, or fall back to all candidates.
-                        entry.continuation.resume(
-                            returning: entry.responders.isEmpty ? candidates : entry.responders
-                        )
-                    }
-                }
+        // Build candidate list: known providers first, then broadcast fallback.
+        var candidates: [PeerID] = []
+        var seen: Set<String> = []
+
+        for p in providerRecords[rootCID] ?? [] {
+            guard connections[p] != nil || localPeers[p] != nil else { continue }
+            guard tally.shouldAllow(peer: p) else { continue }
+            if seen.insert(p.publicKey).inserted { candidates.append(p) }
+        }
+        for pk in storedPinAnnouncements(for: rootCID) {
+            let pid = PeerID(publicKey: pk)
+            guard connections[pid] != nil || localPeers[pid] != nil else { continue }
+            guard tally.shouldAllow(peer: pid) else { continue }
+            if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
+        }
+        if candidates.count < 2 {
+            let discovered = await findPinnersViaDHT(rootCID: rootCID)
+            for pid in discovered {
+                guard connections[pid] != nil || localPeers[pid] != nil else { continue }
+                guard tally.shouldAllow(peer: pid) else { continue }
+                if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
             }
-        } onCancel: {
-            Task { await self.cancelHaveCheck(nonce: nonce) }
+        }
+        // Broadcast fallback: direct peers capped at maxWantCandidates
+        if candidates.isEmpty {
+            let allPeers = Array(connections.keys) + Array(localPeers.keys)
+            for p in allPeers {
+                guard tally.shouldAllow(peer: p) else { continue }
+                if seen.insert(p.publicKey).inserted { candidates.append(p) }
+                if candidates.count >= config.maxWantCandidates { break }
+            }
         }
 
-        guard !responders.isEmpty else { return [:] }
+        guard !candidates.isEmpty else { return [:] }
+        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
+    }
 
-        // Phase 2 — want-block: request content from confirmed holders only.
-        // Key by rootCID; first valid response wakes all waiters for this content.
+    /// Core send-and-wait: register continuation, send `want` to candidates,
+    /// first `blocks` response wins. Re-checks coalescing inside the continuation
+    /// to handle races where a concurrent fetch registered while we were in async
+    /// candidate discovery (e.g., the DHT lookup in fetchVolumeFromNetwork).
+    private func fetchWithCandidates(rootCID: String, candidates: [PeerID]) async -> [String: Data] {
+        // Coalesce: join an existing in-flight request for this content.
+        if let existing = pendingVolumeRequests[rootCID] {
+            guard existing.count < config.maxWaitersPerPendingCID else { return [:] }
+            return await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
+                    pendingVolumeRequests[rootCID, default: []].append(continuation)
+                }
+            } onCancel: {
+                Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
+            }
+        }
+
+        guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
+                // Re-check: a concurrent fetch may have registered while we were in async work.
+                if pendingVolumeRequests[rootCID] != nil {
+                    pendingVolumeRequests[rootCID, default: []].append(continuation)
+                    return
+                }
                 pendingVolumeRequests[rootCID, default: []].append(continuation)
-                for peer in responders {
-                    fireToPeer(peer, .getVolume(rootCID: rootCID, cids: []))
+                pendingWantCandidates[rootCID] = Set(candidates)
+                let payload = Message.want(rootCIDs: [rootCID]).serialize()
+                for peer in candidates {
+                    if let conn = connections[peer] {
+                        conn.fireAndForget(payload)
+                    } else if let local = localPeers[peer] {
+                        local.send(.want(rootCIDs: [rootCID]))
+                    }
                 }
                 Task {
-                    try? await Task.sleep(for: config.requestTimeout)
+                    try? await Task.sleep(for: self.config.requestTimeout)
+                    self.pendingWantCandidates.removeValue(forKey: rootCID)
                     self.resolveVolumeRequest(key: rootCID, result: [:])
                 }
             }
@@ -1529,34 +1476,16 @@ public actor Ivy {
         }
     }
 
-    /// Accumulate want-have responders for an in-flight phase-1 check.
-    /// Called when a `haveCIDsResult` or a `blocks` response arrives.
-    private func handleHaveCIDsResultActive(nonce: UInt64? = nil, from peer: PeerID, have: [String]) {
-        guard !have.isEmpty else { return }
-        if let nonce {
-            pendingHaveResults[nonce]?.responders.append(peer)
-        }
-    }
-
     private func handleNotHave(rootCID: String, from peer: PeerID) {
-        // Peer cannot serve this volume. Record a failure so persistent liars
-        // are deprioritised, then resolve the waiter immediately so the caller
-        // doesn't wait the full requestTimeout. If other peers still have the
-        // content they will have already received getVolume; if none respond
-        // the caller receives [:] as fast as possible.
         tally.recordFailure(peer: peer)
-        // Resolve the pending waiter now rather than waiting for requestTimeout.
-        resolveVolumeRequest(key: rootCID, result: [:])
-    }
-
-    private func cancelHaveCheck(nonce: UInt64) {
-        if let entry = pendingHaveResults.removeValue(forKey: nonce) {
-            entry.continuation.resume(returning: [])
+        // Remove this peer from candidates. If all candidates exhausted, resolve immediately.
+        pendingWantCandidates[rootCID]?.remove(peer)
+        if pendingWantCandidates[rootCID]?.isEmpty == true {
+            pendingWantCandidates.removeValue(forKey: rootCID)
+            resolveVolumeRequest(key: rootCID, result: [:])
         }
     }
 
-    /// Public accessor so fetchers can hint that `peer` already serves
-    /// `rootCID` (e.g., the peer that announced a block).
     public func recordProvider(rootCID: String, peer: PeerID) {
         recordVolumeProvider(rootCID: rootCID, peer: peer)
     }
@@ -1572,8 +1501,6 @@ public actor Ivy {
     public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
         var result: [String: Data] = [:]
         var missing: [String] = []
-
-        // Check dataSource first
         for cid in childCIDs {
             if let data = await getLocalBlock(cid: cid) {
                 result[cid] = data
@@ -1581,102 +1508,12 @@ public actor Ivy {
                 missing.append(cid)
             }
         }
-
         guard !missing.isEmpty else { return result }
-
-        if let providers = providerRecords[rootCID] {
-            for provider in providers {
-                guard connections[provider] != nil || localPeers[provider] != nil else { continue }
-                guard tally.shouldAllow(peer: provider) else { continue }
-
-                let batchResult = await requestVolumeFromPeer(rootCID: rootCID, cids: missing, peer: provider)
-                for (cid, data) in batchResult {
-                    result[cid] = data
-                    missing.removeAll { $0 == cid }
-                }
-
-                if !batchResult.isEmpty {
-                    tally.recordSuccess(peer: provider)
-                }
-                if missing.isEmpty { break }
-            }
-        }
-
-        if !missing.isEmpty {
-            let rootHash = Router.hash(rootCID)
-            let closest = router.closestPeers(to: rootHash, count: config.maxConcurrentRequests)
-            for entry in closest {
-                guard connections[entry.id] != nil || localPeers[entry.id] != nil else { continue }
-                guard tally.shouldAllow(peer: entry.id) else { continue }
-
-                let batchResult = await requestVolumeFromPeer(rootCID: rootCID, cids: missing, peer: entry.id)
-                for (cid, data) in batchResult {
-                    result[cid] = data
-                    missing.removeAll { $0 == cid }
-                    recordVolumeProvider(rootCID: rootCID, peer: entry.id)
-                }
-                if missing.isEmpty { break }
-            }
-        }
-
+        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID)
         for cid in missing {
-            if let data = await get(cid: cid) {
-                result[cid] = data
-            }
+            if let data = networkResult[cid] { result[cid] = data }
         }
-
         return result
-    }
-
-    /// Send a getVolume request to a specific peer and wait for the .blocks() response.
-    ///
-    /// Cancellation-aware: if the awaiting Task is cancelled (e.g., a sibling
-    /// peer in `raceVolumeFetch` won), the pending continuation is resolved
-    /// with empty immediately rather than waiting for `requestTimeout`. Without
-    /// this, `group.cancelAll()` would only set the cancelled flag — the
-    /// continuation would still suspend until timeout, defeating the race.
-    /// Request volume data from a KNOWN provider (already in providerRecords).
-    /// Skips the want-have phase since we already know this peer has the content.
-    /// Uses rootCID as the waiter key per the content-addressing invariant.
-    private func requestVolumeFromPeer(rootCID: String, cids: [String], peer: PeerID) async -> [String: Data] {
-        // Key by rootCID only — any peer's valid response satisfies all waiters.
-        let volumeKey = rootCID
-
-        if let existing = pendingVolumeRequests[volumeKey] {
-            guard existing.count < config.maxWaitersPerPendingCID else { return [:] }
-        } else {
-            guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
-        }
-
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                // If the task was already cancelled when we enter the continuation
-                // body (e.g. raceVolumeFetch called group.cancelAll() just before
-                // this task started), resume immediately rather than storing the
-                // continuation — otherwise the onCancel handler already fired with
-                // an empty pendingVolumeRequests[volumeKey] and nobody will ever
-                // resume this continuation.
-                guard !Task.isCancelled else {
-                    continuation.resume(returning: [:])
-                    return
-                }
-                pendingVolumeRequests[volumeKey, default: []].append(continuation)
-                fireToPeer(peer, .getVolume(rootCID: rootCID, cids: cids))
-
-                Task {
-                    try? await Task.sleep(for: config.requestTimeout)
-                    self.resolveVolumeRequest(key: volumeKey, result: [:])
-                }
-            }
-        } onCancel: {
-            // Resolve by rootCID prefix rather than the exact volumeKey. The key
-            // embeds the peer's short public key which can change if the peer
-            // reconnects with a different PeerID mid-sync (key migration in
-            // handlePeerIdentityConfirm). If the key migrated after this closure
-            // captured volumeKey, resolving by exact key misses the continuation.
-            let root = rootCID
-            Task { await self.resolveVolumeRequestsForRoot(rootCID: root) }
-        }
     }
 
     /// Resolves all pending volume requests for a given rootCID regardless of
@@ -1684,20 +1521,8 @@ public actor Ivy {
     /// cases where the peer's PeerID changed (key migration) after the request
     /// was registered.
     func resolveVolumeRequestsForRoot(rootCID: String) {
-        // With rootCID-only keying the key is exactly rootCID.
-        // Also check the legacy "\(rootCID)-\(peerPrefix)" format for compatibility.
-        let prefix = "\(rootCID)-"
-        let matchingKeys = pendingVolumeRequests.keys.filter { $0 == rootCID || $0.hasPrefix(prefix) }
-        for key in matchingKeys {
-            resolveVolumeRequest(key: key, result: [:])
-        }
-        // Also cancel any in-flight want-have phase-1 checks for this content.
-        let matchingNonces = pendingHaveResults.filter { $0.value.rootCID == rootCID }.map { $0.key }
-        for nonce in matchingNonces {
-            if let entry = pendingHaveResults.removeValue(forKey: nonce) {
-                entry.continuation.resume(returning: [])
-            }
-        }
+        pendingWantCandidates.removeValue(forKey: rootCID)
+        resolveVolumeRequest(key: rootCID, result: [:])
     }
 
     /// Returns true if a new continuation can be appended to `pendingRequests[cid]`.
@@ -1785,13 +1610,6 @@ public actor Ivy {
         // If other peers are still expected, leave the check running.
     }
 
-    private func cancelAllHaveChecks() {
-        for (_, entry) in pendingHaveResults {
-            entry.continuation.resume(returning: [])
-        }
-        pendingHaveResults.removeAll()
-    }
-
     /// Safety net: resolve all pending continuations when the actor is torn down.
     /// Prevents SWIFT TASK CONTINUATION MISUSE warnings when an Ivy instance is
     /// released while fetches are in flight (e.g. during test teardown or network
@@ -1810,9 +1628,6 @@ public actor Ivy {
         for (_, continuations) in pendingFindPins {
             for cont in continuations { cont.resume(returning: []) }
         }
-        for (_, entry) in pendingHaveResults {
-            entry.continuation.resume(returning: [])
-        }
     }
 
     func cleanupAllPending() {
@@ -1825,6 +1640,7 @@ public actor Ivy {
             resolvePending(cid: cid, data: nil)
         }
 
+        pendingWantCandidates.removeAll()
         for (key, _) in pendingVolumeRequests {
             resolveVolumeRequest(key: key, result: [:])
         }
@@ -1832,9 +1648,6 @@ public actor Ivy {
         for (cid, _) in pendingFindPins {
             resolvePendingFindPins(rootCID: cid, peers: [])
         }
-
-        // Cancel all in-flight want-have phase-1 checks.
-        cancelAllHaveChecks()
 
         pendingForwards.removeAll()
     }
