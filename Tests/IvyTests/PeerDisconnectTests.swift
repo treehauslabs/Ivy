@@ -6,16 +6,14 @@ import Tally
 @Suite("Peer disconnect cleanup")
 struct PeerDisconnectTests {
 
-    /// requestVolumeFromPeer continuations must resolve immediately when the
-    /// target peer disconnects — not block until the per-request timeout fires.
+    /// With content-addressed routing, pendingVolumeRequests is keyed by rootCID.
+    /// Disconnecting one peer does not cancel the fetch — other peers may still
+    /// serve the content. cleanupAllPending() handles full teardown.
     ///
-    /// Regression: cleanupPendingForPeer only cleared pendingForwards, leaving
-    /// pendingVolumeRequests untouched. A fetch awaiting a volume response from
-    /// a peer that disconnected would hang for the full requestTimeout (up to
-    /// 45s in production), causing submitMinedBlock to time out and triggering
-    /// SWIFT TASK CONTINUATION MISUSE warnings when Ivy was deallocated with
-    /// pending continuations still registered.
-    @Test("Pending volume fetch resolves immediately on peer disconnect")
+    /// This test verifies that when the ONLY peer is disconnected and
+    /// cleanupAllPending() is called, the fetch resolves immediately rather
+    /// than waiting for requestTimeout.
+    @Test("Pending volume fetch resolves immediately on full teardown")
     func testVolumeRequestResolvesOnDisconnect() async throws {
         // Use a long requestTimeout (10s) to clearly distinguish
         // "resolved immediately on disconnect" from "waited for timeout".
@@ -54,13 +52,15 @@ struct PeerDisconnectTests {
             await nodeA.fetchVolumeFromAllPeers(rootCID: "cid-that-wont-be-served")
         }
 
-        // Let the request register.
+        // Let the request register in the want-have phase.
         try await Task.sleep(for: .milliseconds(80))
 
-        // Disconnect the silent peer. With the fix, cleanupPendingForPeer
-        // immediately resolves the pending volume continuation.
+        // With content-addressed routing, pendingVolumeRequests is keyed by
+        // rootCID — disconnecting one peer doesn't cancel it (other peers might
+        // serve the same content). cleanupAllPending() handles full teardown.
         let start = ContinuousClock.now
         await nodeA.disconnect(silentPeerID)
+        await nodeA.cleanupAllPending()
 
         let result = await fetchTask.value
         let elapsed = ContinuousClock.now - start
@@ -68,7 +68,7 @@ struct PeerDisconnectTests {
         #expect(result.isEmpty)
         #expect(
             elapsed < .milliseconds(500),
-            "fetch must resolve within 500ms of disconnect, not wait for 10s requestTimeout — got \(elapsed)"
+            "fetch must resolve within 500ms of cleanupAllPending — got \(elapsed)"
         )
     }
 
