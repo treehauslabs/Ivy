@@ -46,7 +46,7 @@ struct PeerDisconnectTests {
 
         try await Task.sleep(for: .milliseconds(30))
 
-        // Start a fetch — nodeA sends getVolume to silentPeerID, which never
+        // Start a fetch — nodeA sends want to silentPeerID, which never
         // responds. The continuation is registered in pendingVolumeRequests.
         let fetchTask = Task {
             await nodeA.fetchVolumeFromAllPeers(rootCID: "cid-that-wont-be-served")
@@ -56,8 +56,9 @@ struct PeerDisconnectTests {
         try await Task.sleep(for: .milliseconds(80))
 
         // With content-addressed routing, pendingVolumeRequests is keyed by
-        // rootCID — disconnecting one peer doesn't cancel it (other peers might
-        // serve the same content). cleanupAllPending() handles full teardown.
+        // query shape, not peer. Disconnecting one peer doesn't cancel it
+        // (other peers might serve the same content). cleanupAllPending()
+        // handles full teardown.
         let start = ContinuousClock.now
         await nodeA.disconnect(silentPeerID)
         await nodeA.cleanupAllPending()
@@ -72,14 +73,9 @@ struct PeerDisconnectTests {
         )
     }
 
-    /// Regression: onCancel used the exact volumeKey which includes the peer's
-    /// short public key. If the peer reconnected with a different PeerID mid-sync
-    /// (key migration in handlePeerIdentityConfirm), the continuation moved to a
-    /// new key. The old onCancel called resolveVolumeRequest(key: oldKey) which
-    /// found nothing, leaving the migrated continuation unresolved → leak.
-    ///
-    /// The fix: onCancel now calls resolveVolumeRequestsForRoot(rootCID:) which
-    /// matches all keys with the "\(rootCID)-" prefix regardless of peer suffix.
+    /// Regression: onCancel used to resolve a single exact volume key. Volume
+    /// fetches may now have multiple query shapes for the same root, so teardown
+    /// must resolve every pending query under that root.
     @Test("resolveVolumeRequestsForRoot resolves continuations regardless of peer key suffix")
     func testResolveByRootCIDHandlesKeyMigration() async throws {
         let config = IvyConfig(

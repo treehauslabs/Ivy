@@ -28,14 +28,14 @@ public struct IvyConfig: Sendable {
     public let defaultRequestFee: UInt64
     public let highBandwidthPeers: Int
     public let sendBytesPerSecond: Int
-    /// Upper bound on distinct in-flight CIDs tracked in `pendingRequests` /
+    /// Upper bound on distinct in-flight CIDs/volume queries tracked in `pendingRequests` /
     /// `pendingVolumeRequests`. Prevents an attacker (or a runaway local
     /// caller) from allocating unbounded continuations by repeatedly asking
     /// for unique CIDs faster than `requestTimeout` drains them.
     public let maxPendingRequests: Int
-    /// Per-CID cap on coalesced waiters. Many concurrent local callers for
-    /// the same CID legitimately fan-in to one pending request; this caps
-    /// the fan-in so one hot CID can't grow one continuation list forever.
+    /// Per-CID/query cap on coalesced waiters. Many concurrent local callers for
+    /// the same content legitimately fan-in to one pending request; this caps
+    /// the fan-in so one hot request can't grow one continuation list forever.
     public let maxWaitersPerPendingCID: Int
     /// Maximum number of peers to broadcast a `want` request to when DHT provider
     /// records are empty. Caps the O(N) duplicate-work cost of the broadcast fallback.

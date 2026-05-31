@@ -149,9 +149,15 @@ When your application requests a CID not stored locally, the request cascades th
 
 1. Find the closest peers to the CID in DHT keyspace
 2. Rank candidates by Tally reputation score
-3. Send `WANT_BLOCK` to the top candidates in parallel
+3. Send a content request to the top candidates in parallel
 4. Return the first valid response
 5. Record bandwidth and latency in Tally for future peer selection
+
+### Volume Fetch Completeness
+
+Volumes are fetched by query shape, not by peer. A full-volume fetch asks for the root CID. A subset fetch asks for the root CID plus the exact child CIDs needed by the current resolution pass.
+
+Hashing proves byte identity: `hash(bytes) == CID` tells us the bytes are honest for that CID. It does not prove that the response completed the requested Volume query. A `BLOCKS` response only satisfies a Volume fetch when every requested CID is present and every `(CID, bytes)` pair verifies. If a peer returns valid bytes but omits a requested CID, the fetch remains incomplete; Ivy does not credit or slash the peer for that claim. Invalid bytes for a claimed CID are slashable.
 
 ### Relay-First DHT
 
@@ -318,13 +324,18 @@ Binary, length-prefixed messages over TCP:
 |------|:---:|---------|:---------:|
 | `PING` | `0x00` | `uint64` nonce | ↔ |
 | `PONG` | `0x01` | `uint64` nonce | ↔ |
-| `WANT_BLOCK` | `0x02` | CID (string) | → |
 | `BLOCK` | `0x03` | CID + data | ← |
 | `DONT_HAVE` | `0x04` | CID (string) | ← |
 | `FIND_NODE` | `0x05` | 32-byte target hash | → |
 | `NEIGHBORS` | `0x06` | array of (key, host, port) | ← |
 | `ANNOUNCE_BLOCK` | `0x07` | CID (string) | ↔ |
 | `BLOCK_PUSH` | `0x08` | CID + data | ↔ |
+| `WANT` | `0x1A` | array of root CIDs | → |
+| `BLOCKS` | `0x32` | root CID + array of (CID, data) | ← |
+| `ANNOUNCE_VOLUME` | `0x36` | root CID + child CIDs + total size | ↔ |
+| `PUSH_VOLUME` | `0x37` | root CID + array of (CID, data) | ↔ |
+| `NOT_HAVE` | `0x3A` | root CID | ← |
+| `WANT_VOLUME` | `0x3B` | root CID + requested CIDs | → |
 
 ---
 

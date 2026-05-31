@@ -17,6 +17,7 @@ final class PeerMessageLog: @unchecked Sendable {
 
     func received(want rootCID: String) -> Bool {
         messages.contains {
+            if case .wantVolume(let root, _) = $0 { return root == rootCID }
             if case .want(let cids) = $0 { return cids.contains(rootCID) }
             return false
         }
@@ -24,9 +25,22 @@ final class PeerMessageLog: @unchecked Sendable {
 
     func wantCount(for rootCID: String) -> Int {
         messages.filter {
+            if case .wantVolume(let root, _) = $0 { return root == rootCID }
             if case .want(let cids) = $0 { return cids.contains(rootCID) }
             return false
         }.count
+    }
+}
+
+private func requestedVolume(_ message: Message) -> (rootCID: String, cids: [String])? {
+    switch message {
+    case .want(let cids):
+        guard let rootCID = cids.first else { return nil }
+        return (rootCID, [])
+    case .wantVolume(let rootCID, let cids):
+        return (rootCID, cids)
+    default:
+        return nil
     }
 }
 
@@ -46,8 +60,13 @@ final class MockVolumeDataSource: IvyDataSource, @unchecked Sendable {
 
     func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)] {
         lock.withLock {
-            guard let d = volumes[rootCID] else { return [] }
-            return [(cid: rootCID, data: d)]
+            if cids.isEmpty {
+                return volumes.map { (cid: $0.key, data: $0.value) }
+            }
+            return cids.compactMap { cid in
+                guard let data = volumes[cid] else { return nil }
+                return (cid: cid, data: data)
+            }
         }
     }
 
@@ -412,9 +431,9 @@ struct WantHaveProtocolTests {
             "Hit peer must deliver data even though miss peer sent notHave first")
     }
 
-    /// A peer that consistently sends notHave must accumulate tally failures.
-    @Test("consecutive notHave degrades peer reputation in tally")
-    func testConsecutiveNotHavesDegradeTally() async throws {
+    /// `notHave` is a claim about missing data, not proof of invalid behavior.
+    @Test("consecutive notHave does not change peer reputation")
+    func testConsecutiveNotHavesDoNotChangeTally() async throws {
         let node = makeNode(publicKey: "requester-tally-nth", requestTimeout: .milliseconds(200))
         let nodeID = await node.localID
 
@@ -440,8 +459,117 @@ struct WantHaveProtocolTests {
         }
 
         let repAfter = tally.reputation(for: peer)
-        #expect(repAfter <= repBefore,
-            "Consecutive notHave must not improve reputation — before=\(repBefore) after=\(repAfter)")
+        #expect(repAfter == repBefore,
+            "Consecutive notHave must not credit or slash — before=\(repBefore) after=\(repAfter)")
+    }
+
+    @Test("subset volume fetch preserves requested CIDs")
+    func testSubsetFetchPreservesRequestedCIDs() async throws {
+        let node = makeNode(publicKey: "requester-subset-shape", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let incompletePeer = PeerID(publicKey: "subset-incomplete00")
+        let completePeer = PeerID(publicKey: "subset-complete000")
+        let (iLocal, iRemote) = LocalPeerConnection.pair(localID: nodeID, remoteID: incompletePeer)
+        let (cLocal, cRemote) = LocalPeerConnection.pair(localID: nodeID, remoteID: completePeer)
+        await node.registerLocalPeer(iLocal, as: incompletePeer)
+        await node.registerLocalPeer(cLocal, as: completePeer)
+        await node.addToRouter(incompletePeer, endpoint: PeerEndpoint(publicKey: incompletePeer.publicKey, host: "local", port: 0))
+        await node.addToRouter(completePeer, endpoint: PeerEndpoint(publicKey: completePeer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootData = Data("subset root".utf8)
+        let rootCID = testCID(for: rootData)
+        let childData = Data("subset child".utf8)
+        let childCID = testCID(for: childData)
+        let log = PeerMessageLog()
+
+        Task {
+            for await msg in iRemote.messages {
+                log.record(msg)
+                if let request = requestedVolume(msg) {
+                    iRemote.send(.blocks(rootCID: request.rootCID, items: [(cid: rootCID, data: rootData)]))
+                }
+            }
+        }
+        Task {
+            for await msg in cRemote.messages {
+                log.record(msg)
+                if let request = requestedVolume(msg) {
+                    try? await Task.sleep(for: .milliseconds(40))
+                    cRemote.send(.blocks(
+                        rootCID: request.rootCID,
+                        items: [
+                            (cid: rootCID, data: rootData),
+                            (cid: childCID, data: childData),
+                        ]
+                    ))
+                }
+            }
+        }
+
+        let result = await node.fetchVolume(rootCID: rootCID, childCIDs: [childCID])
+
+        #expect(result[rootCID] == rootData)
+        #expect(result[childCID] == childData)
+        #expect(log.messages.contains {
+            if case .wantVolume(let root, let cids) = $0 {
+                return root == rootCID && cids.contains(rootCID) && cids.contains(childCID)
+            }
+            return false
+        }, "Subset fetch must preserve the root + child CID query shape")
+    }
+
+    @Test("incomplete subset response does not slash peer")
+    func testIncompleteSubsetResponseDoesNotSlashPeer() async throws {
+        let node = makeNode(publicKey: "requester-subset-noslash", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let incompletePeer = PeerID(publicKey: "subset-noslash-bad")
+        let completePeer = PeerID(publicKey: "subset-noslash-good")
+        let (iLocal, iRemote) = LocalPeerConnection.pair(localID: nodeID, remoteID: incompletePeer)
+        let (cLocal, cRemote) = LocalPeerConnection.pair(localID: nodeID, remoteID: completePeer)
+        await node.registerLocalPeer(iLocal, as: incompletePeer)
+        await node.registerLocalPeer(cLocal, as: completePeer)
+        await node.addToRouter(incompletePeer, endpoint: PeerEndpoint(publicKey: incompletePeer.publicKey, host: "local", port: 0))
+        await node.addToRouter(completePeer, endpoint: PeerEndpoint(publicKey: completePeer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootData = Data("subset noslash root".utf8)
+        let rootCID = testCID(for: rootData)
+        let childData = Data("subset noslash child".utf8)
+        let childCID = testCID(for: childData)
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: incompletePeer)
+
+        Task {
+            for await msg in iRemote.messages {
+                if let request = requestedVolume(msg) {
+                    iRemote.send(.blocks(rootCID: request.rootCID, items: [(cid: rootCID, data: rootData)]))
+                }
+            }
+        }
+        Task {
+            for await msg in cRemote.messages {
+                if let request = requestedVolume(msg) {
+                    try? await Task.sleep(for: .milliseconds(40))
+                    cRemote.send(.blocks(
+                        rootCID: request.rootCID,
+                        items: [
+                            (cid: rootCID, data: rootData),
+                            (cid: childCID, data: childData),
+                        ]
+                    ))
+                }
+            }
+        }
+
+        let result = await node.fetchVolume(rootCID: rootCID, childCIDs: [childCID])
+        let repAfter = tally.reputation(for: incompletePeer)
+
+        #expect(result[childCID] == childData)
+        #expect(repAfter == repBefore,
+            "Incomplete but valid content is not proof of peer misbehavior")
     }
 
     /// maxWantCandidates caps the broadcast fan-out when DHT has no providers.
