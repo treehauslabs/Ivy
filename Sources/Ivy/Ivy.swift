@@ -55,6 +55,14 @@ public actor Ivy {
     private var haveSet = InventorySet()
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
     private var _serviceBus: LocalServiceBus?
+    private var connectingPeers: Set<PeerID> = []
+    private var connectingEndpoints: [PeerID: PeerEndpoint] = [:]
+    private var reconnectAttempts: [PeerID: Int] = [:]
+    private var reconnectTasks: [PeerID: Task<Void, Never>] = [:]
+    private var intentionallyDisconnectedPeers: Set<PeerID> = []
+    private static let reconnectBaseDelayMs: UInt64 = 500
+    private static let reconnectMaxDelayMs: UInt64 = 30_000
+    private static let reconnectJitterMs: UInt64 = 250
 
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
@@ -160,6 +168,14 @@ public actor Ivy {
             conn.cancel()
         }
         connections.removeAll()
+        connectingPeers.removeAll()
+        connectingEndpoints.removeAll()
+        for (_, task) in reconnectTasks {
+            task.cancel()
+        }
+        reconnectTasks.removeAll()
+        reconnectAttempts.removeAll()
+        intentionallyDisconnectedPeers.removeAll()
         pendingForwards.removeAll()
     }
 
@@ -167,19 +183,24 @@ public actor Ivy {
 
     public func connect(to endpoint: PeerEndpoint) async throws {
         let peer = PeerID(publicKey: endpoint.publicKey)
-        guard connections[peer] == nil else { return }
-        // Enforce /16-subnet diversity on every outbound dial, not just during
-        // periodic refresh. Without this, an attacker can occupy all outbound
-        // slots in the 60-second window between refresh cycles [Heilman 2015].
-        // Limit: 2 connections per /16 subnet (first two octets of host IP).
-        let targetSubnet = Self.ipSubnet(endpoint.host)
-        let sameSubnetCount = connections.values.filter {
-            Self.ipSubnet($0.endpoint.host) == targetSubnet
-        }.count
-        guard sameSubnetCount < 2 else { return }
+        guard reserveOutgoingDial(to: endpoint) else { return }
 
-        let conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
+        let conn: PeerConnection
+        do {
+            conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
+        } catch {
+            finishOutgoingDial(to: peer, connected: false)
+            throw error
+        }
+
+        if intentionallyDisconnectedPeers.remove(peer) != nil {
+            conn.cancel()
+            finishOutgoingDial(to: peer, connected: false)
+            return
+        }
+
         connections[peer] = conn
+        finishOutgoingDial(to: peer, connected: true)
         router.addPeer(peer, endpoint: endpoint, tally: tally)
         await creditLedger.establish(with: peer)
         if let monitor = healthMonitor { await monitor.trackPeer(peer) }
@@ -187,6 +208,51 @@ public actor Ivy {
         Task { await handleInbound(conn) }
         sendIdentify(to: conn)
     }
+
+    private func reserveOutgoingDial(to endpoint: PeerEndpoint) -> Bool {
+        let peer = PeerID(publicKey: endpoint.publicKey)
+        guard connections[peer] == nil, !connectingPeers.contains(peer) else { return false }
+
+        // Enforce /16-subnet diversity on every outbound dial, not just during
+        // periodic refresh. Without this, an attacker can occupy all outbound
+        // slots in the 60-second window between refresh cycles [Heilman 2015].
+        // Limit: 2 connections per /16 subnet (first two octets of host IP).
+        let targetSubnet = Self.ipSubnet(endpoint.host)
+        let sameSubnetCount = connections.values.filter {
+            Self.ipSubnet($0.endpoint.host) == targetSubnet
+        }.count + connectingEndpoints.values.filter {
+            Self.ipSubnet($0.host) == targetSubnet
+        }.count
+        guard sameSubnetCount < 2 else { return false }
+
+        connectingPeers.insert(peer)
+        connectingEndpoints[peer] = endpoint
+        intentionallyDisconnectedPeers.remove(peer)
+        return true
+    }
+
+    private func finishOutgoingDial(to peer: PeerID, connected: Bool) {
+        connectingPeers.remove(peer)
+        connectingEndpoints.removeValue(forKey: peer)
+        if connected {
+            reconnectAttempts.removeValue(forKey: peer)
+            reconnectTasks.removeValue(forKey: peer)?.cancel()
+        }
+    }
+
+#if DEBUG
+    func reserveOutgoingDialForTesting(to endpoint: PeerEndpoint) -> Bool {
+        reserveOutgoingDial(to: endpoint)
+    }
+
+    func finishOutgoingDialForTesting(to peer: PeerID, connected: Bool) {
+        finishOutgoingDial(to: peer, connected: connected)
+    }
+
+    func reconnectDelayForTesting(peer: PeerID) -> Duration {
+        reconnectDelay(for: peer)
+    }
+#endif
 
     public var connectedPeers: [PeerID] {
         var peers = [PeerID]()
@@ -216,6 +282,9 @@ public actor Ivy {
     }
 
     public func disconnect(_ peer: PeerID) {
+        intentionallyDisconnectedPeers.insert(peer)
+        reconnectTasks.removeValue(forKey: peer)?.cancel()
+        reconnectAttempts.removeValue(forKey: peer)
         if let conn = connections.removeValue(forKey: peer) {
             conn.cancel()
         }
@@ -581,15 +650,57 @@ public actor Ivy {
         let peer = conn.id
         let endpoint = conn.endpoint
         connections.removeValue(forKey: peer)
+        connectingPeers.remove(peer)
+        connectingEndpoints.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
         delegate?.ivy(self, didDisconnect: peer)
 
-        if !peer.publicKey.hasPrefix("inbound-") {
-            config.logger.info("Connection to \(String(peer.publicKey.prefix(16)))… dropped — scheduling reconnect")
-            Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(500))
-                try? await self?.connect(to: endpoint)
-            }
+        let wasIntentionalDisconnect = intentionallyDisconnectedPeers.remove(peer) != nil
+        if !peer.publicKey.hasPrefix("inbound-"),
+           running,
+           !wasIntentionalDisconnect {
+            scheduleReconnect(to: endpoint, peer: peer)
+        }
+    }
+
+    private func scheduleReconnect(to endpoint: PeerEndpoint, peer: PeerID) {
+        guard connections[peer] == nil,
+              !connectingPeers.contains(peer),
+              reconnectTasks[peer] == nil else { return }
+
+        let delay = reconnectDelay(for: peer)
+        config.logger.info("Connection to \(String(peer.publicKey.prefix(16)))… dropped — reconnecting in \(String(describing: delay))")
+
+        let task = Task { [weak self] in
+            try? await Task.sleep(for: delay)
+            guard let self else { return }
+            await self.runScheduledReconnect(to: endpoint, peer: peer)
+        }
+        reconnectTasks[peer] = task
+    }
+
+    private func reconnectDelay(for peer: PeerID) -> Duration {
+        let attempt = min((reconnectAttempts[peer] ?? 0) + 1, 16)
+        reconnectAttempts[peer] = attempt
+
+        let shift = min(attempt - 1, 10)
+        let exponential = Self.reconnectBaseDelayMs * (UInt64(1) << UInt64(shift))
+        let capped = min(exponential, Self.reconnectMaxDelayMs)
+        let jitter = UInt64.random(in: 0...Self.reconnectJitterMs)
+        return .milliseconds(capped + jitter)
+    }
+
+    private func runScheduledReconnect(to endpoint: PeerEndpoint, peer: PeerID) async {
+        reconnectTasks.removeValue(forKey: peer)
+        guard running,
+              connections[peer] == nil,
+              !connectingPeers.contains(peer),
+              !intentionallyDisconnectedPeers.contains(peer) else { return }
+
+        do {
+            try await connect(to: endpoint)
+        } catch {
+            scheduleReconnect(to: endpoint, peer: peer)
         }
     }
 
