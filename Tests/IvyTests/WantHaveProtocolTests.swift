@@ -322,6 +322,41 @@ struct WantHaveProtocolTests {
             "Honest peer's data must win — Byzantine empty-blocks must not resolve waiters with [:]")
     }
 
+    @Test("single-candidate empty blocks resolves fetch immediately")
+    func testSingleCandidateEmptyBlocksResolvesImmediately() async throws {
+        let node = makeNode(publicKey: "requester-empty-blk", requestTimeout: .seconds(10))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "empty-blocks-peer0")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootCID = "bafyrei-empty-blocks"
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if case .want(let cids) = msg {
+                    remote.send(.blocks(rootCID: cids[0], items: []))
+                }
+            }
+        }
+
+        let start = ContinuousClock.now
+        let result = await node.fetchVolumeFromAllPeers(rootCID: rootCID)
+        let elapsed = ContinuousClock.now - start
+        let repAfter = tally.reputation(for: peer)
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(800),
+            "Empty BLOCKS should exhaust the candidate immediately, not wait requestTimeout=10s")
+        #expect(repAfter == repBefore,
+            "Empty BLOCKS is an incomplete response, not slashable invalid content")
+    }
+
     /// When the single candidate sends notHave, the fetch must resolve immediately
     /// without waiting for requestTimeout. Gap 1 fix preserved.
     @Test("single-candidate notHave resolves fetch immediately")

@@ -810,8 +810,11 @@ public actor Ivy {
     }
 
     private func handleBlocks(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
-        guard !items.isEmpty else { return }
         guard pendingVolumeRequests[rootCID] != nil else { return }
+        guard !items.isEmpty else {
+            markVolumeCandidateDone(rootCID: rootCID, peer: peer)
+            return
+        }
 
         var result: [String: Data] = [:]
         for item in items {
