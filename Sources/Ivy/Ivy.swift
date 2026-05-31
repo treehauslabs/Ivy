@@ -68,10 +68,10 @@ public actor Ivy {
     // CONTENT-ADDRESSING INVARIANT
     // ─────────────────────────────────────────────────────────────────────────
     // All data in this network is content-addressed: a CID is the cryptographic
-    // hash of its content. Pending Volume fetches are therefore keyed by the
-    // query shape, not by the peer: root CID plus the exact CIDs required by
-    // this resolution pass. Any peer can satisfy the query, but only by
-    // returning every required CID with bytes that hash to that CID.
+    // hash of its content. Pending Volume fetches are keyed by root CID, not by
+    // peer. Ivy treats Volumes as opaque serialized data: any peer can satisfy a
+    // root request by returning bytes for that root with matching CIDs. Schema-
+    // aware path resolution belongs above Ivy.
     //
     // Peer identity is tracked only for tally/reputation and DHT routing
     // (who to ask), never for demultiplexing responses (what was asked).
@@ -824,7 +824,6 @@ public actor Ivy {
         }
 
         guard result[rootCID] != nil else {
-            tally.recordFailure(peer: peer)
             markVolumeCandidateDone(rootCID: rootCID, peer: peer)
             return
         }
@@ -1619,7 +1618,7 @@ public actor Ivy {
             }
         }
 
-        // Volume requests are keyed by query shape, not peer. A single peer
+        // Volume requests are keyed by root CID, not peer. A single peer
         // disconnect no longer causes an isolated volume request cancellation —
         // the remaining peers may still deliver the content.
         // cleanupAllPending() handles full teardown.

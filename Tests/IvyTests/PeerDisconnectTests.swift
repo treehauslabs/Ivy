@@ -56,7 +56,7 @@ struct PeerDisconnectTests {
         try await Task.sleep(for: .milliseconds(80))
 
         // With content-addressed routing, pendingVolumeRequests is keyed by
-        // query shape, not peer. Disconnecting one peer doesn't cancel it
+        // root CID, not peer. Disconnecting one peer doesn't cancel it
         // (other peers might serve the same content). cleanupAllPending()
         // handles full teardown.
         let start = ContinuousClock.now
@@ -73,9 +73,8 @@ struct PeerDisconnectTests {
         )
     }
 
-    /// Regression: onCancel used to resolve a single exact volume key. Volume
-    /// fetches may now have multiple query shapes for the same root, so teardown
-    /// must resolve every pending query under that root.
+    /// Regression: onCancel used to resolve a single exact volume key. Teardown
+    /// must now resolve the pending request for that root.
     @Test("resolveVolumeRequestsForRoot resolves continuations regardless of peer key suffix")
     func testResolveByRootCIDHandlesKeyMigration() async throws {
         let config = IvyConfig(

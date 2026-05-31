@@ -44,23 +44,36 @@ private func requestedVolume(_ message: Message) -> (rootCID: String, cids: [Str
 
 final class MockVolumeDataSource: IvyDataSource, @unchecked Sendable {
     private let lock = NSLock()
-    private var volumes: [String: Data] = [:]
+    private var blocks: [String: Data] = [:]
+    private var volumes: [String: [String: Data]] = [:]
 
     func store(rootCID: String, data: Data) {
-        lock.withLock { volumes[rootCID] = data }
+        store(rootCID: rootCID, entries: [(cid: rootCID, data: data)])
+    }
+
+    func store(rootCID: String, entries: [(cid: String, data: Data)]) {
+        lock.withLock {
+            var volume: [String: Data] = [:]
+            for entry in entries {
+                blocks[entry.cid] = entry.data
+                volume[entry.cid] = entry.data
+            }
+            volumes[rootCID] = volume
+        }
     }
 
     func data(for cid: String) async -> Data? {
-        lock.withLock { volumes[cid] }
+        lock.withLock { blocks[cid] }
     }
 
     func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)] {
         lock.withLock {
+            guard let volume = volumes[rootCID] else { return [] }
             if cids.isEmpty {
-                return volumes.map { (cid: $0.key, data: $0.value) }
+                return volume.map { (cid: $0.key, data: $0.value) }
             }
             return cids.compactMap { cid in
-                guard let data = volumes[cid] else { return nil }
+                guard let data = volume[cid] else { return nil }
                 return (cid: cid, data: data)
             }
         }
@@ -530,6 +543,43 @@ struct WantHaveProtocolTests {
         #expect(result[childCID] == nil)
         #expect(repAfter >= repBefore,
             "A root-only opaque Volume response with valid CIDs must not slash the peer")
+    }
+
+    @Test("valid but incomplete Volume response is neutral")
+    func testValidButIncompleteVolumeResponseIsNeutral() async throws {
+        let node = makeNode(publicKey: "requester-volume-missrt", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "volume-missing-root")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootCID = testCID(for: Data("missing root".utf8))
+        let childData = Data("valid child only".utf8)
+        let childCID = testCID(for: childData)
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if let request = requestedVolume(msg) {
+                    remote.send(.blocks(rootCID: request.rootCID, items: [(cid: childCID, data: childData)]))
+                }
+            }
+        }
+
+        let start = ContinuousClock.now
+        let result = await node.fetchVolume(rootCID: rootCID)
+        let elapsed = ContinuousClock.now - start
+        let repAfter = tally.reputation(for: peer)
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(800),
+            "Incomplete Volume response should exhaust the candidate immediately, not wait for timeout")
+        #expect(repAfter == repBefore,
+            "Valid bytes that do not complete the requested Volume must be neutral")
     }
 
     /// maxWantCandidates caps the broadcast fan-out when DHT has no providers.
