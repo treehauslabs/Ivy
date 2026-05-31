@@ -560,7 +560,7 @@ public actor Ivy {
         }
     }
 
-    private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) {
+    private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) async {
         let realID = PeerID(publicKey: publicKey)
 
         // Require a valid identity signature. An empty or missing signature allows
@@ -607,6 +607,7 @@ public actor Ivy {
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
                 Task { await self.creditLedger.establish(with: realID) }
             }
+            await movePeerHealthTracking(from: peer, to: realID)
             // Migrate chainPorts from old key to real key.
             peerChainPorts.removeValue(forKey: peer)
         }
@@ -778,7 +779,7 @@ public actor Ivy {
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
 
         case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let chainPorts, let signature):
-            handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, chainPorts: chainPorts, signature: signature, from: peer)
+            await handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, chainPorts: chainPorts, signature: signature, from: peer)
 
         case .dhtForward(let cid, let ttl, _, _, _):
             await handleDHTForward(cid: cid, ttl: ttl, from: peer)
@@ -1877,6 +1878,9 @@ public actor Ivy {
         let handler = PeerChannelHandler(connection: conn)
         _ = channel.pipeline.addHandler(handler)
         connections[unknownID] = conn
+        if healthMonitor != nil {
+            Task { await self.trackPeerHealth(unknownID) }
+        }
         delegate?.ivy(self, didConnect: unknownID)
         Task {
             sendIdentify(to: conn)
@@ -1895,6 +1899,37 @@ public actor Ivy {
             disconnect(peer)
         }
     }
+
+    private func trackPeerHealth(_ peer: PeerID) async {
+        await healthMonitor?.trackPeer(peer)
+    }
+
+    private func movePeerHealthTracking(from oldPeer: PeerID, to newPeer: PeerID) async {
+        await healthMonitor?.removePeer(oldPeer)
+        await healthMonitor?.trackPeer(newPeer)
+    }
+
+#if DEBUG
+    func installHealthMonitorForTesting() {
+        healthMonitor = PeerHealthMonitor(config: config.healthConfig, tally: tally, onStale: { _ in })
+    }
+
+    func trackHealthPeerForTesting(_ peer: PeerID) async {
+        await trackPeerHealth(peer)
+    }
+
+    func moveHealthPeerForTesting(from oldPeer: PeerID, to newPeer: PeerID) async {
+        await movePeerHealthTracking(from: oldPeer, to: newPeer)
+    }
+
+    func healthMonitorTracksPeerForTesting(_ peer: PeerID) async -> Bool {
+        await healthMonitor?.tracksPeer(peer) ?? false
+    }
+
+    func trackedHealthPeerCountForTesting() async -> Int {
+        await healthMonitor?.trackedPeerCount ?? 0
+    }
+#endif
 
     #if canImport(Network)
     private func startLocalDiscovery() {
