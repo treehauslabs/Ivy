@@ -153,11 +153,11 @@ When your application requests a CID not stored locally, the request cascades th
 4. Return the first valid response
 5. Record bandwidth and latency in Tally for future peer selection
 
-### Volume Fetch Completeness
+### Volume Fetching
 
-Volumes are fetched by query shape, not by peer. A full-volume fetch asks for the root CID. A subset fetch asks for the root CID plus the exact child CIDs needed by the current resolution pass.
+Volumes are fetched by root CID, not by peer. A Volume provider may be schema-blind: it can hold serialized entries for a Volume root without knowing whether those bytes encode a block, transaction, dictionary, array, or some application-specific Cashew structure.
 
-Hashing proves byte identity: `hash(bytes) == CID` tells us the bytes are honest for that CID. It does not prove that the response completed the requested Volume query. A `BLOCKS` response only satisfies a Volume fetch when every requested CID is present and every `(CID, bytes)` pair verifies. If a peer returns valid bytes but omits a requested CID, the fetch remains incomplete; Ivy does not credit or slash the peer for that claim. Invalid bytes for a claimed CID are slashable.
+For that reason, Ivy keeps Volume serving opaque. A `WANT` asks for the serialized Volume rooted at a CID, and the responder serves the full Volume it has for that root. Ivy verifies every returned `(CID, bytes)` pair with `hash(bytes) == CID` and requires the root entry to be present. Schema-aware path resolution stays above Ivy in Cashew/Lattice, where the data type is known. Invalid bytes for a claimed CID are slashable; `NOT_HAVE` remains a neutral claim.
 
 ### Relay-First DHT
 
@@ -335,7 +335,6 @@ Binary, length-prefixed messages over TCP:
 | `ANNOUNCE_VOLUME` | `0x36` | root CID + child CIDs + total size | ↔ |
 | `PUSH_VOLUME` | `0x37` | root CID + array of (CID, data) | ↔ |
 | `NOT_HAVE` | `0x3A` | root CID | ← |
-| `WANT_VOLUME` | `0x3B` | root CID + requested CIDs | → |
 
 ---
 

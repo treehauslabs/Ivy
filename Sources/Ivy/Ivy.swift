@@ -77,15 +77,11 @@ public actor Ivy {
     // (who to ask), never for demultiplexing responses (what was asked).
     // ─────────────────────────────────────────────────────────────────────────
     private struct PendingVolumeRequest {
-        let rootCID: String
-        let requiredCIDs: Set<String>
-        let wantsFullVolume: Bool
         var continuations: [CheckedContinuation<[String: Data], Never>]
         var candidates: Set<PeerID>
     }
 
     private var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
-    private var pendingVolumeRequestKeysByRoot: [String: Set<String>] = [:]
     private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
 
     public let creditLedger: CreditLineLedger
@@ -680,9 +676,6 @@ public actor Ivy {
         case .want(let rootCIDs):
             Task { await self.handleWant(rootCIDs: rootCIDs, from: peer) }
 
-        case .wantVolume(let rootCID, let cids):
-            Task { await self.handleWantVolume(rootCID: rootCID, cids: cids, from: peer) }
-
         case .pexRequest(let nonce):
             handlePEXRequest(nonce: nonce, from: peer)
 
@@ -800,38 +793,25 @@ public actor Ivy {
     private func handleWant(rootCIDs: [String], from peer: PeerID) async {
         guard tally.shouldAllow(peer: peer) else { return }
         for rootCID in rootCIDs {
-            await handleWantVolume(rootCID: rootCID, cids: [], from: peer, allowAlreadyChecked: true)
-        }
-    }
+            let items = await dataSource?.volumeData(for: rootCID, cids: []) ?? []
+            guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
+                fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
+                continue
+            }
 
-    private func handleWantVolume(
-        rootCID: String,
-        cids: [String],
-        from peer: PeerID,
-        allowAlreadyChecked: Bool = false
-    ) async {
-        guard allowAlreadyChecked || tally.shouldAllow(peer: peer) else { return }
-
-        let requested = normalizedVolumeCIDs(rootCID: rootCID, cids: cids)
-        let items = await dataSource?.volumeData(for: rootCID, cids: cids.isEmpty ? [] : Array(requested).sorted()) ?? []
-        let itemCIDs = Set(items.map(\.cid))
-        guard !items.isEmpty, itemCIDs.isSuperset(of: requested) else {
-            fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
-            return
-        }
-
-        fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
-        let totalBytes = items.reduce(0) { $0 + $1.data.count }
-        if totalBytes > 0 {
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
-            tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
-            await meterSent(peer: peer, bytes: totalBytes)
+            fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
+            let totalBytes = items.reduce(0) { $0 + $1.data.count }
+            if totalBytes > 0 {
+                let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
+                tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
+                await meterSent(peer: peer, bytes: totalBytes)
+            }
         }
     }
 
     private func handleBlocks(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
         guard !items.isEmpty else { return }
-        guard let requestKeys = pendingVolumeRequestKeysByRoot[rootCID], !requestKeys.isEmpty else { return }
+        guard pendingVolumeRequests[rootCID] != nil else { return }
 
         var result: [String: Data] = [:]
         for item in items {
@@ -853,36 +833,16 @@ public actor Ivy {
             haveSet.insert(cid)
         }
 
-        var completedAnyRequest = false
-        for key in Array(requestKeys) {
-            guard let request = pendingVolumeRequests[key] else { continue }
-            let returnedCIDs = Set(result.keys)
-            guard returnedCIDs.isSuperset(of: request.requiredCIDs) else {
-                markVolumeCandidateDone(key: key, peer: peer)
-                continue
-            }
-
-            completedAnyRequest = true
-            let resolved: [String: Data]
-            if request.wantsFullVolume {
-                resolved = result
-            } else {
-                resolved = result.filter { request.requiredCIDs.contains($0.key) }
-            }
-            resolveVolumeRequest(key: key, result: resolved)
+        var totalReceived = 0
+        for item in items {
+            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
+            tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
+            totalReceived += item.data.count
         }
-
-        if completedAnyRequest {
-            var totalReceived = 0
-            for item in items {
-                let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
-                tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
-                totalReceived += item.data.count
-            }
-            if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
-            tally.recordSuccess(peer: peer)
-            recordVolumeProvider(rootCID: rootCID, peer: peer)
-        }
+        if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
+        tally.recordSuccess(peer: peer)
+        recordVolumeProvider(rootCID: rootCID, peer: peer)
+        resolveVolumeRequest(key: rootCID, result: result)
     }
 
     // MARK: - Local Peers
@@ -1408,7 +1368,7 @@ public actor Ivy {
     public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
         let candidates = Array(connections.keys) + Array(localPeers.keys)
         guard !candidates.isEmpty else { return [:] }
-        return await fetchWithCandidates(rootCID: rootCID, childCIDs: [], wantsFullVolume: true, candidates: candidates)
+        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
     }
 
     public func fetchVolume(rootCID: String) async -> [String: Data] {
@@ -1417,7 +1377,7 @@ public actor Ivy {
             for item in entries { result[item.cid] = item.data }
             return result
         }
-        return await fetchVolumeFromNetwork(rootCID: rootCID, childCIDs: [], wantsFullVolume: true)
+        return await fetchVolumeFromNetwork(rootCID: rootCID)
     }
 
     /// Single-phase content fetch. Sends `want([rootCID])` to candidates and
@@ -1427,20 +1387,14 @@ public actor Ivy {
     ///
     /// Coalescing: if a waiter for this rootCID already exists, joins it without
     /// sending new messages. First responder wakes all coalesced waiters.
-    private func fetchVolumeFromNetwork(
-        rootCID: String,
-        childCIDs: [String],
-        wantsFullVolume: Bool
-    ) async -> [String: Data] {
-        let requiredCIDs = normalizedVolumeCIDs(rootCID: rootCID, cids: childCIDs)
-        let requestKey = volumeRequestKey(rootCID: rootCID, requiredCIDs: requiredCIDs, wantsFullVolume: wantsFullVolume)
+    private func fetchVolumeFromNetwork(rootCID: String) async -> [String: Data] {
         // Coalesce: join an existing in-flight request for the same content.
-        if let existing = pendingVolumeRequests[requestKey] {
+        if let existing = pendingVolumeRequests[rootCID] {
             guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
             return await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
                     guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
-                    pendingVolumeRequests[requestKey]?.continuations.append(continuation)
+                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
                 }
             } onCancel: {
                 Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
@@ -1481,33 +1435,21 @@ public actor Ivy {
         }
 
         guard !candidates.isEmpty else { return [:] }
-        return await fetchWithCandidates(
-            rootCID: rootCID,
-            childCIDs: childCIDs,
-            wantsFullVolume: wantsFullVolume,
-            candidates: candidates
-        )
+        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
     }
 
     /// Core send-and-wait: register continuation, send `want` to candidates,
     /// first `blocks` response wins. Re-checks coalescing inside the continuation
     /// to handle races where a concurrent fetch registered while we were in async
     /// candidate discovery (e.g., the DHT lookup in fetchVolumeFromNetwork).
-    private func fetchWithCandidates(
-        rootCID: String,
-        childCIDs: [String],
-        wantsFullVolume: Bool,
-        candidates: [PeerID]
-    ) async -> [String: Data] {
-        let requiredCIDs = normalizedVolumeCIDs(rootCID: rootCID, cids: childCIDs)
-        let requestKey = volumeRequestKey(rootCID: rootCID, requiredCIDs: requiredCIDs, wantsFullVolume: wantsFullVolume)
+    private func fetchWithCandidates(rootCID: String, candidates: [PeerID]) async -> [String: Data] {
         // Coalesce: join an existing in-flight request for this content.
-        if let existing = pendingVolumeRequests[requestKey] {
+        if let existing = pendingVolumeRequests[rootCID] {
             guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
             return await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
                     guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
-                    pendingVolumeRequests[requestKey]?.continuations.append(continuation)
+                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
                 }
             } onCancel: {
                 Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
@@ -1519,21 +1461,15 @@ public actor Ivy {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
                 // Re-check: a concurrent fetch may have registered while we were in async work.
-                if pendingVolumeRequests[requestKey] != nil {
-                    pendingVolumeRequests[requestKey]?.continuations.append(continuation)
+                if pendingVolumeRequests[rootCID] != nil {
+                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
                     return
                 }
-                pendingVolumeRequests[requestKey] = PendingVolumeRequest(
-                    rootCID: rootCID,
-                    requiredCIDs: requiredCIDs,
-                    wantsFullVolume: wantsFullVolume,
+                pendingVolumeRequests[rootCID] = PendingVolumeRequest(
                     continuations: [continuation],
                     candidates: Set(candidates)
                 )
-                pendingVolumeRequestKeysByRoot[rootCID, default: []].insert(requestKey)
-                let message: Message = wantsFullVolume
-                    ? .want(rootCIDs: [rootCID])
-                    : .wantVolume(rootCID: rootCID, cids: Array(requiredCIDs).sorted())
+                let message = Message.want(rootCIDs: [rootCID])
                 let payload = message.serialize()
                 for peer in candidates {
                     if let conn = connections[peer] {
@@ -1544,7 +1480,7 @@ public actor Ivy {
                 }
                 Task {
                     try? await Task.sleep(for: self.config.requestTimeout)
-                    self.resolveVolumeRequest(key: requestKey, result: [:])
+                    self.resolveVolumeRequest(key: rootCID, result: [:])
                 }
             }
         } onCancel: {
@@ -1579,9 +1515,12 @@ public actor Ivy {
             }
         }
         guard !missing.isEmpty else { return result }
-        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID, childCIDs: missing, wantsFullVolume: false)
-        for (cid, data) in networkResult {
-            result[cid] = data
+        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID)
+        if let data = networkResult[rootCID] {
+            result[rootCID] = data
+        }
+        for cid in missing {
+            if let data = networkResult[cid] { result[cid] = data }
         }
         return result
     }
@@ -1591,9 +1530,7 @@ public actor Ivy {
     /// cases where the peer's PeerID changed (key migration) after the request
     /// was registered.
     func resolveVolumeRequestsForRoot(rootCID: String) {
-        for key in pendingVolumeRequestKeysByRoot[rootCID] ?? [] {
-            resolveVolumeRequest(key: key, result: [:])
-        }
+        resolveVolumeRequest(key: rootCID, result: [:])
     }
 
     /// Returns true if a new continuation can be appended to `pendingRequests[cid]`.
@@ -1606,39 +1543,18 @@ public actor Ivy {
         return pendingRequests.count < config.maxPendingRequests
     }
 
-    private func normalizedVolumeCIDs(rootCID: String, cids: [String]) -> Set<String> {
-        var required = Set(cids.filter { !$0.isEmpty })
-        required.insert(rootCID)
-        return required
-    }
-
-    private func volumeRequestKey(rootCID: String, requiredCIDs: Set<String>, wantsFullVolume: Bool) -> String {
-        let mode = wantsFullVolume ? "full" : "subset"
-        return ([rootCID, mode] + requiredCIDs.sorted()).joined(separator: "\u{1F}")
-    }
-
     private func markVolumeCandidateDone(rootCID: String, peer: PeerID) {
-        for key in Array(pendingVolumeRequestKeysByRoot[rootCID] ?? []) {
-            markVolumeCandidateDone(key: key, peer: peer)
-        }
-    }
-
-    private func markVolumeCandidateDone(key: String, peer: PeerID) {
-        guard var request = pendingVolumeRequests[key] else { return }
+        guard var request = pendingVolumeRequests[rootCID] else { return }
         request.candidates.remove(peer)
         if request.candidates.isEmpty {
-            resolveVolumeRequest(key: key, result: [:])
+            resolveVolumeRequest(key: rootCID, result: [:])
         } else {
-            pendingVolumeRequests[key] = request
+            pendingVolumeRequests[rootCID] = request
         }
     }
 
     private func resolveVolumeRequest(key: String, result: [String: Data]) {
         guard let request = pendingVolumeRequests.removeValue(forKey: key) else { return }
-        pendingVolumeRequestKeysByRoot[request.rootCID]?.remove(key)
-        if pendingVolumeRequestKeysByRoot[request.rootCID]?.isEmpty == true {
-            pendingVolumeRequestKeysByRoot.removeValue(forKey: request.rootCID)
-        }
         for cont in request.continuations {
             cont.resume(returning: result)
         }
@@ -1745,7 +1661,6 @@ public actor Ivy {
         for (key, _) in pendingVolumeRequests {
             resolveVolumeRequest(key: key, result: [:])
         }
-        pendingVolumeRequestKeysByRoot.removeAll()
 
         for (cid, _) in pendingFindPins {
             resolvePendingFindPins(rootCID: cid, peers: [])

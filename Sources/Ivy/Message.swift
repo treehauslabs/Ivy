@@ -13,7 +13,6 @@ public enum Message: Sendable {
     case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
 
     case want(rootCIDs: [String])
-    case wantVolume(rootCID: String, cids: [String])
 
     case pexRequest(nonce: UInt64)
     case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
@@ -54,7 +53,6 @@ public enum Message: Sendable {
         case dhtForward = 16
         // tags 21-31 removed (chain-specific messages)
         case want = 26
-        case wantVolume = 59
         // tags 35-36 removed (miningChallenge, miningChallengeSolution)
         case pexRequest = 37
         case pexResponse = 38
@@ -93,8 +91,6 @@ public enum Message: Sendable {
         case .dontHave(let cid): return 3 + cid.utf8.count
         case .announceBlock(let cid): return 3 + cid.utf8.count
         case .want(let rootCIDs): return 3 + rootCIDs.reduce(0) { $0 + 2 + $1.utf8.count }
-        case .wantVolume(let rootCID, let cids):
-            return 5 + rootCID.utf8.count + cids.reduce(0) { $0 + 2 + $1.utf8.count }
         case .dhtForward(let cid, _, _, _, _): return 4 + cid.utf8.count
         case .blocks(let rootCID, let items):
             return 5 + rootCID.utf8.count + items.reduce(0) { $0 + 6 + $1.cid.utf8.count + $1.data.count }
@@ -166,13 +162,6 @@ public enum Message: Sendable {
             buf.append(Tag.want.rawValue)
             buf.appendUInt16(UInt16(rootCIDs.count))
             for cid in rootCIDs {
-                buf.appendLengthPrefixedString(cid)
-            }
-        case .wantVolume(let rootCID, let cids):
-            buf.append(Tag.wantVolume.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(cids.count))
-            for cid in cids {
                 buf.appendLengthPrefixedString(cid)
             }
         case .pexRequest(let nonce):
@@ -325,16 +314,6 @@ public enum Message: Sendable {
                 cids.append(cid)
             }
             return .want(rootCIDs: cids)
-        case .wantVolume:
-            guard let rootCID = reader.readString(),
-                  let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
-            var cids = [String]()
-            cids.reserveCapacity(Int(count))
-            for _ in 0..<count {
-                guard let cid = reader.readString() else { return nil }
-                cids.append(cid)
-            }
-            return .wantVolume(rootCID: rootCID, cids: cids)
         case .pexRequest:
             guard let nonce = reader.readUInt64() else { return nil }
             return .pexRequest(nonce: nonce)
