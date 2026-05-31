@@ -10,27 +10,47 @@ import Crypto
 /// message framing, and end-to-end data flow over real network connections.
 
 private nonisolated(unsafe) var _nextPort: UInt16 = UInt16(ProcessInfo.processInfo.processIdentifier % 10000) + 30000
-private func nextPort() -> UInt16 { _nextPort += 1; return _nextPort }
+private nonisolated(unsafe) var _nextKeyIndex: UInt64 = 0
+private nonisolated(unsafe) var _signingKeysByPublicKey: [String: Data] = [:]
+private let _tcpHarnessLock = NSLock()
+
+private func nextPort() -> UInt16 {
+    _tcpHarnessLock.lock()
+    defer { _tcpHarnessLock.unlock() }
+    _nextPort += 1
+    return _nextPort
+}
 
 private func generateKey() -> (publicKey: String, privateKey: String) {
-    let key = P256.Signing.PrivateKey()
-    let pub = key.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
-    let priv = key.rawRepresentation.map { String(format: "%02x", $0) }.joined()
-    return (pub, priv)
+    _tcpHarnessLock.lock()
+    _nextKeyIndex += 1
+    let index = _nextKeyIndex
+    _tcpHarnessLock.unlock()
+
+    let key = deterministicCurve25519Key(label: "tcp-integration-\(index)")
+    let privateKey = key.signingKey.map { String(format: "%02x", $0) }.joined()
+    return (key.publicKey, privateKey)
 }
 
 private func makeConfig(port: UInt16, publicKey: String, bootstrapPeers: [PeerEndpoint] = []) -> IvyConfig {
-    IvyConfig(
+    _tcpHarnessLock.lock()
+    let signingKey = _signingKeysByPublicKey[publicKey] ?? Data()
+    _tcpHarnessLock.unlock()
+
+    return IvyConfig(
         publicKey: publicKey,
         listenPort: port,
         bootstrapPeers: bootstrapPeers,
         enableLocalDiscovery: false,
+        requestTimeout: .seconds(3),
+        relayTimeout: .milliseconds(500),
         stunServers: [],
-        enablePEX: false
+        enablePEX: false,
+        signingKey: signingKey
     )
 }
 
-@Suite("TCP Integration")
+@Suite("TCP Integration", .serialized)
 struct TCPIntegrationTests {
 
     @Test("Two nodes connect over real TCP")
@@ -57,6 +77,7 @@ struct TCPIntegrationTests {
         let peers2 = await ivy2.directPeerCount
 
         // ivy2 connected to ivy1 outbound; ivy1 accepted inbound
+        #expect(peers1 >= 1, "Node 1 should have at least 1 peer")
         #expect(peers2 >= 1, "Node 2 should have at least 1 peer")
 
         await ivy1.stop()
@@ -778,7 +799,7 @@ struct TCPIntegrationTests {
 
 // MARK: - SOTA Network Property Tests (inspired by Bitcoin Core, GossipSub, CometBFT)
 
-@Suite("Network Robustness")
+@Suite("Network Robustness", .serialized)
 struct NetworkRobustnessTests {
 
     @Test("Invalid/malformed messages don't crash the node")
@@ -1103,10 +1124,26 @@ private extension Ivy {
     }
 }
 
-private func makeCurve25519Key() -> (publicKey: String, signingKey: Data) {
-    let priv = Curve25519.Signing.PrivateKey()
+private func deterministicCurve25519Key(label: String) -> (publicKey: String, signingKey: Data) {
+    let seed = Data(SHA256.hash(data: Data(label.utf8)))
+    let priv = try! Curve25519.Signing.PrivateKey(rawRepresentation: seed)
     let pubHex = priv.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
-    return (pubHex, priv.rawRepresentation)
+    let signingKey = priv.rawRepresentation
+
+    _tcpHarnessLock.lock()
+    _signingKeysByPublicKey[pubHex] = signingKey
+    _tcpHarnessLock.unlock()
+
+    return (pubHex, signingKey)
+}
+
+private func makeCurve25519Key() -> (publicKey: String, signingKey: Data) {
+    _tcpHarnessLock.lock()
+    _nextKeyIndex += 1
+    let index = _nextKeyIndex
+    _tcpHarnessLock.unlock()
+
+    return deterministicCurve25519Key(label: "node-record-tcp-\(index)")
 }
 
 private func makeSigningConfig(port: UInt16, publicKey: String, signingKey: Data, bootstrapPeers: [PeerEndpoint] = []) -> IvyConfig {
@@ -1115,13 +1152,15 @@ private func makeSigningConfig(port: UInt16, publicKey: String, signingKey: Data
         listenPort: port,
         bootstrapPeers: bootstrapPeers,
         enableLocalDiscovery: false,
+        requestTimeout: .seconds(3),
+        relayTimeout: .milliseconds(500),
         stunServers: [],
         enablePEX: false,
         signingKey: signingKey
     )
 }
 
-@Suite("NodeRecord TCP Integration")
+@Suite("NodeRecord TCP Integration", .serialized)
 struct NodeRecordTCPTests {
 
     @Test("NodeRecord exchanged on connect via identify handshake")
