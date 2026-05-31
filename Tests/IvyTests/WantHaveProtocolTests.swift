@@ -30,24 +30,52 @@ final class PeerMessageLog: @unchecked Sendable {
     }
 }
 
+private func requestedVolume(_ message: Message) -> (rootCID: String, cids: [String])? {
+    switch message {
+    case .want(let cids):
+        guard let rootCID = cids.first else { return nil }
+        return (rootCID, [])
+    default:
+        return nil
+    }
+}
+
 // MARK: - Mock data source
 
 final class MockVolumeDataSource: IvyDataSource, @unchecked Sendable {
     private let lock = NSLock()
-    private var volumes: [String: Data] = [:]
+    private var blocks: [String: Data] = [:]
+    private var volumes: [String: [String: Data]] = [:]
 
     func store(rootCID: String, data: Data) {
-        lock.withLock { volumes[rootCID] = data }
+        store(rootCID: rootCID, entries: [(cid: rootCID, data: data)])
+    }
+
+    func store(rootCID: String, entries: [(cid: String, data: Data)]) {
+        lock.withLock {
+            var volume: [String: Data] = [:]
+            for entry in entries {
+                blocks[entry.cid] = entry.data
+                volume[entry.cid] = entry.data
+            }
+            volumes[rootCID] = volume
+        }
     }
 
     func data(for cid: String) async -> Data? {
-        lock.withLock { volumes[cid] }
+        lock.withLock { blocks[cid] }
     }
 
     func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)] {
         lock.withLock {
-            guard let d = volumes[rootCID] else { return [] }
-            return [(cid: rootCID, data: d)]
+            guard let volume = volumes[rootCID] else { return [] }
+            if cids.isEmpty {
+                return volume.map { (cid: $0.key, data: $0.value) }
+            }
+            return cids.compactMap { cid in
+                guard let data = volume[cid] else { return nil }
+                return (cid: cid, data: data)
+            }
         }
     }
 
@@ -294,6 +322,41 @@ struct WantHaveProtocolTests {
             "Honest peer's data must win — Byzantine empty-blocks must not resolve waiters with [:]")
     }
 
+    @Test("single-candidate empty blocks resolves fetch immediately")
+    func testSingleCandidateEmptyBlocksResolvesImmediately() async throws {
+        let node = makeNode(publicKey: "requester-empty-blk", requestTimeout: .seconds(10))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "empty-blocks-peer0")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootCID = "bafyrei-empty-blocks"
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if case .want(let cids) = msg {
+                    remote.send(.blocks(rootCID: cids[0], items: []))
+                }
+            }
+        }
+
+        let start = ContinuousClock.now
+        let result = await node.fetchVolumeFromAllPeers(rootCID: rootCID)
+        let elapsed = ContinuousClock.now - start
+        let repAfter = tally.reputation(for: peer)
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(800),
+            "Empty BLOCKS should exhaust the candidate immediately, not wait requestTimeout=10s")
+        #expect(repAfter == repBefore,
+            "Empty BLOCKS is an incomplete response, not slashable invalid content")
+    }
+
     /// When the single candidate sends notHave, the fetch must resolve immediately
     /// without waiting for requestTimeout. Gap 1 fix preserved.
     @Test("single-candidate notHave resolves fetch immediately")
@@ -412,9 +475,9 @@ struct WantHaveProtocolTests {
             "Hit peer must deliver data even though miss peer sent notHave first")
     }
 
-    /// A peer that consistently sends notHave must accumulate tally failures.
-    @Test("consecutive notHave degrades peer reputation in tally")
-    func testConsecutiveNotHavesDegradeTally() async throws {
+    /// `notHave` is a claim about missing data, not proof of invalid behavior.
+    @Test("consecutive notHave does not change peer reputation")
+    func testConsecutiveNotHavesDoNotChangeTally() async throws {
         let node = makeNode(publicKey: "requester-tally-nth", requestTimeout: .milliseconds(200))
         let nodeID = await node.localID
 
@@ -440,8 +503,118 @@ struct WantHaveProtocolTests {
         }
 
         let repAfter = tally.reputation(for: peer)
-        #expect(repAfter <= repBefore,
-            "Consecutive notHave must not improve reputation — before=\(repBefore) after=\(repAfter)")
+        #expect(repAfter == repBefore,
+            "Consecutive notHave must not credit or slash — before=\(repBefore) after=\(repAfter)")
+    }
+
+    @Test("child CID fetch uses root Volume request and accepts full Volume")
+    func testChildFetchUsesRootVolumeRequest() async throws {
+        let node = makeNode(publicKey: "requester-root-shape", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let completePeer = PeerID(publicKey: "root-volume-peer00")
+        let (cLocal, cRemote) = LocalPeerConnection.pair(localID: nodeID, remoteID: completePeer)
+        await node.registerLocalPeer(cLocal, as: completePeer)
+        await node.addToRouter(completePeer, endpoint: PeerEndpoint(publicKey: completePeer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootData = Data("root volume root".utf8)
+        let rootCID = testCID(for: rootData)
+        let childData = Data("root volume child".utf8)
+        let childCID = testCID(for: childData)
+        let log = PeerMessageLog()
+
+        Task {
+            for await msg in cRemote.messages {
+                log.record(msg)
+                if let request = requestedVolume(msg) {
+                    cRemote.send(.blocks(
+                        rootCID: request.rootCID,
+                        items: [
+                            (cid: rootCID, data: rootData),
+                            (cid: childCID, data: childData),
+                        ]
+                    ))
+                }
+            }
+        }
+
+        let result = await node.fetchVolume(rootCID: rootCID, childCIDs: [childCID])
+
+        #expect(result[rootCID] == rootData)
+        #expect(result[childCID] == childData)
+        #expect(log.wantCount(for: rootCID) == 1, "Child fetch should request the Volume root")
+    }
+
+    @Test("root-only valid Volume response is treated as opaque Volume")
+    func testRootOnlyValidVolumeResponseIsOpaque() async throws {
+        let node = makeNode(publicKey: "requester-volume-noslash", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "volume-noslash-peer")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootData = Data("volume noslash root".utf8)
+        let rootCID = testCID(for: rootData)
+        let childCID = testCID(for: Data("volume noslash child".utf8))
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if let request = requestedVolume(msg) {
+                    remote.send(.blocks(rootCID: request.rootCID, items: [(cid: rootCID, data: rootData)]))
+                }
+            }
+        }
+
+        let result = await node.fetchVolume(rootCID: rootCID, childCIDs: [childCID])
+        let repAfter = tally.reputation(for: peer)
+
+        #expect(result[rootCID] == rootData)
+        #expect(result[childCID] == nil)
+        #expect(repAfter >= repBefore,
+            "A root-only opaque Volume response with valid CIDs must not slash the peer")
+    }
+
+    @Test("valid but incomplete Volume response is neutral")
+    func testValidButIncompleteVolumeResponseIsNeutral() async throws {
+        let node = makeNode(publicKey: "requester-volume-missrt", requestTimeout: .seconds(5))
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "volume-missing-root")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
+        try await Task.sleep(for: .milliseconds(20))
+
+        let rootCID = testCID(for: Data("missing root".utf8))
+        let childData = Data("valid child only".utf8)
+        let childCID = testCID(for: childData)
+        let tally = await node.tally
+        let repBefore = tally.reputation(for: peer)
+
+        Task {
+            for await msg in remote.messages {
+                if let request = requestedVolume(msg) {
+                    remote.send(.blocks(rootCID: request.rootCID, items: [(cid: childCID, data: childData)]))
+                }
+            }
+        }
+
+        let start = ContinuousClock.now
+        let result = await node.fetchVolume(rootCID: rootCID)
+        let elapsed = ContinuousClock.now - start
+        let repAfter = tally.reputation(for: peer)
+
+        #expect(result.isEmpty)
+        #expect(elapsed < .milliseconds(800),
+            "Incomplete Volume response should exhaust the candidate immediately, not wait for timeout")
+        #expect(repAfter == repBefore,
+            "Valid bytes that do not complete the requested Volume must be neutral")
     }
 
     /// maxWantCandidates caps the broadcast fan-out when DHT has no providers.
