@@ -633,16 +633,15 @@ public actor Ivy {
             tally.recordFailure(peer: peer)
 
         case .findNode(let target, _):
+            guard tally.shouldAllow(peer: peer) else { return }
             let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
             let endpoints = closest.map { $0.endpoint }
             fireToPeer(peer, .neighbors(endpoints))
 
         case .neighbors(let endpoints):
+            guard tally.shouldAllow(peer: peer) else { return }
             for ep in endpoints {
-                let newPeer = PeerID(publicKey: ep.publicKey)
-                if connections[newPeer] == nil && newPeer != localID {
-                    router.addPeer(newPeer, endpoint: ep, tally: tally)
-                }
+                addDiscoveredPeer(ep, source: "neighbors", from: peer)
             }
 
         case .announceBlock(let cid):
@@ -912,11 +911,9 @@ public actor Ivy {
         }
 
         for ep in discovered {
-            let peer = PeerID(publicKey: ep.publicKey)
-            guard peer != localID,
-                  connections[peer] == nil else { continue }
-            router.addPeer(peer, endpoint: ep, tally: tally)
-            Task { try? await connect(to: ep) }
+            if addDiscoveredPeer(ep, source: "pex", from: target) != nil {
+                Task { try? await connect(to: ep) }
+            }
         }
     }
 
@@ -941,17 +938,69 @@ public actor Ivy {
     }
 
     private func handlePEXResponse(nonce: UInt64, peers: [PeerEndpoint], from peer: PeerID) {
-        tally.recordSuccess(peer: peer)
-        if let cont = pendingPEX.removeValue(forKey: nonce) {
-            cont.resume(returning: peers)
+        guard let cont = pendingPEX.removeValue(forKey: nonce) else {
+            config.logger.warning("Ignoring unsolicited PEX response from \(peer.publicKey.prefix(16))…")
+            return
+        }
+
+        let accepted = peers.filter { isAcceptableDiscoveredEndpoint($0, source: "pex", from: peer) }
+        if accepted.count == peers.count {
+            tally.recordSuccess(peer: peer)
         } else {
-            for ep in peers {
-                let newPeer = PeerID(publicKey: ep.publicKey)
-                if connections[newPeer] == nil && newPeer != localID {
-                    router.addPeer(newPeer, endpoint: ep, tally: tally)
-                }
+            tally.recordFailure(peer: peer)
+        }
+        cont.resume(returning: accepted)
+    }
+
+#if DEBUG
+    func receivePEXResponseForTesting(nonce: UInt64, peers: [PeerEndpoint], from peer: PeerID) async -> [PeerEndpoint] {
+        await withCheckedContinuation { cont in
+            pendingPEX[nonce] = cont
+            handlePEXResponse(nonce: nonce, peers: peers, from: peer)
+        }
+    }
+#endif
+
+    @discardableResult
+    private func addDiscoveredPeer(_ endpoint: PeerEndpoint, source: String, from peer: PeerID) -> PeerID? {
+        guard isAcceptableDiscoveredEndpoint(endpoint, source: source, from: peer) else {
+            return nil
+        }
+
+        let discovered = PeerID(publicKey: endpoint.publicKey)
+        guard connections[discovered] == nil else { return nil }
+        router.addPeer(discovered, endpoint: endpoint, tally: tally)
+        return discovered
+    }
+
+    private func isAcceptableDiscoveredEndpoint(_ endpoint: PeerEndpoint, source: String, from peer: PeerID) -> Bool {
+        guard !endpoint.publicKey.isEmpty else {
+            config.logger.warning("Rejecting \(source) endpoint from \(peer.publicKey.prefix(16))…: empty public key")
+            return false
+        }
+
+        let discovered = PeerID(publicKey: endpoint.publicKey)
+        guard discovered != localID else { return false }
+
+        let host = endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !host.isEmpty,
+              host != "0.0.0.0",
+              host != "::",
+              host != "unknown",
+              endpoint.port != 0 else {
+            config.logger.warning("Rejecting \(source) endpoint \(endpoint.publicKey.prefix(16))… from \(peer.publicKey.prefix(16))…: unusable address")
+            return false
+        }
+
+        if config.minPeerKeyBits > 0 {
+            let bits = KeyDifficulty.trailingZeroBits(of: endpoint.publicKey)
+            guard bits >= config.minPeerKeyBits else {
+                config.logger.warning("Rejecting \(source) endpoint \(endpoint.publicKey.prefix(16))… from \(peer.publicKey.prefix(16))…: \(bits) key PoW bits, need \(config.minPeerKeyBits)")
+                return false
             }
         }
+
+        return true
     }
 
     // MARK: - Pin Announcements
