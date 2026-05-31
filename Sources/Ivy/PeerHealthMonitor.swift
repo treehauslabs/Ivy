@@ -94,6 +94,10 @@ actor PeerHealthMonitor {
 
     var trackedPeerCount: Int { peers.count }
 
+    func tracksPeer(_ peer: PeerID) -> Bool {
+        peers[peer] != nil
+    }
+
     private func checkAndPing(sendPing: @Sendable (PeerID, UInt64) async -> Void) async -> [PeerID] {
         var stale: [PeerID] = []
 
