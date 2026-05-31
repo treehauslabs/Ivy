@@ -105,17 +105,18 @@ struct WantHaveProtocolTests {
         await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
+        let responseData = Data("data".utf8)
+        let rootCID = testCID(for: responseData)
         let log = PeerMessageLog()
         Task {
             for await msg in remote.messages {
                 log.record(msg)
                 if case .want(let cids) = msg {
-                    remote.send(.blocks(rootCID: cids[0], items: [(cid: cids[0], data: Data("data".utf8))]))
+                    remote.send(.blocks(rootCID: cids[0], items: [(cid: cids[0], data: responseData)]))
                 }
             }
         }
 
-        let rootCID = "bafyrei-want-sent"
         _ = await node.fetchVolumeFromAllPeers(rootCID: rootCID)
 
         #expect(log.received(want: rootCID), "Peer must receive a want message")
@@ -138,8 +139,8 @@ struct WantHaveProtocolTests {
         await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
-        let rootCID = "bafyrei-coalesce-root"
         let expectedData = Data("shared content".utf8)
+        let rootCID = testCID(for: expectedData)
         let log = PeerMessageLog()
 
         Task {
@@ -179,8 +180,8 @@ struct WantHaveProtocolTests {
         await node.addToRouter(slowPeer, endpoint: PeerEndpoint(publicKey: slowPeer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
-        let rootCID = "bafyrei-firstwins-rr"
         let fastData = Data("fast wins".utf8)
+        let rootCID = testCID(for: fastData)
 
         Task {
             for await msg in fRemote.messages {
@@ -220,8 +221,8 @@ struct WantHaveProtocolTests {
         await node.addToRouter(slowPeer, endpoint: PeerEndpoint(publicKey: slowPeer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
-        let rootCID = "bafyrei-latency-test"
         let fastData = Data("fast data".utf8)
+        let rootCID = testCID(for: fastData)
 
         Task {
             for await msg in fRemote.messages {
@@ -267,8 +268,8 @@ struct WantHaveProtocolTests {
         await node.addToRouter(honestPeer, endpoint: PeerEndpoint(publicKey: honestPeer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
-        let rootCID = "bafyrei-byzantine-rr"
         let honestData = Data("real content".utf8)
+        let rootCID = testCID(for: honestData)
 
         // Byzantine: immediately sends empty blocks (claims HAVE, delivers nothing)
         Task {
@@ -385,8 +386,8 @@ struct WantHaveProtocolTests {
         await node.addToRouter(hitPeer, endpoint: PeerEndpoint(publicKey: hitPeer.publicKey, host: "local", port: 0))
         try await Task.sleep(for: .milliseconds(20))
 
-        let rootCID = "bafyrei-partial-nth"
         let hitData = Data("delivered by hit peer".utf8)
+        let rootCID = testCID(for: hitData)
 
         // Miss peer: notHave immediately
         Task {
@@ -494,8 +495,8 @@ struct WantHaveProtocolTests {
         let nodeID = await node.localID
 
         let ds = MockVolumeDataSource()
-        let rootCID = "bafyrei-handleWant-v"
         let blockData = Data("block content here".utf8)
+        let rootCID = testCID(for: blockData)
         ds.store(rootCID: rootCID, data: blockData)
         await node.setDataSource(ds)
 
@@ -570,8 +571,9 @@ struct WantHaveProtocolTests {
         let nodeID = await node.localID
 
         let ds = MockVolumeDataSource()
-        let rootCID = "bafyrei-tally-block"
-        ds.store(rootCID: rootCID, data: Data("data".utf8))
+        let storedData = Data("data".utf8)
+        let rootCID = testCID(for: storedData)
+        ds.store(rootCID: rootCID, data: storedData)
         await node.setDataSource(ds)
 
         let tally = await node.tally

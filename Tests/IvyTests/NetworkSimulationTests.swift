@@ -190,7 +190,7 @@ struct EndToEndProtocolTests {
 
         // C has the content in its haveSet
         let testData = Data("end-to-end content".utf8)
-        let cid = "QmE2E"
+        let cid = testCID(for: testData)
         await nodeC.publishBlock(cid: cid, data: testData)
 
         // At minimum: verify the routing table allows B to reach C

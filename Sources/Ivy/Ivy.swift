@@ -630,8 +630,14 @@ public actor Ivy {
         case .block(let cid, let data):
             let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
             tally.recordReceived(peer: peer, bytes: data.count, cpl: cpl)
-            tally.recordSuccess(peer: peer)
             await meterReceived(peer: peer, bytes: data.count)
+
+            guard ContentAddressVerifier.data(data, matches: cid) else {
+                tally.recordFailure(peer: peer)
+                break
+            }
+
+            tally.recordSuccess(peer: peer)
 
             if haveSet.contains(cid) {
                 resolvePending(cid: cid, data: data)
@@ -722,7 +728,6 @@ public actor Ivy {
                 tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
                 totalReceived += item.data.count
             }
-            if !items.isEmpty { tally.recordSuccess(peer: peer) }
             if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
 
             // Resolve pending volume requests keyed by rootCID (content-addressing
@@ -733,10 +738,22 @@ public actor Ivy {
             // honest peer may still respond before the timeout.
             if !items.isEmpty, pendingVolumeRequests[rootCID] != nil {
                 var result: [String: Data] = [:]
+                var allItemsVerified = true
                 for item in items {
+                    guard ContentAddressVerifier.data(item.data, matches: item.cid) else {
+                        allItemsVerified = false
+                        break
+                    }
                     result[item.cid] = item.data
-                    haveSet.insert(item.cid)
                 }
+                guard allItemsVerified, !result.isEmpty, result[rootCID] != nil else {
+                    tally.recordFailure(peer: peer)
+                    break
+                }
+                for cid in result.keys {
+                    haveSet.insert(cid)
+                }
+                tally.recordSuccess(peer: peer)
                 recordVolumeProvider(rootCID: rootCID, peer: peer)
                 pendingWantCandidates.removeValue(forKey: rootCID)
                 resolveVolumeRequest(key: rootCID, result: result)
@@ -1275,15 +1292,27 @@ public actor Ivy {
 
         let dedupKey = "vol-\(rootCID)"
         guard !haveSet.contains(dedupKey) else { return }
-        haveSet.insert(dedupKey)
 
         let childCIDs = items.map(\.cid)
         var totalSize: UInt64 = 0
+        var verifiedCIDs: [String] = []
 
+        guard items.contains(where: { $0.cid == rootCID }) else {
+            tally.recordFailure(peer: peer)
+            return
+        }
         for (cid, data) in items {
-            haveSet.insert(cid)
+            guard ContentAddressVerifier.data(data, matches: cid) else {
+                tally.recordFailure(peer: peer)
+                return
+            }
+            verifiedCIDs.append(cid)
             totalSize += UInt64(data.count)
         }
+        for cid in verifiedCIDs {
+            haveSet.insert(cid)
+        }
+        haveSet.insert(dedupKey)
         recordVolumeProvider(rootCID: rootCID, peer: peer)
 
         let totalBytes = items.reduce(0) { $0 + $1.data.count }
