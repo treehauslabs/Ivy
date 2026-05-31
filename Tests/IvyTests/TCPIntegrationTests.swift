@@ -116,13 +116,14 @@ struct TCPIntegrationTests {
 
         // Send block data directly to the connected peer
         let testData = Data("hello-block-data".utf8)
+        let testCID = testCID(for: testData)
         let peer2 = PeerID(publicKey: kp2.publicKey)
-        await ivy1.fireToPeer(peer2, .block(cid: "block-with-data", data: testData))
+        await ivy1.fireToPeer(peer2, .block(cid: testCID, data: testData))
         try await Task.sleep(for: .seconds(1))
 
         let blocks = await collector.blocks
-        #expect(blocks["block-with-data"] != nil, "Block data should reach Node 2")
-        #expect(blocks["block-with-data"] == testData, "Block data should be intact")
+        #expect(blocks[testCID] != nil, "Block data should reach Node 2")
+        #expect(blocks[testCID] == testData, "Block data should be intact")
 
         await ivy1.stop()
         await ivy2.stop()
@@ -173,8 +174,8 @@ struct TCPIntegrationTests {
         let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         // Store data on Node 1 via dataSource
-        let testCID = "test-content-for-retrieval"
         let testData = Data("the-actual-content-bytes".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -318,8 +319,8 @@ struct TCPIntegrationTests {
         let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         // Store data only on node 1 via dataSource
-        let testCID = "relay-tcp-content"
         let testData = Data("only-on-node-1".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -401,7 +402,7 @@ struct TCPIntegrationTests {
 
         // Store 1MB of data on node 1 via dataSource
         let largeData = Data(repeating: 0xAB, count: 1_048_576)
-        let largeCID = "large-data-1mb"
+        let largeCID = testCID(for: largeData)
         let ds1 = DictDataSource()
         ds1[largeCID] = largeData
         await ivy1.setDataSource(ds1)
@@ -437,9 +438,11 @@ struct TCPIntegrationTests {
 
         // Store 10 different CIDs on node 1 via dataSource
         let ds1 = DictDataSource()
+        var cids: [Int: String] = [:]
         for i in 0..<10 {
-            let cid = "concurrent-\(i)"
             let data = Data("data-\(i)".utf8)
+            let cid = testCID(for: data)
+            cids[i] = cid
             ds1[cid] = data
             await ivy1.publishBlock(cid: cid, data: data)
         }
@@ -453,10 +456,12 @@ struct TCPIntegrationTests {
         let target = PeerID(publicKey: kp1.publicKey)
 
         // Request all 10 concurrently
+        let requestCIDs = cids
         let results = await withTaskGroup(of: (Int, Data?).self) { group in
             for i in 0..<10 {
                 group.addTask {
-                    let data = await ivy2.get(cid: "concurrent-\(i)", target: target)
+                    guard let cid = requestCIDs[i] else { return (i, nil) }
+                    let data = await ivy2.get(cid: cid, target: target)
                     return (i, data)
                 }
             }
@@ -491,8 +496,8 @@ struct TCPIntegrationTests {
         let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         // Data only on node 1 via dataSource
-        let testCID = "cache-test-data"
         let testData = Data("should-be-cached-on-relay".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -538,8 +543,8 @@ struct TCPIntegrationTests {
         let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
 
         // Node 1 has some data via dataSource
-        let testCID = "pin-request-cid"
         let testData = Data("pinned-content".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -591,8 +596,8 @@ struct TCPIntegrationTests {
         let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         // Data only on node 1 via dataSource
-        let testCID = "relay-revenue-cid"
         let testData = Data("relay-revenue-content".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -692,8 +697,8 @@ struct TCPIntegrationTests {
         let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
 
         // Data only on node 1 via dataSource
-        let testCID = "relay-test-data"
         let testData = Data("relay-gated-content".utf8)
+        let testCID = testCID(for: testData)
         let ds1 = DictDataSource()
         ds1[testCID] = testData
         await ivy1.setDataSource(ds1)
@@ -944,9 +949,11 @@ struct NetworkRobustnessTests {
         // Store 5 different 10KB payloads on node 1 via dataSource
         let ds1 = DictDataSource()
         var expected: [String: Data] = [:]
+        var cids: [String] = []
         for i in 0..<5 {
-            let cid = "large-vol-\(i)"
             let data = Data(repeating: UInt8(i), count: 10_000)
+            let cid = testCID(for: data)
+            cids.append(cid)
             ds1[cid] = data
             await ivy1.publishBlock(cid: cid, data: data)
             expected[cid] = data
@@ -963,8 +970,7 @@ struct NetworkRobustnessTests {
 
         // Retrieve all 5 payloads sequentially
         var successCount = 0
-        for i in 0..<5 {
-            let cid = "large-vol-\(i)"
+        for (i, cid) in cids.enumerated() {
             let retrieved = await ivy2.get(cid: cid, target: target)
             if let retrieved {
                 #expect(retrieved.count == 10_000, "Payload \(i) should be 10KB")

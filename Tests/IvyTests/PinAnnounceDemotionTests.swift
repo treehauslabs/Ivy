@@ -62,8 +62,8 @@ struct PinAnnounceDemotionTests {
 
         // Stash data on B via dataSource + publishBlock so haveSet is populated
         // and handleDHTForward on B can serve the follow-up request.
-        let cid = "cid-served-by-b"
         let payload = Data("hello".utf8)
+        let cid = testCID(for: payload)
         let ds = DictDataSource()
         ds[cid] = payload
         await b.setDataSource(ds)
