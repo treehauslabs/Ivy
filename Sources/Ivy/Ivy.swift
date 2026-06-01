@@ -85,6 +85,7 @@ public actor Ivy {
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
     private var nodeRecordCache: BoundedDictionary<String, NodeRecord> = BoundedDictionary(capacity: 5_000)
+    private var pendingNodeRecordRequests: [PeerID: Set<String>] = [:]
     private var localNodeRecord: NodeRecord?
     private var localRecordSeq: UInt64 = 0
 
@@ -1365,6 +1366,9 @@ public actor Ivy {
 
     private func handleNodeRecord(_ record: NodeRecord, from peer: PeerID) {
         guard tally.shouldAllow(peer: peer) else { return }
+        let senderOwnsRecord = record.publicKey == peer.publicKey
+        let requestedFromPeer = hasPendingNodeRecordRequest(publicKey: record.publicKey, from: peer)
+        guard senderOwnsRecord || requestedFromPeer else { return }
         guard record.verify() else { return }
         guard record.serialize().count <= NodeRecord.maxSize else { return }
         if let existing = nodeRecordCache[record.publicKey] {
@@ -1374,7 +1378,25 @@ public actor Ivy {
                 guard record.sequenceNumber > existing.sequenceNumber else { return }
             }
         }
+        if !senderOwnsRecord {
+            guard consumePendingNodeRecordRequest(publicKey: record.publicKey, from: peer) else { return }
+        }
         nodeRecordCache[record.publicKey] = record
+    }
+
+    private func hasPendingNodeRecordRequest(publicKey: String, from peer: PeerID) -> Bool {
+        pendingNodeRecordRequests[peer]?.contains(publicKey) == true
+    }
+
+    private func consumePendingNodeRecordRequest(publicKey: String, from peer: PeerID) -> Bool {
+        guard var requestedKeys = pendingNodeRecordRequests[peer],
+              requestedKeys.remove(publicKey) != nil else { return false }
+        if requestedKeys.isEmpty {
+            pendingNodeRecordRequests.removeValue(forKey: peer)
+        } else {
+            pendingNodeRecordRequests[peer] = requestedKeys
+        }
+        return true
     }
 
     private func handleGetNodeRecord(publicKey: String, from peer: PeerID) {
@@ -1420,6 +1442,7 @@ public actor Ivy {
         for entry in closest {
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             guard reachable else { continue }
+            pendingNodeRecordRequests[entry.id, default: []].insert(publicKey)
             fireToPeer(entry.id, .getNodeRecord(publicKey: publicKey))
         }
         try? await Task.sleep(for: .milliseconds(500))
@@ -2091,6 +2114,8 @@ public actor Ivy {
     // MARK: - Cleanup
 
     private func cleanupPendingForPeer(_ peer: PeerID) {
+        pendingNodeRecordRequests.removeValue(forKey: peer)
+
         let forwardCIDs = pendingForwards.compactMap { cid, peers in
             peers[peer] == nil ? nil : cid
         }
@@ -2143,6 +2168,7 @@ public actor Ivy {
         for (_, pending) in pendingFindPins {
             for cont in pending.continuations { cont.resume(returning: []) }
         }
+        pendingNodeRecordRequests.removeAll()
     }
 
     func cleanupAllPending() {
@@ -2171,6 +2197,7 @@ public actor Ivy {
         }
 
         clearPendingForwards()
+        pendingNodeRecordRequests.removeAll()
     }
 
     private func clearPendingForwards() {
