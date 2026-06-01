@@ -23,6 +23,12 @@ private struct PendingNeighborResponse: Sendable {
     let continuation: CheckedContinuation<[PeerEndpoint], Never>?
 }
 
+private struct PendingFindPins {
+    var continuations: [CheckedContinuation<[PeerID], Never>]
+    var expectedPeers: Set<String>
+    let generation: UInt64
+}
+
 public actor Ivy {
     public let config: IvyConfig
     public let tally: Tally
@@ -99,7 +105,8 @@ public actor Ivy {
     }
 
     private var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
-    private var pendingFindPins: [String: [CheckedContinuation<[PeerID], Never>]] = [:]
+    private var pendingFindPins: [String: PendingFindPins] = [:]
+    private var nextFindPinsGeneration: UInt64 = 0
 
     public let creditLedger: CreditLineLedger
 
@@ -1197,8 +1204,12 @@ public actor Ivy {
     /// peers may not be in our routing table yet; we just stash the keys
     /// and let fetchVolume gate on connection-reachability.
     private func handlePinsResponse(cid: String, providers: [String], from peer: PeerID) {
+        guard let pending = pendingFindPins[cid],
+              pending.expectedPeers.contains(peer.publicKey) else { return }
+        guard !providers.isEmpty else { return }
+
         let peerIDs = providers.map { PeerID(publicKey: $0) }
-        if let waiters = pendingFindPins.removeValue(forKey: cid) {
+        if let waiters = pendingFindPins.removeValue(forKey: cid)?.continuations {
             for cont in waiters { cont.resume(returning: peerIDs) }
         }
         for pk in providers {
@@ -1419,21 +1430,60 @@ public actor Ivy {
     /// our buckets, not the broader population that has announced pins.
     private func findPinnersViaDHT(rootCID: String) async -> [PeerID] {
         let cidHash = Router.hash(rootCID)
-        let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests)
-        var sent = 0
-        for entry in closest {
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-            fireToPeer(entry.id, .findPins(cid: rootCID, fee: 0))
-            sent += 1
+        let initialTargets = reachablePinLookupTargets(for: cidHash)
+        guard !initialTargets.isEmpty else {
+            _ = await findNode(target: rootCID)
+            return await queryPinners(rootCID: rootCID, targets: reachablePinLookupTargets(for: cidHash))
         }
-        guard sent > 0 else { return [] }
 
+        guard initialTargets.count < config.maxConcurrentRequests else {
+            return await queryPinners(rootCID: rootCID, targets: initialTargets)
+        }
+
+        let warmRoute = Task { await self.findNode(target: rootCID) }
+        let initial = await queryPinners(rootCID: rootCID, targets: initialTargets)
+        if !initial.isEmpty { return initial }
+
+        _ = await warmRoute.value
+        let refreshedTargets = reachablePinLookupTargets(for: cidHash)
+        let initialKeys = Set(initialTargets.map { $0.id.publicKey })
+        let hasNewTargets = refreshedTargets.contains { !initialKeys.contains($0.id.publicKey) }
+        guard hasNewTargets else { return [] }
+        return await queryPinners(rootCID: rootCID, targets: refreshedTargets)
+    }
+
+    private func reachablePinLookupTargets(for cidHash: [UInt8]) -> [Router.BucketEntry] {
+        router.closestPeers(to: cidHash, count: config.maxConcurrentRequests).filter { entry in
+            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
+            return reachable
+        }
+    }
+
+    private func queryPinners(rootCID: String, targets: [Router.BucketEntry]) async -> [PeerID] {
+        guard !targets.isEmpty else { return [] }
         return await withCheckedContinuation { cont in
-            pendingFindPins[rootCID, default: []].append(cont)
+            let expected = Set(targets.map { $0.id.publicKey })
+            let generation: UInt64
+            if var pending = pendingFindPins[rootCID] {
+                pending.continuations.append(cont)
+                pending.expectedPeers.formUnion(expected)
+                generation = pending.generation
+                pendingFindPins[rootCID] = pending
+            } else {
+                nextFindPinsGeneration &+= 1
+                generation = nextFindPinsGeneration
+                pendingFindPins[rootCID] = PendingFindPins(
+                    continuations: [cont],
+                    expectedPeers: expected,
+                    generation: generation
+                )
+            }
+            for entry in targets {
+                fireToPeer(entry.id, .findPins(cid: rootCID, fee: 0))
+            }
             Task {
                 try? await Task.sleep(for: .milliseconds(500))
-                self.resolvePendingFindPins(rootCID: rootCID, peers: [])
+                self.resolvePendingFindPins(rootCID: rootCID, peers: [], generation: generation)
             }
         }
     }
@@ -1445,8 +1495,13 @@ public actor Ivy {
     }
 
     private func resolvePendingFindPins(rootCID: String, peers: [PeerID]) {
-        guard let waiters = pendingFindPins.removeValue(forKey: rootCID) else { return }
-        for cont in waiters { cont.resume(returning: peers) }
+        guard let pending = pendingFindPins.removeValue(forKey: rootCID) else { return }
+        for cont in pending.continuations { cont.resume(returning: peers) }
+    }
+
+    private func resolvePendingFindPins(rootCID: String, peers: [PeerID], generation: UInt64) {
+        guard pendingFindPins[rootCID]?.generation == generation else { return }
+        resolvePendingFindPins(rootCID: rootCID, peers: peers)
     }
 
     private func collectNeighborResponses(nonces: [UInt64]) async -> [[PeerEndpoint]] {
@@ -1937,8 +1992,8 @@ public actor Ivy {
         }
         pendingNeighborLookupNonces.removeAll()
         completedNeighborResponses.removeAll()
-        for (_, continuations) in pendingFindPins {
-            for cont in continuations { cont.resume(returning: []) }
+        for (_, pending) in pendingFindPins {
+            for cont in pending.continuations { cont.resume(returning: []) }
         }
     }
 
