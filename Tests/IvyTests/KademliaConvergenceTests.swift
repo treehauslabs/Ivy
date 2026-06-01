@@ -4,7 +4,7 @@ import Foundation
 import Acorn
 import Tally
 
-@Suite("Kademlia convergence")
+@Suite("Kademlia convergence", .serialized)
 struct KademliaConvergenceTests {
 
     @Test("findNode converges across sparse routing tables")
@@ -46,6 +46,60 @@ struct KademliaConvergenceTests {
         #expect(!endpoints.isEmpty)
         #expect(distances == distances.sorted())
         #expect(endpoints.first?.publicKey == targetKey)
+    }
+
+    @Test("findNode converges on near peers in a larger sparse topology")
+    func findNodeConvergesInLargerSparseTopology() async throws {
+        let nodeCount = 64
+        let nodes = makeKademliaNodes(count: nodeCount)
+        try await connectTransportMesh(nodes)
+
+        let source = 0
+        let target = 63
+        await seedTargetConvergentRoutingTables(nodes, targetIndex: target, outDegree: 12)
+
+        let targetKey = "kad-node-\(target)"
+        let targetHash = Router.hash(targetKey)
+        let expectedClosest = expectedClosestKeys(to: targetKey, count: 8, excluding: source, nodeCount: nodeCount)
+        let initialKeys = await routedKeys(nodes[source])
+        let initialBestDistance = bestDistance(from: initialKeys, to: targetKey)
+
+        #expect(!initialKeys.contains(targetKey))
+
+        let discovered = await nodes[source].findNode(target: targetKey)
+        let discoveredKeys = discovered.map(\.publicKey)
+        let sourceKeys = await routedKeys(nodes[source])
+        let discoveredDistances = discoveredKeys.map { Router.xorDistance(Router.hash($0), targetHash) }
+        let finalBestDistance = bestDistance(from: sourceKeys, to: targetKey)
+
+        #expect(discoveredDistances == discoveredDistances.sorted())
+        #expect(sourceKeys.count > initialKeys.count)
+        #expect(finalBestDistance < initialBestDistance)
+        #expect(Set(discoveredKeys).intersection(expectedClosest).count >= 1)
+    }
+
+    @Test("findNode continues converging when some sparse-path peers churn out")
+    func findNodeConvergesWithChurnedPeers() async throws {
+        let nodeCount = 64
+        let nodes = makeKademliaNodes(count: nodeCount)
+        try await connectTransportMesh(nodes)
+        await seedTargetConvergentRoutingTables(nodes, targetIndex: 63, outDegree: 12)
+
+        let source = 0
+        let churnedPeers = [3, 7, 15, 31].map { PeerID(publicKey: "kad-node-\($0)") }
+        for peer in churnedPeers {
+            await nodes[source].disconnect(peer)
+        }
+
+        let targetKey = "kad-node-63"
+        let initialKeys = await routedKeys(nodes[source])
+        let initialBestDistance = bestDistance(from: initialKeys, to: targetKey)
+        let discovered = await nodes[source].findNode(target: targetKey)
+        let discoveredKeys = Set(discovered.map(\.publicKey))
+        let finalBestDistance = bestDistance(from: await routedKeys(nodes[source]), to: targetKey)
+
+        #expect(!discoveredKeys.isEmpty)
+        #expect(finalBestDistance < initialBestDistance)
     }
 }
 
@@ -93,4 +147,62 @@ private func seedRouter(_ node: Ivy, with peerIndexes: [Int], nodes: [Ivy]) asyn
 
 private func routedKeys(_ node: Ivy) async -> Set<String> {
     Set(await node.allRouterPeers().map { $0.id.publicKey })
+}
+
+private func seedTargetConvergentRoutingTables(_ nodes: [Ivy], targetIndex: Int, outDegree: Int) async {
+    let targetKey = "kad-node-\(targetIndex)"
+    let targetHash = Router.hash(targetKey)
+    let ranked = nodes.indices.sorted {
+        Router.xorDistance(Router.hash("kad-node-\($0)"), targetHash) < Router.xorDistance(Router.hash("kad-node-\($1)"), targetHash)
+    }
+    let rankByIndex = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element, $0.offset) })
+
+    for index in nodes.indices {
+        let rank = rankByIndex[index]!
+        let closer = ranked[..<rank].suffix(outDegree)
+        var neighbors = Array(closer)
+        if neighbors.count < outDegree {
+            neighbors.append(contentsOf: sparseNeighborIndexes(for: index, nodeCount: nodes.count, outDegree: outDegree - neighbors.count))
+        }
+        await seedRouter(nodes[index], with: Array(neighbors.prefix(outDegree)), nodes: nodes)
+    }
+}
+
+private func sparseNeighborIndexes(for index: Int, nodeCount: Int, outDegree: Int) -> [Int] {
+    var neighbors: [Int] = []
+    var step = 1
+    while neighbors.count < outDegree && step < nodeCount {
+        let forward = index + step
+        if forward < nodeCount {
+            neighbors.append(forward)
+        }
+        let backward = index - step
+        if neighbors.count < outDegree, backward >= 0 {
+            neighbors.append(backward)
+        }
+        step *= 2
+    }
+    return Array(neighbors.prefix(outDegree))
+}
+
+private func expectedClosestKeys(to targetKey: String, count: Int, excluding excludedIndex: Int, nodeCount: Int) -> Set<String> {
+    expectedClosestKeys(to: targetKey, count: count, excluding: Set([excludedIndex]), nodeCount: nodeCount)
+}
+
+private func expectedClosestKeys(to targetKey: String, count: Int, excluding excludedIndexes: Set<Int>, nodeCount: Int) -> Set<String> {
+    let targetHash = Router.hash(targetKey)
+    return Set((0..<nodeCount)
+        .filter { !excludedIndexes.contains($0) }
+        .map { "kad-node-\($0)" }
+        .sorted {
+            Router.xorDistance(Router.hash($0), targetHash) < Router.xorDistance(Router.hash($1), targetHash)
+        }
+        .prefix(count))
+}
+
+private func bestDistance(from keys: Set<String>, to targetKey: String) -> [UInt8] {
+    let targetHash = Router.hash(targetKey)
+    return keys
+        .map { Router.xorDistance(Router.hash($0), targetHash) }
+        .min() ?? Array(repeating: UInt8.max, count: targetHash.count)
 }

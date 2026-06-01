@@ -489,9 +489,20 @@ public actor Ivy {
     public func findNode(target: String) async -> [PeerEndpoint] {
         let targetHash = Router.hash(target)
         var queried: Set<String> = []
+        var previousClosest: [String] = []
 
-        for _ in 0..<3 {
+        for _ in 0..<16 {
             let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
+            let closestKeys = closest.map { $0.id.publicKey }
+            if closestKeys == previousClosest {
+                let hasUnqueriedReachable = closest.contains {
+                    !queried.contains($0.id.publicKey) &&
+                    (connections[$0.id] != nil || localPeers[$0.id] != nil)
+                }
+                if !hasUnqueriedReachable { break }
+            }
+            previousClosest = closestKeys
+
             let toQuery = closest.filter {
                 !queried.contains($0.id.publicKey) &&
                 (connections[$0.id] != nil || localPeers[$0.id] != nil)
