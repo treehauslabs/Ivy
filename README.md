@@ -1,4 +1,5 @@
 <p align="center">
+  <a href="https://github.com/treehauslabs/Ivy/actions/workflows/ci.yml"><img src="https://github.com/treehauslabs/Ivy/actions/workflows/ci.yml/badge.svg" alt="CI/CD"></a>
   <img src="https://img.shields.io/badge/swift-6.0+-F05138?style=flat&logo=swift" alt="Swift 6.0+">
   <img src="https://img.shields.io/badge/platforms-macOS%20|%20iOS%20|%20tvOS%20|%20watchOS%20|%20visionOS-lightgrey" alt="Platforms">
   <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
@@ -392,7 +393,7 @@ Then add `"Ivy"` to your target's dependencies.
 swift test
 ```
 
-22 tests across 2 suites covering message serialization (all types, framing, edge cases) and router logic (XOR distance, common prefix length, k-bucket management, reputation-weighted eviction, closest-peer queries).
+The GitHub Actions pipeline runs release builds, the benchmarks executable build, and the full Swift test suite on macOS and Linux for pull requests and `main` pushes. Pushing a `v*` tag runs the same checks and publishes a GitHub Release with generated notes after both platforms pass.
 
 ---
 
