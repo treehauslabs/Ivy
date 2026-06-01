@@ -50,6 +50,18 @@ private func makeConfig(port: UInt16, publicKey: String, bootstrapPeers: [PeerEn
     )
 }
 
+private func eventually(
+    attempts: Int = 100,
+    interval: Duration = .milliseconds(100),
+    _ condition: () async -> Bool
+) async throws -> Bool {
+    for _ in 0..<attempts {
+        if await condition() { return true }
+        try await Task.sleep(for: interval)
+    }
+    return await condition()
+}
+
 @Suite("TCP Integration", .serialized)
 struct TCPIntegrationTests {
 
@@ -238,7 +250,15 @@ struct TCPIntegrationTests {
         try await ivy2.connect(to: PeerEndpoint(
             publicKey: kp1.publicKey, host: "127.0.0.1", port: p1
         ))
-        try await Task.sleep(for: .seconds(3))
+
+        let ivy1SeesIvy2 = try await eventually {
+            await ivy1.connectedPeers.contains(PeerID(publicKey: kp2.publicKey))
+        }
+        let ivy2SeesIvy1 = try await eventually {
+            await ivy2.connectedPeers.contains(PeerID(publicKey: kp1.publicKey))
+        }
+        #expect(ivy1SeesIvy2, "Node 1 should authenticate Node 2 before publishing pins")
+        #expect(ivy2SeesIvy1, "Node 2 should authenticate Node 1 before publishing pins")
 
         let expiry = UInt64(Date().timeIntervalSince1970) + 86400
         await ivy1.publishPinAnnounce(
@@ -248,12 +268,11 @@ struct TCPIntegrationTests {
         )
 
         var stored: [String] = []
-        for _ in 0..<10 {
-            try await Task.sleep(for: .milliseconds(500))
+        let didStorePin = try await eventually {
             stored = await ivy2.storedPinAnnouncements(for: "pinned-data-root")
-            if !stored.isEmpty { break }
+            return !stored.isEmpty
         }
-        #expect(!stored.isEmpty, "Pin announcement should be discoverable on Node 2")
+        #expect(didStorePin, "Pin announcement should be discoverable on Node 2")
         if let first = stored.first {
             #expect(first == kp1.publicKey, "Pinner should be Node 1")
         }
