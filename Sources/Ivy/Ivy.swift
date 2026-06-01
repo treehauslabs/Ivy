@@ -63,6 +63,7 @@ public actor Ivy {
     private static let reconnectBaseDelayMs: UInt64 = 500
     private static let reconnectMaxDelayMs: UInt64 = 30_000
     private static let reconnectJitterMs: UInt64 = 250
+    private static let kademliaLookupParallelism = 3
 
     private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
@@ -490,8 +491,11 @@ public actor Ivy {
         let targetHash = Router.hash(target)
         var queried: Set<String> = []
         var previousClosest: [String] = []
+        let lookupParallelism = min(Self.kademliaLookupParallelism, max(1, config.kBucketSize))
+        // Convergence normally stops the lookup; k rounds is only a safety guard.
+        let maxLookupRounds = max(1, config.kBucketSize)
 
-        for _ in 0..<16 {
+        for _ in 0..<maxLookupRounds {
             let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
             let closestKeys = closest.map { $0.id.publicKey }
             if closestKeys == previousClosest {
@@ -506,7 +510,7 @@ public actor Ivy {
             let toQuery = closest.filter {
                 !queried.contains($0.id.publicKey) &&
                 (connections[$0.id] != nil || localPeers[$0.id] != nil)
-            }.prefix(3)
+            }.prefix(lookupParallelism)
 
             if toQuery.isEmpty { break }
 
