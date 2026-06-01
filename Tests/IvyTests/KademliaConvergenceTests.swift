@@ -78,6 +78,54 @@ struct KademliaConvergenceTests {
         #expect(Set(discoveredKeys).intersection(expectedClosest).count >= 1)
     }
 
+    @Test("findNode returns exact top-k when queried peers expose the closest set")
+    func findNodeReturnsExactTopKWhenReachable() async throws {
+        let nodeCount = 64
+
+        for target in [17, 33, 63] {
+            let nodes = makeKademliaNodes(count: nodeCount, kBucketSize: 8)
+            try await connectTransportMesh(nodes)
+
+            let source = 0
+            let targetKey = "kad-node-\(target)"
+            let expectedClosest = expectedClosestKeys(to: targetKey, count: 8, excluding: source, nodeCount: nodeCount)
+            let bootstrapIndexes = [1, 2, 3].filter { $0 != target }
+
+            await seedRouter(nodes[source], with: bootstrapIndexes, nodes: nodes)
+            for index in bootstrapIndexes {
+                await seedRouter(nodes[index], with: indexes(for: expectedClosest), nodes: nodes)
+            }
+
+            let discovered = await nodes[source].findNode(target: targetKey)
+            let discoveredKeys = Set(discovered.map(\.publicKey))
+
+            #expect(discoveredKeys == expectedClosest)
+        }
+    }
+
+    @Test("findNode still reaches exact top-k with noisy farther neighbors")
+    func findNodeIgnoresFartherNoiseWhenExactPathExists() async throws {
+        let nodeCount = 64
+        let nodes = makeKademliaNodes(count: nodeCount, kBucketSize: 8)
+        try await connectTransportMesh(nodes)
+
+        let source = 0
+        let honestBootstrap = 1
+        let noisyBootstrap = 2
+        let targetKey = "kad-node-63"
+        let expectedClosest = expectedClosestKeys(to: targetKey, count: 8, excluding: source, nodeCount: nodeCount)
+        let noisyFarIndexes = farthestIndexes(to: targetKey, count: 8, excluding: [source, honestBootstrap], nodeCount: nodeCount)
+
+        await seedRouter(nodes[source], with: [honestBootstrap, noisyBootstrap], nodes: nodes)
+        await seedRouter(nodes[honestBootstrap], with: indexes(for: expectedClosest), nodes: nodes)
+        await seedRouter(nodes[noisyBootstrap], with: noisyFarIndexes, nodes: nodes)
+
+        let discovered = await nodes[source].findNode(target: targetKey)
+        let discoveredKeys = Set(discovered.map(\.publicKey))
+
+        #expect(discoveredKeys == expectedClosest)
+    }
+
     @Test("findNode continues converging when some sparse-path peers churn out")
     func findNodeConvergesWithChurnedPeers() async throws {
         let nodeCount = 64
@@ -103,13 +151,14 @@ struct KademliaConvergenceTests {
     }
 }
 
-private func makeKademliaNodes(count: Int) -> [Ivy] {
+private func makeKademliaNodes(count: Int, kBucketSize: Int = 20) -> [Ivy] {
     (0..<count).map { index in
         Ivy(config: IvyConfig(
             publicKey: "kad-node-\(index)",
             listenPort: 0,
             bootstrapPeers: [],
             enableLocalDiscovery: false,
+            kBucketSize: kBucketSize,
             healthConfig: PeerHealthConfig(
                 keepaliveInterval: .seconds(999),
                 staleTimeout: .seconds(999),
@@ -198,6 +247,24 @@ private func expectedClosestKeys(to targetKey: String, count: Int, excluding exc
             Router.xorDistance(Router.hash($0), targetHash) < Router.xorDistance(Router.hash($1), targetHash)
         }
         .prefix(count))
+}
+
+private func farthestIndexes(to targetKey: String, count: Int, excluding excludedIndexes: Set<Int>, nodeCount: Int) -> [Int] {
+    let targetHash = Router.hash(targetKey)
+    return (0..<nodeCount)
+        .filter { !excludedIndexes.contains($0) }
+        .sorted {
+            Router.xorDistance(Router.hash("kad-node-\($0)"), targetHash) > Router.xorDistance(Router.hash("kad-node-\($1)"), targetHash)
+        }
+        .prefix(count)
+        .map { $0 }
+}
+
+private func indexes(for keys: Set<String>) -> [Int] {
+    keys.compactMap { key in
+        guard let suffix = key.split(separator: "-").last else { return nil }
+        return Int(suffix)
+    }
 }
 
 private func bestDistance(from keys: Set<String>, to targetKey: String) -> [UInt8] {
