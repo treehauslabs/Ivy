@@ -52,7 +52,6 @@ public actor Ivy {
 
     private let stunClient: STUNClient
     private(set) public var publicAddress: ObservedAddress?
-    private var observedAddresses: BoundedDictionary<ObservedAddress, Int> = BoundedDictionary(capacity: 256)
     private var pendingForwards: [String: [PeerID: UInt64]] = [:]
     private var pendingForwardCountsByPeer: [PeerID: Int] = [:]
     private var pendingForwardCount = 0
@@ -672,17 +671,9 @@ public actor Ivy {
             peerChainPorts[realID] = chainPorts
         }
 
-        if observedHost != "0.0.0.0" && observedHost != "unknown" {
-            let observed = ObservedAddress(host: observedHost, port: observedPort)
-            observedAddresses[observed] = (observedAddresses[observed] ?? 0) + 1
-            if let best = observedAddresses.max(by: { $0.value < $1.value }), best.value >= 2 {
-                if publicAddress != best.key {
-                    publicAddress = best.key
-                    updateNodeRecord()
-                    delegate?.ivy(self, didDiscoverPublicAddress: best.key)
-                }
-            }
-        }
+        // A signed identify frame authenticates who sent the claim, not whether
+        // its observed address is reachable by us. Only locally verified address
+        // discovery, such as STUN, may mutate publicAddress and NodeRecord.
     }
 
     private func hexDecode(_ hex: String) -> Data? {
