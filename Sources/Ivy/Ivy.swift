@@ -53,11 +53,15 @@ public actor Ivy {
     private let stunClient: STUNClient
     private(set) public var publicAddress: ObservedAddress?
     private var observedAddresses: BoundedDictionary<ObservedAddress, Int> = BoundedDictionary(capacity: 256)
-    private var pendingForwards: [String: [PeerID]] = [:]
+    private var pendingForwards: [String: [PeerID: UInt64]] = [:]
+    private var pendingForwardCountsByPeer: [PeerID: Int] = [:]
+    private var pendingForwardCount = 0
+    private var nextPendingForwardGeneration: UInt64 = 0
     private static let maxPendingForwards = 4_096
-    /// Per-peer token bucket for announceBlock gossip. Prevents a single peer
+    private static let maxPendingForwardsPerPeer = 128
+    /// Per-peer token bucket for gossip relay. Prevents a single peer
     /// from driving unbounded outbound broadcast amplification.
-    private var announceBuckets: [PeerID: TokenBucket] = [:]
+    private var gossipBuckets: [PeerID: TokenBucket] = [:]
     private static let announceGossipCapacity: Double = 200
     private static let announceGossipRefillPerSec: Double = 50
     private var pexTask: Task<Void, Never>?
@@ -192,7 +196,7 @@ public actor Ivy {
         reconnectTasks.removeAll()
         reconnectAttempts.removeAll()
         intentionallyDisconnectedPeers.removeAll()
-        pendingForwards.removeAll()
+        clearPendingForwards()
     }
 
     // MARK: - Connection Management
@@ -819,17 +823,7 @@ public actor Ivy {
             // Rate-limit per-peer broadcast relaying. One announce triggers N
             // outbound broadcasts; without this cap a single peer drives
             // unbounded uplink amplification across all N connected peers.
-            var announceBucket = announceBuckets[peer] ?? TokenBucket(
-                capacity: Self.announceGossipCapacity,
-                refillPerSec: Self.announceGossipRefillPerSec
-            )
-            let announceAdmitted = announceBucket.tryConsume()
-            announceBuckets[peer] = announceBucket
-            if announceBuckets.count > 2 * (config.tallyConfig.maxPeers ?? 256) {
-                // Shed oldest-first to prevent unbounded growth on heavy churn
-                if let first = announceBuckets.first { announceBuckets.removeValue(forKey: first.key) }
-            }
-            if announceAdmitted, !haveSet.contains(cid) {
+            if admitGossipRelay(from: peer), !haveSet.contains(cid) {
                 haveSet.insert(cid)
                 fireToPeer(peer, .dhtForward(cid: cid, ttl: 0))
                 let payload = Message.announceBlock(cid: cid).serialize()
@@ -845,6 +839,9 @@ public actor Ivy {
 
         case .want(let rootCIDs):
             Task { await self.handleWant(rootCIDs: rootCIDs, from: peer) }
+
+        case .wantVolume(let rootCID, let cids):
+            Task { await self.handleWant(rootCID: rootCID, requestedCIDs: cids, from: peer) }
 
         case .pexRequest(let nonce):
             handlePEXRequest(nonce: nonce, from: peer)
@@ -909,6 +906,19 @@ public actor Ivy {
         return !line.needsSettlement
     }
 
+    private func admitGossipRelay(from peer: PeerID) -> Bool {
+        var bucket = gossipBuckets[peer] ?? TokenBucket(
+            capacity: Self.announceGossipCapacity,
+            refillPerSec: Self.announceGossipRefillPerSec
+        )
+        let admitted = bucket.tryConsume()
+        gossipBuckets[peer] = bucket
+        if gossipBuckets.count > 2 * (config.tallyConfig.maxPeers ?? 256) {
+            if let first = gossipBuckets.first { gossipBuckets.removeValue(forKey: first.key) }
+        }
+        return admitted
+    }
+
     // MARK: - DHT Forwarding
 
     private func handleDHTForward(cid: String, ttl: UInt8, from peer: PeerID) async {
@@ -917,8 +927,9 @@ public actor Ivy {
             return
         }
 
+        let advertisedAvailable = haveSet.contains(cid)
         var data: Data?
-        if haveSet.contains(cid) {
+        if advertisedAvailable {
             data = await getLocalBlock(cid: cid)
         }
 
@@ -928,10 +939,10 @@ public actor Ivy {
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
             await meterSent(peer: peer, bytes: data.count)
         } else if ttl > 0 {
-            // Cap pendingForwards to prevent unbounded memory growth and the
-            // associated O(n) cleanup scan that stalls the actor on disconnect.
-            guard pendingForwards.count < Self.maxPendingForwards else { return }
-            pendingForwards[cid, default: []].append(peer)
+            if advertisedAvailable {
+                haveSet.remove(cid)
+            }
+            guard addPendingForward(cid: cid, requester: peer) else { return }
             let cidHash = Router.hash(cid)
             let closest = router.closestPeers(to: cidHash, count: 3)
             for entry in closest {
@@ -940,43 +951,129 @@ public actor Ivy {
                 guard reachable else { continue }
                 fireToPeer(entry.id, .dhtForward(cid: cid, ttl: ttl - 1))
             }
-            Task {
-                try? await Task.sleep(for: config.requestTimeout)
-                self.pendingForwards.removeValue(forKey: cid)
-            }
+        } else if advertisedAvailable {
+            haveSet.remove(cid)
         }
         // ttl == 0 and not found: silently fail (requester has its own timeout)
     }
 
     private func resolveForwards(cid: String, data: Data, from peer: PeerID) {
-        guard let requesters = pendingForwards.removeValue(forKey: cid) else { return }
+        guard let requesters = removePendingForwards(for: cid) else { return }
         let payload = Message.block(cid: cid, data: data).serialize()
         let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
-        for requester in requesters {
+        for requester in requesters.keys {
             firePayloadToPeer(requester, payload)
             tally.recordSent(peer: requester, bytes: data.count, cpl: cpl)
         }
     }
 
+    private func addPendingForward(cid: String, requester: PeerID) -> Bool {
+        if pendingForwards[cid]?[requester] != nil { return true }
+        guard pendingForwardCount < Self.maxPendingForwards else { return false }
+        guard (pendingForwardCountsByPeer[requester] ?? 0) < Self.maxPendingForwardsPerPeer else { return false }
+
+        nextPendingForwardGeneration &+= 1
+        let generation = nextPendingForwardGeneration
+        pendingForwards[cid, default: [:]][requester] = generation
+        pendingForwardCountsByPeer[requester, default: 0] += 1
+        pendingForwardCount += 1
+
+        Task {
+            try? await Task.sleep(for: config.requestTimeout)
+            self.expirePendingForward(cid: cid, requester: requester, generation: generation)
+        }
+        return true
+    }
+
+    private func expirePendingForward(cid: String, requester: PeerID, generation: UInt64) {
+        guard pendingForwards[cid]?[requester] == generation else { return }
+        removePendingForward(cid: cid, requester: requester)
+    }
+
+    private func removePendingForward(cid: String, requester: PeerID) {
+        guard pendingForwards[cid]?.removeValue(forKey: requester) != nil else { return }
+        if pendingForwards[cid]?.isEmpty == true {
+            pendingForwards.removeValue(forKey: cid)
+        }
+        if let count = pendingForwardCountsByPeer[requester], count > 1 {
+            pendingForwardCountsByPeer[requester] = count - 1
+        } else {
+            pendingForwardCountsByPeer.removeValue(forKey: requester)
+        }
+        pendingForwardCount = max(pendingForwardCount - 1, 0)
+    }
+
+    private func removePendingForwards(for cid: String) -> [PeerID: UInt64]? {
+        guard let requesters = pendingForwards.removeValue(forKey: cid) else { return nil }
+        for requester in requesters.keys {
+            if let count = pendingForwardCountsByPeer[requester], count > 1 {
+                pendingForwardCountsByPeer[requester] = count - 1
+            } else {
+                pendingForwardCountsByPeer.removeValue(forKey: requester)
+            }
+            pendingForwardCount = max(pendingForwardCount - 1, 0)
+        }
+        return requesters
+    }
+
     // MARK: - want (passive responder)
 
     private func handleWant(rootCIDs: [String], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
         for rootCID in rootCIDs {
-            let items = await dataSource?.volumeData(for: rootCID, cids: []) ?? []
-            guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
-                fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
-                continue
-            }
-
-            fireToPeer(peer, .blocks(rootCID: rootCID, items: items), bypassBudget: true)
-            let totalBytes = items.reduce(0) { $0 + $1.data.count }
-            if totalBytes > 0 {
-                let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
-                tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
-                await meterSent(peer: peer, bytes: totalBytes)
-            }
+            await handleWant(rootCID: rootCID, requestedCIDs: [], from: peer)
         }
+    }
+
+    private func handleWant(rootCID: String, requestedCIDs: [String], from peer: PeerID) async {
+        guard tally.shouldAllow(peer: peer) else { return }
+        let requested = orderedRequestedCIDs(rootCID: rootCID, requestedCIDs: requestedCIDs)
+        var items = await dataSource?.volumeData(for: rootCID, cids: requested) ?? []
+        guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
+            fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
+            return
+        }
+
+        items = budgetedWantItems(rootCID: rootCID, items: items)
+        guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
+            fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
+            return
+        }
+
+        fireToPeer(peer, .blocks(rootCID: rootCID, items: items))
+        let totalBytes = items.reduce(0) { $0 + $1.data.count }
+        if totalBytes > 0 {
+            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
+            tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
+            await meterSent(peer: peer, bytes: totalBytes)
+        }
+    }
+
+    private func orderedRequestedCIDs(rootCID: String, requestedCIDs: [String]) -> [String] {
+        guard !requestedCIDs.isEmpty else { return [] }
+        var seen: Set<String> = []
+        var ordered: [String] = []
+        for cid in [rootCID] + requestedCIDs where seen.insert(cid).inserted {
+            ordered.append(cid)
+        }
+        return ordered
+    }
+
+    private func budgetedWantItems(rootCID: String, items: [(cid: String, data: Data)]) -> [(cid: String, data: Data)] {
+        let maxBytes = Int(MessageLimits.maxFrameSize) - 1024
+        let ordered = items.sorted { lhs, rhs in
+            if lhs.cid == rootCID { return true }
+            if rhs.cid == rootCID { return false }
+            return lhs.cid < rhs.cid
+        }
+        var total = 0
+        var result: [(cid: String, data: Data)] = []
+        for item in ordered {
+            let itemCost = item.cid.utf8.count + item.data.count + 8
+            guard total + itemCost <= maxBytes else { continue }
+            result.append(item)
+            total += itemCost
+        }
+        return result
     }
 
     private func handleBlocks(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
@@ -1596,7 +1693,7 @@ public actor Ivy {
 
     /// Handle announceVolume: record provider, gossip to other peers.
     private func handleAnnounceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
+        guard tally.shouldAllow(peer: peer), admitGossipRelay(from: peer) else { return }
 
         // Dedup: don't process the same volume announcement twice
         let dedupKey = "vol-\(rootCID)"
@@ -1613,7 +1710,7 @@ public actor Ivy {
     }
 
     private func handlePushVolume(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
+        guard tally.shouldAllow(peer: peer), admitGossipRelay(from: peer) else { return }
 
         let dedupKey = "vol-\(rootCID)"
         guard !haveSet.contains(dedupKey) else { return }
@@ -1731,7 +1828,7 @@ public actor Ivy {
     ///
     /// Coalescing: if a waiter for this rootCID already exists, joins it without
     /// sending new messages. First responder wakes all coalesced waiters.
-    private func fetchVolumeFromNetwork(rootCID: String) async -> [String: Data] {
+    private func fetchVolumeFromNetwork(rootCID: String, requestedCIDs: [String] = []) async -> [String: Data] {
         // Coalesce: join an existing in-flight request for the same content.
         if let existing = pendingVolumeRequests[rootCID] {
             guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
@@ -1779,14 +1876,14 @@ public actor Ivy {
         }
 
         guard !candidates.isEmpty else { return [:] }
-        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
+        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates, requestedCIDs: requestedCIDs)
     }
 
     /// Core send-and-wait: register continuation, send `want` to candidates,
     /// first `blocks` response wins. Re-checks coalescing inside the continuation
     /// to handle races where a concurrent fetch registered while we were in async
     /// candidate discovery (e.g., the DHT lookup in fetchVolumeFromNetwork).
-    private func fetchWithCandidates(rootCID: String, candidates: [PeerID]) async -> [String: Data] {
+    private func fetchWithCandidates(rootCID: String, candidates: [PeerID], requestedCIDs: [String] = []) async -> [String: Data] {
         // Coalesce: join an existing in-flight request for this content.
         if let existing = pendingVolumeRequests[rootCID] {
             guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
@@ -1813,7 +1910,12 @@ public actor Ivy {
                     continuations: [continuation],
                     candidates: Set(candidates)
                 )
-                let message = Message.want(rootCIDs: [rootCID])
+                let message: Message
+                if requestedCIDs.isEmpty {
+                    message = .want(rootCIDs: [rootCID])
+                } else {
+                    message = .wantVolume(rootCID: rootCID, cids: requestedCIDs)
+                }
                 let payload = message.serialize()
                 for peer in candidates {
                     if let conn = connections[peer] {
@@ -1859,7 +1961,8 @@ public actor Ivy {
             }
         }
         guard !missing.isEmpty else { return result }
-        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID)
+        let requested = orderedRequestedCIDs(rootCID: rootCID, requestedCIDs: missing)
+        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID, requestedCIDs: requested)
         if let data = networkResult[rootCID] {
             result[rootCID] = data
         }
@@ -1953,23 +2056,33 @@ public actor Ivy {
     // MARK: - Cleanup
 
     private func cleanupPendingForPeer(_ peer: PeerID) {
-        let forwardsToResolve = pendingForwards.filter { $0.value.contains(peer) }
-        for (cid, var peers) in forwardsToResolve {
-            peers.removeAll { $0 == peer }
-            if peers.isEmpty {
-                pendingForwards.removeValue(forKey: cid)
-            } else {
-                pendingForwards[cid] = peers
-            }
+        let forwardCIDs = pendingForwards.compactMap { cid, peers in
+            peers[peer] == nil ? nil : cid
+        }
+        for cid in forwardCIDs {
+            removePendingForward(cid: cid, requester: peer)
         }
 
-        // Volume requests are keyed by root CID, not peer. A single peer
-        // disconnect no longer causes an isolated volume request cancellation —
-        // the remaining peers may still deliver the content.
-        // cleanupAllPending() handles full teardown.
+        let volumeRoots = pendingVolumeRequests.compactMap { rootCID, request in
+            request.candidates.contains(peer) ? rootCID : nil
+        }
+        for rootCID in volumeRoots {
+            markVolumeCandidateDone(rootCID: rootCID, peer: peer)
+        }
 
-        // Cancel any in-flight want-have checks where this peer was the only candidate.
-        // If other peers are still expected, leave the check running.
+        let peerKey = peer.publicKey
+        let findPinsRoots = pendingFindPins.compactMap { rootCID, pending in
+            pending.expectedPeers.contains(peerKey) ? rootCID : nil
+        }
+        for rootCID in findPinsRoots {
+            guard var pending = pendingFindPins[rootCID] else { continue }
+            pending.expectedPeers.remove(peerKey)
+            if pending.expectedPeers.isEmpty {
+                resolvePendingFindPins(rootCID: rootCID, peers: [])
+            } else {
+                pendingFindPins[rootCID] = pending
+            }
+        }
     }
 
     /// Safety net: resolve all pending continuations when the actor is torn down.
@@ -2022,7 +2135,13 @@ public actor Ivy {
             resolvePendingFindPins(rootCID: cid, peers: [])
         }
 
+        clearPendingForwards()
+    }
+
+    private func clearPendingForwards() {
         pendingForwards.removeAll()
+        pendingForwardCountsByPeer.removeAll()
+        pendingForwardCount = 0
     }
 
     // MARK: - Private Helpers

@@ -3,6 +3,8 @@ import NIOCore
 import Tally
 
 public final class LocalPeerConnection: @unchecked Sendable {
+    static let inboundBufferLimit = 256
+
     public let id: PeerID
     private let inbound: AsyncStream<Message>
     private let inboundContinuation: AsyncStream<Message>.Continuation
@@ -10,7 +12,9 @@ public final class LocalPeerConnection: @unchecked Sendable {
 
     public init(id: PeerID) {
         self.id = id
-        let (stream, continuation) = AsyncStream<Message>.makeStream()
+        let (stream, continuation) = AsyncStream<Message>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.inboundBufferLimit)
+        )
         self.inbound = stream
         self.inboundContinuation = continuation
     }

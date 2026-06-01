@@ -61,6 +61,17 @@ struct BoundedSetTests {
         #expect(set.contains(5))
         #expect(!set.contains(1))
     }
+
+    @Test("Remove drops exact member")
+    func testRemove() {
+        var set = BoundedSet<String>(capacity: 4)
+        set.insert("a")
+        set.insert("b")
+        let removed = set.remove("a")
+        #expect(removed)
+        #expect(!set.contains("a"))
+        #expect(set.contains("b"))
+    }
 }
 
 @Suite("BoundedDictionary")
@@ -134,6 +145,45 @@ struct BoundedDictionaryTests {
         #expect(best?.key == "b")
         #expect(best?.value == 5)
     }
+
+    @Test("Overflow evicts oldest entries")
+    func testOverflowEvictsOldest() {
+        var dict = BoundedDictionary<Int, String>(capacity: 4)
+        dict[1] = "one"
+        dict[2] = "two"
+        dict[3] = "three"
+        dict[4] = "four"
+        dict[5] = "five"
+
+        #expect(dict[1] == nil)
+        #expect(dict[5] == "five")
+        #expect(dict.count <= 4)
+    }
+}
+
+@Suite("InventorySet")
+struct InventorySetTests {
+
+    @Test("Contains only exact bounded entries")
+    func testExactBoundedMembership() {
+        var inventory = InventorySet(capacity: 4)
+        for i in 0..<10 {
+            inventory.insert("cid-\(i)")
+        }
+
+        #expect(inventory.count <= 4)
+        #expect(inventory.contains("cid-9"))
+        #expect(!inventory.contains("cid-0"))
+    }
+
+    @Test("Remove clears advertised availability")
+    func testRemove() {
+        var inventory = InventorySet(capacity: 4)
+        inventory.insert("cid")
+        let removed = inventory.remove("cid")
+        #expect(removed)
+        #expect(!inventory.contains("cid"))
+    }
 }
 
 @Suite("Message Validation")
@@ -190,6 +240,34 @@ struct MessageValidationTests {
     func testFrameSizeLimit() {
         #expect(MessageLimits.maxFrameSize == 4 * 1024 * 1024)
         #expect(MessageLimits.maxFrameSize < 64 * 1024 * 1024)
+    }
+}
+
+@Suite("Inbound Buffers")
+struct InboundBufferTests {
+
+    @Test("Local peer inbound stream is bounded newest")
+    func testLocalPeerInboundStreamIsBoundedNewest() async {
+        let (sender, receiver) = LocalPeerConnection.pair(
+            localID: PeerID(publicKey: "sender"),
+            remoteID: PeerID(publicKey: "receiver")
+        )
+
+        for i in 0..<(LocalPeerConnection.inboundBufferLimit + 44) {
+            sender.send(.ping(nonce: UInt64(i)))
+        }
+        sender.close()
+
+        var nonces: [UInt64] = []
+        for await message in receiver.messages {
+            if case .ping(let nonce) = message {
+                nonces.append(nonce)
+            }
+        }
+
+        #expect(nonces.count == LocalPeerConnection.inboundBufferLimit)
+        #expect(nonces.first == 44)
+        #expect(nonces.last == UInt64(LocalPeerConnection.inboundBufferLimit + 43))
     }
 }
 

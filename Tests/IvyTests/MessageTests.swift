@@ -232,6 +232,18 @@ struct MessageTests {
         }
     }
 
+    @Test("WantVolume roundtrip")
+    func testWantVolumeRoundtrip() {
+        let msg = Message.wantVolume(rootCID: "root", cids: ["root", "child-a", "child-b"])
+        let decoded = Message.deserialize(msg.serialize())
+        if case .wantVolume(let root, let cids) = decoded {
+            #expect(root == "root")
+            #expect(cids == ["root", "child-a", "child-b"])
+        } else {
+            Issue.record("Expected wantVolume")
+        }
+    }
+
     @Test("Identify with signature roundtrip")
     func testIdentifyWithSignature() {
         let sig = Data(repeating: 0xAB, count: 64)

@@ -18,6 +18,7 @@ final class PeerMessageLog: @unchecked Sendable {
     func received(want rootCID: String) -> Bool {
         messages.contains {
             if case .want(let cids) = $0 { return cids.contains(rootCID) }
+            if case .wantVolume(let root, _) = $0 { return root == rootCID }
             return false
         }
     }
@@ -25,6 +26,7 @@ final class PeerMessageLog: @unchecked Sendable {
     func wantCount(for rootCID: String) -> Int {
         messages.filter {
             if case .want(let cids) = $0 { return cids.contains(rootCID) }
+            if case .wantVolume(let root, _) = $0 { return root == rootCID }
             return false
         }.count
     }
@@ -35,6 +37,8 @@ private func requestedVolume(_ message: Message) -> (rootCID: String, cids: [Str
     case .want(let cids):
         guard let rootCID = cids.first else { return nil }
         return (rootCID, [])
+    case .wantVolume(let rootCID, let cids):
+        return (rootCID, cids)
     default:
         return nil
     }
@@ -697,6 +701,53 @@ struct WantHaveProtocolTests {
         #expect(blocksMsg != nil, "Node must respond with blocks when it has the volume")
         if case .blocks(_, let items) = blocksMsg {
             #expect(items.contains { $0.data == blockData }, "Blocks must contain the stored data")
+        }
+    }
+
+    @Test("handleWantVolume serves only requested CIDs")
+    func testHandleWantVolumeServesRequestedCIDs() async throws {
+        let node = makeNode(publicKey: "responder-filter-vol")
+        let nodeID = await node.localID
+
+        let ds = MockVolumeDataSource()
+        let rootData = Data("filtered root".utf8)
+        let rootCID = testCID(for: rootData)
+        let childAData = Data("filtered child a".utf8)
+        let childACID = testCID(for: childAData)
+        let childBData = Data("filtered child b".utf8)
+        let childBCID = testCID(for: childBData)
+        ds.store(rootCID: rootCID, entries: [
+            (cid: rootCID, data: rootData),
+            (cid: childACID, data: childAData),
+            (cid: childBCID, data: childBData),
+        ])
+        await node.setDataSource(ds)
+
+        let requesterID = PeerID(publicKey: "requester-filter-vol")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: requesterID)
+        await node.registerLocalPeer(local, as: requesterID)
+        try await Task.sleep(for: .milliseconds(20))
+
+        let log = PeerMessageLog()
+        Task {
+            for await msg in remote.messages {
+                log.record(msg)
+            }
+        }
+
+        remote.send(.wantVolume(rootCID: rootCID, cids: [childACID]))
+        try await Task.sleep(for: .milliseconds(150))
+
+        let blocksMsg = log.messages.first {
+            if case .blocks(let cid, _) = $0 { return cid == rootCID }
+            return false
+        }
+        if case .blocks(_, let items) = blocksMsg {
+            #expect(items.contains { $0.cid == rootCID })
+            #expect(items.contains { $0.cid == childACID })
+            #expect(!items.contains { $0.cid == childBCID })
+        } else {
+            Issue.record("Expected filtered blocks response")
         }
     }
 
