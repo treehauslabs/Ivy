@@ -165,7 +165,7 @@ struct MessageValidationTests {
         let peers = (0..<3).map { PeerEndpoint(publicKey: "k\($0)", host: "1.2.3.4", port: UInt16($0 + 1000)) }
         let msg = Message.neighbors(peers)
         let decoded = Message.deserialize(msg.serialize())
-        if case .neighbors(let p) = decoded {
+        if case .neighbors(let p, _) = decoded {
             #expect(p.count == 3)
         } else {
             Issue.record("Expected neighbors")

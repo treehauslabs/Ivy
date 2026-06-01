@@ -126,6 +126,109 @@ struct KademliaConvergenceTests {
         #expect(discoveredKeys == expectedClosest)
     }
 
+    @Test("concurrent findNode lookups keep neighbor responses separated by nonce")
+    func concurrentFindNodeLookupsKeepResponsesSeparated() async throws {
+        let source = Ivy(config: IvyConfig(
+            publicKey: "kad-concurrent-source",
+            listenPort: 0,
+            bootstrapPeers: [],
+            enableLocalDiscovery: false,
+            kBucketSize: 1,
+            healthConfig: PeerHealthConfig(
+                keepaliveInterval: .seconds(999),
+                staleTimeout: .seconds(999),
+                maxMissedPongs: 99,
+                enabled: false
+            ),
+            enablePEX: false,
+            replicationInterval: .seconds(999)
+        ))
+        let sourceID = await source.localID
+        let peerID = PeerID(publicKey: "kad-concurrent-peer")
+        let (sourceSide, peerSide) = LocalPeerConnection.pair(localID: sourceID, remoteID: peerID)
+        await source.registerLocalPeer(sourceSide, as: peerID)
+        await source.addToRouter(peerID, endpoint: PeerEndpoint(publicKey: peerID.publicKey, host: "local", port: 1))
+
+        let targetA = "kad-target-a"
+        let targetB = "kad-target-b"
+        let lookupA = Task { await source.findNode(target: targetA) }
+        let lookupB = Task { await source.findNode(target: targetB) }
+
+        var iterator = peerSide.messages.makeAsyncIterator()
+        let message1 = await iterator.next()
+        let message2 = await iterator.next()
+        let requests = [message1, message2].compactMap { message -> (target: Data, nonce: UInt64)? in
+            guard case .findNode(let target, _, let nonce) = message else { return nil }
+            return (target, nonce)
+        }
+        #expect(requests.count == 2)
+
+        guard let requestA = requests.first(where: { $0.target == Data(Router.hash(targetA)) }),
+              let requestB = requests.first(where: { $0.target == Data(Router.hash(targetB)) }) else {
+            Issue.record("Expected both concurrent findNode requests")
+            return
+        }
+
+        peerSide.send(.neighbors([PeerEndpoint(publicKey: targetB, host: "local", port: 2)], nonce: requestB.nonce))
+        peerSide.send(.neighbors([PeerEndpoint(publicKey: targetA, host: "local", port: 3)], nonce: requestA.nonce))
+
+        let resultA = await lookupA.value
+        let resultB = await lookupB.value
+
+        #expect(resultA.first?.publicKey == targetA)
+        #expect(resultB.first?.publicKey == targetB)
+
+        peerSide.close()
+    }
+
+    @Test("findNode uses later alpha responses when an earlier peer is silent")
+    func findNodeUsesLaterAlphaResponsesAfterSilentPeer() async throws {
+        let source = Ivy(config: IvyConfig(
+            publicKey: "kad-alpha-source",
+            listenPort: 0,
+            bootstrapPeers: [],
+            enableLocalDiscovery: false,
+            kBucketSize: 8,
+            healthConfig: PeerHealthConfig(
+                keepaliveInterval: .seconds(999),
+                staleTimeout: .seconds(999),
+                maxMissedPongs: 99,
+                enabled: false
+            ),
+            enablePEX: false,
+            replicationInterval: .seconds(999)
+        ))
+        let sourceID = await source.localID
+        let target = "kad-alpha-target"
+        let peerIDs = [
+            PeerID(publicKey: "kad-alpha-peer-1"),
+            PeerID(publicKey: "kad-alpha-peer-2")
+        ].sorted {
+            Router.isCloser(Router.hash($0.publicKey), than: Router.hash($1.publicKey), to: Router.hash(target))
+        }
+
+        let (firstNodeSide, firstPeerSide) = LocalPeerConnection.pair(localID: sourceID, remoteID: peerIDs[0])
+        let (secondNodeSide, secondPeerSide) = LocalPeerConnection.pair(localID: sourceID, remoteID: peerIDs[1])
+        await source.registerLocalPeer(firstNodeSide, as: peerIDs[0])
+        await source.registerLocalPeer(secondNodeSide, as: peerIDs[1])
+        await source.addToRouter(peerIDs[0], endpoint: PeerEndpoint(publicKey: peerIDs[0].publicKey, host: "local", port: 1))
+        await source.addToRouter(peerIDs[1], endpoint: PeerEndpoint(publicKey: peerIDs[1].publicKey, host: "local", port: 2))
+
+        let lookup = Task { await source.findNode(target: target) }
+        var secondIterator = secondPeerSide.messages.makeAsyncIterator()
+        guard case .findNode(_, _, let secondNonce) = await secondIterator.next() else {
+            Issue.record("Expected second alpha peer to receive findNode")
+            return
+        }
+        secondPeerSide.send(.neighbors([PeerEndpoint(publicKey: target, host: "local", port: 3)], nonce: secondNonce))
+
+        let result = await lookup.value
+        #expect(result.contains { $0.publicKey == target })
+
+        firstPeerSide.close()
+        secondPeerSide.close()
+    }
+
     @Test("findNode continues converging when some sparse-path peers churn out")
     func findNodeConvergesWithChurnedPeers() async throws {
         let nodeCount = 64
