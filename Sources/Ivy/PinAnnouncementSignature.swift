@@ -3,6 +3,7 @@ import Crypto
 
 public enum PinAnnouncementSignature {
     private static let domain = "ivy.pinAnnounce.v1"
+    public static let maxTTLSeconds: UInt64 = 86_400
 
     public static func signingMaterial(rootCID: String, publicKey: String, expiry: UInt64, fee: UInt64) -> Data {
         var data = Data()
@@ -32,6 +33,11 @@ public enum PinAnnouncementSignature {
         return verifyKey.isValidSignature(signature, for: material)
     }
 
+    public static func isExpiryValid(_ expiry: UInt64, now: UInt64 = UInt64(Date().timeIntervalSince1970)) -> Bool {
+        guard expiry > now else { return false }
+        return expiry <= now.saturatingAdd(maxTTLSeconds)
+    }
+
     private static func hexDecode(_ hex: String) -> Data? {
         guard hex.count % 2 == 0 else { return nil }
         var data = Data(capacity: hex.count / 2)
@@ -43,5 +49,12 @@ public enum PinAnnouncementSignature {
             index = nextIndex
         }
         return data
+    }
+}
+
+private extension UInt64 {
+    func saturatingAdd(_ value: UInt64) -> UInt64 {
+        let (result, overflow) = addingReportingOverflow(value)
+        return overflow ? UInt64.max : result
     }
 }

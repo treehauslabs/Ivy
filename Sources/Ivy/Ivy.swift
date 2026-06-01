@@ -1276,7 +1276,7 @@ public actor Ivy {
     private func handlePinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64, from peer: PeerID) {
         guard tally.shouldAllow(peer: peer) else { return }
         guard publicKey == peer.publicKey else { return }
-        guard expiry > UInt64(Date().timeIntervalSince1970) else { return }
+        guard PinAnnouncementSignature.isExpiryValid(expiry) else { return }
         guard PinAnnouncementSignature.verify(
             rootCID: rootCID,
             publicKey: publicKey,
@@ -1330,7 +1330,7 @@ public actor Ivy {
     }
 
     public func publishPinAnnounce(rootCID: String, expiry: UInt64, signature: Data, fee: UInt64) {
-        guard expiry > UInt64(Date().timeIntervalSince1970) else { return }
+        guard PinAnnouncementSignature.isExpiryValid(expiry) else { return }
         guard PinAnnouncementSignature.verify(
             rootCID: rootCID,
             publicKey: config.publicKey,
