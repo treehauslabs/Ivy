@@ -37,8 +37,15 @@ public actor STUNClient {
     }
 
     private func query(host: String, port: Int) async -> ObservedAddress? {
-        let handler = STUNResponseHandler()
         do {
+            var txnID = [UInt8](repeating: 0, count: 12)
+            for i in 0..<12 { txnID[i] = UInt8.random(in: 0...255) }
+
+            let remoteAddr = try SocketAddress.makeAddressResolvingHost(host, port: port)
+            let handler = STUNResponseHandler(
+                expectedTransactionID: txnID,
+                expectedRemoteAddress: remoteAddr
+            )
             let bootstrap = DatagramBootstrap(group: group)
                 .channelInitializer { channel in
                     channel.pipeline.addHandler(handler)
@@ -46,16 +53,12 @@ public actor STUNClient {
             let channel = try await bootstrap.bind(host: "0.0.0.0", port: 0).get()
             defer { channel.close(promise: nil) }
 
-            var txnID = [UInt8](repeating: 0, count: 12)
-            for i in 0..<12 { txnID[i] = UInt8.random(in: 0...255) }
-
             var request = Data(capacity: 20)
             request.appendUInt16(0x0001)
             request.appendUInt16(0x0000)
             request.appendUInt32(0x2112A442)
             request.append(contentsOf: txnID)
 
-            let remoteAddr = try SocketAddress.makeAddressResolvingHost(host, port: port)
             var buf = channel.allocator.buffer(capacity: 20)
             buf.writeBytes(request)
             let envelope = AddressedEnvelope(remoteAddress: remoteAddr, data: buf)
@@ -85,8 +88,15 @@ public actor STUNClient {
 final class STUNResponseHandler: ChannelInboundHandler, @unchecked Sendable {
     typealias InboundIn = AddressedEnvelope<ByteBuffer>
 
+    private let expectedTransactionID: [UInt8]?
+    private let expectedRemoteAddress: SocketAddress?
     private let lock = NSLock()
     private var continuation: CheckedContinuation<ObservedAddress?, Never>?
+
+    init(expectedTransactionID: [UInt8]? = nil, expectedRemoteAddress: SocketAddress? = nil) {
+        self.expectedTransactionID = expectedTransactionID
+        self.expectedRemoteAddress = expectedRemoteAddress
+    }
 
     func waitForResponse() async -> ObservedAddress? {
         await withTaskCancellationHandler {
@@ -112,8 +122,11 @@ final class STUNResponseHandler: ChannelInboundHandler, @unchecked Sendable {
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         let envelope = unwrapInboundIn(data)
+        if let expectedRemoteAddress, envelope.remoteAddress != expectedRemoteAddress {
+            return
+        }
         var buf = envelope.data
-        guard let addr = Self.parseResponse(&buf) else { return }
+        guard let addr = Self.parseResponse(&buf, expectedTransactionID: expectedTransactionID) else { return }
         lock.lock()
         let cont = continuation
         continuation = nil
@@ -121,7 +134,7 @@ final class STUNResponseHandler: ChannelInboundHandler, @unchecked Sendable {
         cont?.resume(returning: addr)
     }
 
-    static func parseResponse(_ buf: inout ByteBuffer) -> ObservedAddress? {
+    static func parseResponse(_ buf: inout ByteBuffer, expectedTransactionID: [UInt8]? = nil) -> ObservedAddress? {
         guard buf.readableBytes >= 20,
               let msgType: UInt16 = buf.readInteger(endianness: .big),
               let msgLen: UInt16 = buf.readInteger(endianness: .big),
@@ -129,7 +142,10 @@ final class STUNResponseHandler: ChannelInboundHandler, @unchecked Sendable {
               msgType == 0x0101,
               magic == 0x2112A442 else { return nil }
 
-        buf.moveReaderIndex(forwardBy: 12)
+        guard let txnID = buf.readBytes(length: 12) else { return nil }
+        if let expectedTransactionID, txnID != expectedTransactionID {
+            return nil
+        }
 
         var bytesLeft = Int(msgLen)
         while bytesLeft >= 4, buf.readableBytes >= 4 {
