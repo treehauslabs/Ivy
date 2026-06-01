@@ -3,6 +3,7 @@ import Foundation
 @testable import Ivy
 import Acorn
 import Tally
+import Crypto
 
 @Suite("Kademlia convergence", .serialized)
 struct KademliaConvergenceTests {
@@ -263,12 +264,15 @@ struct KademliaConvergenceTests {
         try await connectTransportMesh(nodes)
 
         let rootCID = cidClosestToNode(provider, nodeCount: nodeCount)
-        await nodes[provider].publishPinAnnounce(
-            rootCID: rootCID,
-            expiry: UInt64(Date().timeIntervalSince1970) + 3600,
-            signature: Data(),
-            fee: 0
-        )
+        let pinner = makePinSigningKey(label: "kad-provider-pinner")
+        let providerID = await nodes[provider].localID
+        let pinnerID = PeerID(publicKey: pinner.publicKey)
+        let (pinnerSide, providerSide) = LocalPeerConnection.pair(localID: pinnerID, remoteID: providerID)
+        await nodes[provider].registerLocalPeer(providerSide, as: pinnerID)
+        let expiry = UInt64(Date().timeIntervalSince1970) + 3600
+        let signature = PinAnnouncementSignature.sign(rootCID: rootCID, publicKey: pinner.publicKey, expiry: expiry, fee: 0, signingKey: pinner.signingKey)!
+        pinnerSide.send(.pinAnnounce(rootCID: rootCID, publicKey: pinner.publicKey, expiry: expiry, signature: signature, fee: 0))
+        try await Task.sleep(for: .milliseconds(100))
 
         await seedRouter(nodes[source], with: [bootstrap], nodes: nodes)
         await seedRouter(nodes[bootstrap], with: [provider], nodes: nodes)
@@ -279,9 +283,10 @@ struct KademliaConvergenceTests {
         let discovered = await nodes[source].discoverPinners(cid: rootCID)
         let sourceKeys = await routedKeys(nodes[source])
 
-        #expect(discovered.contains("kad-node-\(provider)"))
+        #expect(discovered.contains(pinner.publicKey))
         #expect(sourceKeys.contains("kad-node-\(provider)"),
             "provider discovery should reuse findNode to warm the route toward the CID")
+        pinnerSide.close()
     }
 
     @Test("pin lookup ignores wrong-peer and empty responses")
@@ -365,6 +370,13 @@ private func makeKademliaNodes(count: Int, kBucketSize: Int = 20) -> [Ivy] {
             replicationInterval: .seconds(999)
         ))
     }
+}
+
+private func makePinSigningKey(label: String) -> (publicKey: String, signingKey: Data) {
+    let seed = Data(SHA256.hash(data: Data(label.utf8)))
+    let privateKey = try! Curve25519.Signing.PrivateKey(rawRepresentation: seed)
+    let publicKey = privateKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+    return (publicKey, privateKey.rawRepresentation)
 }
 
 private func connectTransportMesh(_ nodes: [Ivy]) async throws {

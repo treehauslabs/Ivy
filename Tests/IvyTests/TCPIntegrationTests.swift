@@ -244,7 +244,6 @@ struct TCPIntegrationTests {
         await ivy1.publishPinAnnounce(
             rootCID: "pinned-data-root",
             expiry: expiry,
-            signature: Data(),
             fee: 5
         )
 
@@ -620,7 +619,6 @@ struct TCPIntegrationTests {
         await ivy1.publishPinAnnounce(
             rootCID: testCID,
             expiry: expiry,
-            signature: Data(),
             fee: 5
         )
         try await Task.sleep(for: .seconds(2))
@@ -714,7 +712,6 @@ struct TCPIntegrationTests {
         await ivy1.publishPinAnnounce(
             rootCID: pinCID,
             expiry: expiry,
-            signature: Data(),
             fee: 5
         )
         try await Task.sleep(for: .seconds(2))

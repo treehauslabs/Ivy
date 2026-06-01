@@ -1,8 +1,27 @@
 import Testing
 import Foundation
+import Crypto
 @testable import Ivy
 @testable import Tally
 import Acorn
+
+private func generatePinKeyPair() -> (publicKey: String, privateKey: Data) {
+    let privateKey = Curve25519.Signing.PrivateKey()
+    let pubHex = privateKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+    return (pubHex, privateKey.rawRepresentation)
+}
+
+private func signedPinAnnounce(rootCID: String, keyPair: (publicKey: String, privateKey: Data), fee: UInt64 = 5) -> Message {
+    let expiry = UInt64(Date().timeIntervalSince1970) + 3600
+    let signature = PinAnnouncementSignature.sign(
+        rootCID: rootCID,
+        publicKey: keyPair.publicKey,
+        expiry: expiry,
+        fee: fee,
+        signingKey: keyPair.privateKey
+    )!
+    return .pinAnnounce(rootCID: rootCID, publicKey: keyPair.publicKey, expiry: expiry, signature: signature, fee: fee)
+}
 
 /// Creates a simulated network of Ivy nodes connected via local peer connections.
 /// Returns the nodes and a cleanup function.
@@ -66,14 +85,15 @@ struct PinDiscoveryChainTests {
     func testPinDiscoveryAcrossNodes() async throws {
         // A stores pin announcement. B queries A via findPins.
         let nodeA = Ivy(config: testConfig(publicKey: "pin-a"))
-        let peerBID = PeerID(publicKey: "pin-b")
+        let pinB = generatePinKeyPair()
+        let peerBID = PeerID(publicKey: pinB.publicKey)
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
         await nodeA.registerLocalPeer(aSide, as: peerBID)
         try await Task.sleep(for: .milliseconds(50))
 
         // Store a pin announcement at A (as if a pinner published it)
-        bSide.send(.pinAnnounce(rootCID: "QmDiscovery", publicKey: "pinner-x", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(signedPinAnnounce(rootCID: "QmDiscovery", keyPair: pinB))
         try await Task.sleep(for: .milliseconds(100))
 
         // Now B queries for it
@@ -83,30 +103,27 @@ struct PinDiscoveryChainTests {
         // Verify A stored it
         let stored = await nodeA.storedPinAnnouncements(for: "QmDiscovery")
         #expect(stored.count == 1)
-        #expect(stored[0] == "pinner-x")
+        #expect(stored[0] == pinB.publicKey)
     }
 
     @Test("Multiple pinners for same CID all discoverable")
     func testMultiplePinners() async throws {
         let nodeA = Ivy(config: testConfig(publicKey: "multi-a"))
-        let peerBID = PeerID(publicKey: "multi-b")
+        let pinB = generatePinKeyPair()
+        let peerBID = PeerID(publicKey: pinB.publicKey)
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
         await nodeA.registerLocalPeer(aSide, as: peerBID)
         try await Task.sleep(for: .milliseconds(50))
 
-        // Two different pinners announce for the same CID
-        bSide.send(.pinAnnounce(rootCID: "QmShared", publicKey: "pinner-1", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        // Re-announcing from the same sender replaces that sender's provider record.
+        bSide.send(signedPinAnnounce(rootCID: "QmShared", keyPair: pinB, fee: 5))
         try await Task.sleep(for: .milliseconds(50))
-        bSide.send(.pinAnnounce(rootCID: "QmShared", publicKey: "pinner-2", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        bSide.send(signedPinAnnounce(rootCID: "QmShared", keyPair: pinB, fee: 6))
         try await Task.sleep(for: .milliseconds(100))
 
         let stored = await nodeA.storedPinAnnouncements(for: "QmShared")
-        #expect(stored.count == 2)
-
-        let keys = Set(stored)
-        #expect(keys.contains("pinner-1"))
-        #expect(keys.contains("pinner-2"))
+        #expect(stored == [pinB.publicKey])
     }
 }
 
