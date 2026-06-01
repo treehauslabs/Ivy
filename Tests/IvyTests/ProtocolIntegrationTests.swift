@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import Crypto
 @testable import Ivy
 @testable import Tally
 
@@ -29,24 +30,77 @@ final class MessageCollector: IvyDelegate, @unchecked Sendable {
 
 @Suite("Protocol Integration")
 struct ProtocolIntegrationTests {
+    private func generateKeyPair() -> (publicKey: String, privateKey: Data) {
+        let privateKey = Curve25519.Signing.PrivateKey()
+        let pubHex = privateKey.publicKey.rawRepresentation.map { String(format: "%02x", $0) }.joined()
+        return (pubHex, privateKey.rawRepresentation)
+    }
+
+    private func pinSignature(rootCID: String, publicKey: String, expiry: UInt64, fee: UInt64, privateKey: Data) -> Data {
+        PinAnnouncementSignature.sign(rootCID: rootCID, publicKey: publicKey, expiry: expiry, fee: fee, signingKey: privateKey)!
+    }
 
     @Test("Pin announcement stored and discoverable")
     func testPinAnnouncementStored() async throws {
         let config = testConfig(publicKey: "node-a")
         let nodeA = Ivy(config: config)
-        let peerBID = PeerID(publicKey: "node-b")
+        let (pubB, privB) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
         await nodeA.registerLocalPeer(aSide, as: peerBID)
         try await Task.sleep(for: .milliseconds(50))
 
         // B publishes a pin announcement through A
-        bSide.send(.pinAnnounce(rootCID: "QmRoot", publicKey: "pinner-z", expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        let expiry = UInt64(Date().timeIntervalSince1970) + 3600
+        let fee: UInt64 = 5
+        let signature = pinSignature(rootCID: "QmRoot", publicKey: pubB, expiry: expiry, fee: fee, privateKey: privB)
+        bSide.send(.pinAnnounce(rootCID: "QmRoot", publicKey: pubB, expiry: expiry, signature: signature, fee: fee))
         try await Task.sleep(for: .milliseconds(100))
 
         let stored = await nodeA.storedPinAnnouncements(for: "QmRoot")
         #expect(stored.count == 1)
-        #expect(stored[0] == "pinner-z")
+        #expect(stored[0] == pubB)
+        bSide.close()
+    }
+
+    @Test("Unsigned pin announcement rejected")
+    func testUnsignedPinAnnouncementRejected() async throws {
+        let nodeA = Ivy(config: testConfig(publicKey: "node-a"))
+        let (pubB, _) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        try await Task.sleep(for: .milliseconds(50))
+
+        bSide.send(.pinAnnounce(rootCID: "QmRoot", publicKey: pubB, expiry: UInt64(Date().timeIntervalSince1970) + 3600, signature: Data(), fee: 5))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let stored = await nodeA.storedPinAnnouncements(for: "QmRoot")
+        #expect(stored.isEmpty)
+        bSide.close()
+    }
+
+    @Test("Third-party pin announcement rejected")
+    func testThirdPartyPinAnnouncementRejected() async throws {
+        let nodeA = Ivy(config: testConfig(publicKey: "node-a"))
+        let (pubB, _) = generateKeyPair()
+        let (pubVictim, victimPriv) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let expiry = UInt64(Date().timeIntervalSince1970) + 3600
+        let fee: UInt64 = 5
+        let signature = pinSignature(rootCID: "QmRoot", publicKey: pubVictim, expiry: expiry, fee: fee, privateKey: victimPriv)
+        bSide.send(.pinAnnounce(rootCID: "QmRoot", publicKey: pubVictim, expiry: expiry, signature: signature, fee: fee))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let stored = await nodeA.storedPinAnnouncements(for: "QmRoot")
+        #expect(stored.isEmpty)
         bSide.close()
     }
 

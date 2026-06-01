@@ -856,8 +856,8 @@ public actor Ivy {
             handlePinsResponse(cid: cid, providers: providers, from: peer)
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
 
-        case .pinAnnounce(let rootCID, let publicKey, let expiry, _, _):
-            handlePinAnnounce(rootCID: rootCID, publicKey: publicKey, expiry: expiry, from: peer)
+        case .pinAnnounce(let rootCID, let publicKey, let expiry, let signature, let fee):
+            handlePinAnnounce(rootCID: rootCID, publicKey: publicKey, expiry: expiry, signature: signature, fee: fee, from: peer)
 
         case .pinStored:
             delegate?.ivy(self, didReceiveMessage: message, from: peer)
@@ -1281,8 +1281,17 @@ public actor Ivy {
         fireToPeer(peer, .pins(cid: cid, providers: providers))
     }
 
-    private func handlePinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, from peer: PeerID) {
+    private func handlePinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64, from peer: PeerID) {
         guard tally.shouldAllow(peer: peer) else { return }
+        guard publicKey == peer.publicKey else { return }
+        guard expiry > UInt64(Date().timeIntervalSince1970) else { return }
+        guard PinAnnouncementSignature.verify(
+            rootCID: rootCID,
+            publicKey: publicKey,
+            expiry: expiry,
+            fee: fee,
+            signature: signature
+        ) else { return }
 
         var existing = pinAnnouncements[rootCID] ?? []
         existing.removeAll { $0.publicKey == publicKey }
@@ -1315,7 +1324,29 @@ public actor Ivy {
         }
     }
 
+    public func publishPinAnnounce(rootCID: String, expiry: UInt64, fee: UInt64) {
+        guard let signature = PinAnnouncementSignature.sign(
+            rootCID: rootCID,
+            publicKey: config.publicKey,
+            expiry: expiry,
+            fee: fee,
+            signingKey: config.signingKey
+        ) else {
+            return
+        }
+        publishPinAnnounce(rootCID: rootCID, expiry: expiry, signature: signature, fee: fee)
+    }
+
     public func publishPinAnnounce(rootCID: String, expiry: UInt64, signature: Data, fee: UInt64) {
+        guard expiry > UInt64(Date().timeIntervalSince1970) else { return }
+        guard PinAnnouncementSignature.verify(
+            rootCID: rootCID,
+            publicKey: config.publicKey,
+            expiry: expiry,
+            fee: fee,
+            signature: signature
+        ) else { return }
+
         // Self-record: when we publish that we pin a CID, we are also a
         // valid answer to findPins for that CID. Without this, a node that
         // is itself in the closest-K to the CID hash never appears in its
