@@ -2030,10 +2030,8 @@ public actor Ivy {
         return result
     }
 
-    /// Resolves all pending volume requests for a given rootCID regardless of
-    /// which peer key suffix they're stored under. Used by onCancel to handle
-    /// cases where the peer's PeerID changed (key migration) after the request
-    /// was registered.
+    /// Resolves the pending volume request for a given rootCID. Volume requests
+    /// are keyed by content, not by the peer that may serve it.
     func resolveVolumeRequestsForRoot(rootCID: String) {
         resolveVolumeRequest(key: rootCID, result: [:])
     }

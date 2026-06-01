@@ -104,10 +104,10 @@ struct PeerDisconnectTests {
         )
     }
 
-    /// Regression: onCancel used to resolve a single exact volume key. Teardown
-    /// must now resolve the pending request for that root.
-    @Test("resolveVolumeRequestsForRoot resolves continuations regardless of peer key suffix")
-    func testResolveByRootCIDHandlesKeyMigration() async throws {
+    /// Regression: cancellation/teardown resolves the pending request by the
+    /// content root, matching pendingVolumeRequests' rootCID-only keying.
+    @Test("resolveVolumeRequestsForRoot resolves continuations by rootCID")
+    func testResolveByRootCID() async throws {
         let config = IvyConfig(
             publicKey: "root-resolve-a",
             listenPort: 0,
@@ -131,15 +131,14 @@ struct PeerDisconnectTests {
 
         try await Task.sleep(for: .milliseconds(30))
 
-        // Start a fetch — continuation stored under "test-root-cid-<8chars>"
+        // Start a fetch — continuation stored under the root CID.
         let fetchTask = Task {
             await node.fetchVolumeFromAllPeers(rootCID: "test-root-cid")
         }
         try await Task.sleep(for: .milliseconds(80))
 
-        // Simulate what onCancel does after a key migration:
-        // resolveVolumeRequestsForRoot matches by rootCID prefix, so the
-        // continuation is found even if the peer's key suffix changed.
+        // Simulate what onCancel does: resolve by the content key, independent
+        // of which peer was expected to answer.
         let start = ContinuousClock.now
         await node.resolveVolumeRequestsForRoot(rootCID: "test-root-cid")
 
