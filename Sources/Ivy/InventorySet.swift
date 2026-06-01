@@ -29,23 +29,19 @@ struct BloomFilter: Sendable {
     private let hashCount: Int
 
     init(bits bitCount: Int, hashCount: Int) {
-        self.bitCount = bitCount
-        self.hashCount = hashCount
-        self.bits = [UInt64](repeating: 0, count: (bitCount + 63) / 64)
+        self.bitCount = max(1, bitCount)
+        self.hashCount = max(0, hashCount)
+        self.bits = [UInt64](repeating: 0, count: (self.bitCount + 63) / 64)
     }
 
     mutating func insert(_ item: String) {
-        let hashes = computeHashes(item)
-        for h in hashes {
-            let idx = h % bitCount
+        for idx in computeHashes(item) {
             bits[idx / 64] |= 1 << (idx % 64)
         }
     }
 
     func mightContain(_ item: String) -> Bool {
-        let hashes = computeHashes(item)
-        for h in hashes {
-            let idx = h % bitCount
+        for idx in computeHashes(item) {
             if bits[idx / 64] & (1 << (idx % 64)) == 0 { return false }
         }
         return true
@@ -55,10 +51,20 @@ struct BloomFilter: Sendable {
         let bytes = Array(item.utf8)
         let h1 = fnv1a(bytes)
         let h2 = murmur(bytes)
+        return Self.bitPositions(h1: h1, h2: h2, hashCount: hashCount, bitCount: bitCount)
+    }
+
+    static func bitPositions(h1: Int, h2: Int, hashCount: Int, bitCount: Int) -> [Int] {
+        let bitCount = max(1, bitCount)
+        let hashCount = max(0, hashCount)
         var result = [Int]()
         result.reserveCapacity(hashCount)
+        let modulus = UInt(bitCount)
+        let base = UInt(bitPattern: h1)
+        let step = UInt(bitPattern: h2)
         for i in 0..<hashCount {
-            result.append(abs(h1 &+ i &* h2))
+            let hash = base &+ UInt(i) &* step
+            result.append(Int(hash % modulus))
         }
         return result
     }

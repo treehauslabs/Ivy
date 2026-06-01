@@ -184,6 +184,27 @@ struct InventorySetTests {
         #expect(removed)
         #expect(!inventory.contains("cid"))
     }
+
+    @Test("Bloom filter hash positions tolerate Int.min")
+    func testBloomHashPositionsTolerateIntMin() {
+        let positions = BloomFilter.bitPositions(
+            h1: Int.min,
+            h2: -1,
+            hashCount: 8,
+            bitCount: 64
+        )
+
+        #expect(positions.count == 8)
+        #expect(positions.allSatisfy { (0..<64).contains($0) })
+    }
+
+    @Test("Bloom filter membership stays bounded")
+    func testBloomFilterMembership() {
+        var filter = BloomFilter(bits: 64, hashCount: 4)
+        filter.insert("bafy-intmin-boundary")
+
+        #expect(filter.mightContain("bafy-intmin-boundary"))
+    }
 }
 
 @Suite("Message Validation")
