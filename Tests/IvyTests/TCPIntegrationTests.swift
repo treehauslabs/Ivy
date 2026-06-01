@@ -327,6 +327,37 @@ struct TCPIntegrationTests {
         await ivy1.stop()
         await ivy2.stop()
     }
+
+    @Test("findNode discovers a peer through an intermediate over real TCP")
+    func testFindNodeDiscoversPeerThroughIntermediateTCP() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let kp3 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort(); let p3 = nextPort()
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey))
+        let ivy3 = Ivy(config: makeConfig(port: p3, publicKey: kp3.publicKey))
+
+        try await ivy1.start()
+        try await ivy2.start()
+        try await ivy3.start()
+
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await ivy3.connect(to: PeerEndpoint(publicKey: kp2.publicKey, host: "127.0.0.1", port: p2))
+        try await Task.sleep(for: .seconds(2))
+
+        let discovered = await ivy3.findNode(target: kp1.publicKey)
+        let discoveredKeys = Set(discovered.map(\.publicKey))
+
+        #expect(discoveredKeys.contains(kp1.publicKey),
+            "node 3 should learn node 1's endpoint by querying node 2 over the TCP protocol")
+
+        await ivy1.stop()
+        await ivy2.stop()
+        await ivy3.stop()
+    }
+
     @Test("Three-node relay over real TCP", .disabled("Multi-hop relay requires fee forwarding path"))
     func testThreeNodeRelayTCP() async throws {
         let kp1 = generateKey()

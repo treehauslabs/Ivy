@@ -252,6 +252,99 @@ struct KademliaConvergenceTests {
         #expect(!discoveredKeys.isEmpty)
         #expect(finalBestDistance < initialBestDistance)
     }
+
+    @Test("provider lookup warms routing before asking closest peers for pins")
+    func providerLookupWarmsRoutingBeforeFindPins() async throws {
+        let nodeCount = 32
+        let source = 0
+        let bootstrap = 1
+        let provider = 23
+        let nodes = makeKademliaNodes(count: nodeCount, kBucketSize: 8)
+        try await connectTransportMesh(nodes)
+
+        let rootCID = cidClosestToNode(provider, nodeCount: nodeCount)
+        await nodes[provider].publishPinAnnounce(
+            rootCID: rootCID,
+            expiry: UInt64(Date().timeIntervalSince1970) + 3600,
+            signature: Data(),
+            fee: 0
+        )
+
+        await seedRouter(nodes[source], with: [bootstrap], nodes: nodes)
+        await seedRouter(nodes[bootstrap], with: [provider], nodes: nodes)
+        await seedTargetConvergentRoutingTables(nodes, targetKey: rootCID, outDegree: 8, skipping: [source])
+
+        #expect(!(await routedKeys(nodes[source]).contains("kad-node-\(provider)")))
+
+        let discovered = await nodes[source].discoverPinners(cid: rootCID)
+        let sourceKeys = await routedKeys(nodes[source])
+
+        #expect(discovered.contains("kad-node-\(provider)"))
+        #expect(sourceKeys.contains("kad-node-\(provider)"),
+            "provider discovery should reuse findNode to warm the route toward the CID")
+    }
+
+    @Test("pin lookup ignores wrong-peer and empty responses")
+    func pinLookupIgnoresWrongPeerAndEmptyResponses() async throws {
+        let source = Ivy(config: IvyConfig(
+            publicKey: "kad-pin-source",
+            listenPort: 0,
+            bootstrapPeers: [],
+            enableLocalDiscovery: false,
+            kBucketSize: 1,
+            healthConfig: PeerHealthConfig(
+                keepaliveInterval: .seconds(999),
+                staleTimeout: .seconds(999),
+                maxMissedPongs: 99,
+                enabled: false
+            ),
+            enablePEX: false,
+            replicationInterval: .seconds(999)
+        ))
+        let sourceID = await source.localID
+        let queriedID = PeerID(publicKey: "kad-pin-queried")
+        let wrongID = PeerID(publicKey: "kad-pin-wrong")
+        let (queriedNodeSide, queriedPeerSide) = LocalPeerConnection.pair(localID: sourceID, remoteID: queriedID)
+        let (wrongNodeSide, wrongPeerSide) = LocalPeerConnection.pair(localID: sourceID, remoteID: wrongID)
+        await source.registerLocalPeer(queriedNodeSide, as: queriedID)
+        await source.registerLocalPeer(wrongNodeSide, as: wrongID)
+        await source.addToRouter(queriedID, endpoint: PeerEndpoint(publicKey: queriedID.publicKey, host: "local", port: 1))
+
+        let rootCID = "kad-pin-root"
+        let lookup = Task { await source.discoverPinners(cid: rootCID) }
+
+        var queriedMessages = queriedPeerSide.messages.makeAsyncIterator()
+        var sawFindPins = false
+        while !sawFindPins {
+            guard let message = await queriedMessages.next() else {
+                Issue.record("Expected findPins request")
+                return
+            }
+            switch message {
+            case .findNode(_, _, let nonce):
+                queriedPeerSide.send(.neighbors([], nonce: nonce))
+            case .findPins(let cid, _):
+                #expect(cid == rootCID)
+                sawFindPins = true
+            default:
+                continue
+            }
+        }
+
+        wrongPeerSide.send(.pins(cid: rootCID, providers: ["spoofed-provider"]))
+        queriedPeerSide.send(.pins(cid: rootCID, providers: []))
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(!(await source.providers(for: rootCID).contains(PeerID(publicKey: "spoofed-provider"))))
+
+        queriedPeerSide.send(.pins(cid: rootCID, providers: ["honest-provider"]))
+        let discovered = await lookup.value
+
+        #expect(discovered == ["honest-provider"])
+
+        queriedPeerSide.close()
+        wrongPeerSide.close()
+    }
 }
 
 private func makeKademliaNodes(count: Int, kBucketSize: Int = 20) -> [Ivy] {
@@ -302,7 +395,15 @@ private func routedKeys(_ node: Ivy) async -> Set<String> {
 }
 
 private func seedTargetConvergentRoutingTables(_ nodes: [Ivy], targetIndex: Int, outDegree: Int) async {
-    let targetKey = "kad-node-\(targetIndex)"
+    await seedTargetConvergentRoutingTables(nodes, targetKey: "kad-node-\(targetIndex)", outDegree: outDegree)
+}
+
+private func seedTargetConvergentRoutingTables(
+    _ nodes: [Ivy],
+    targetKey: String,
+    outDegree: Int,
+    skipping skippedIndexes: Set<Int> = []
+) async {
     let targetHash = Router.hash(targetKey)
     let ranked = nodes.indices.sorted {
         Router.xorDistance(Router.hash("kad-node-\($0)"), targetHash) < Router.xorDistance(Router.hash("kad-node-\($1)"), targetHash)
@@ -310,6 +411,7 @@ private func seedTargetConvergentRoutingTables(_ nodes: [Ivy], targetIndex: Int,
     let rankByIndex = Dictionary(uniqueKeysWithValues: ranked.enumerated().map { ($0.element, $0.offset) })
 
     for index in nodes.indices {
+        if skippedIndexes.contains(index) { continue }
         let rank = rankByIndex[index]!
         let closer = ranked[..<rank].suffix(outDegree)
         var neighbors = Array(closer)
@@ -375,4 +477,16 @@ private func bestDistance(from keys: Set<String>, to targetKey: String) -> [UInt
     return keys
         .map { Router.xorDistance(Router.hash($0), targetHash) }
         .min() ?? Array(repeating: UInt8.max, count: targetHash.count)
+}
+
+private func cidClosestToNode(_ targetIndex: Int, nodeCount: Int) -> String {
+    (0..<10_000)
+        .map { "kad-provider-cid-\(targetIndex)-\($0)" }
+        .first { cid in
+            let closest = (0..<nodeCount).min {
+                Router.xorDistance(Router.hash("kad-node-\($0)"), Router.hash(cid)) <
+                    Router.xorDistance(Router.hash("kad-node-\($1)"), Router.hash(cid))
+            }
+            return closest == targetIndex
+        } ?? "kad-node-\(targetIndex)"
 }
