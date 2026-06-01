@@ -34,6 +34,38 @@ struct STUNParsingTests {
         #expect(STUNResponseHandler.parseResponse(&buf, expectedTransactionID: otherTxnID) == nil)
     }
 
+    @Test("Unexpected STUN message classes are rejected")
+    func testUnexpectedMessageTypeRejected() {
+        let txnID = Array(UInt8(1)...UInt8(12))
+        var buf = buildSTUNResponse(attrType: 0x0020, xorMapped: true, ip: "203.0.113.5", port: 4001, transactionID: txnID)
+        buf.setInteger(UInt16(0x0001), at: 0, endianness: .big)
+        #expect(STUNResponseHandler.parseResponse(&buf, expectedTransactionID: txnID) == nil)
+    }
+
+    @Test("Malformed mapped-address attributes are rejected")
+    func testMalformedMappedAddressRejected() {
+        let txnID = Array(UInt8(1)...UInt8(12))
+        var shortValue = buildSTUNResponse(
+            attrType: 0x0020,
+            xorMapped: true,
+            ip: "203.0.113.5",
+            port: 4001,
+            transactionID: txnID,
+            attrLength: 7
+        )
+        #expect(STUNResponseHandler.parseResponse(&shortValue, expectedTransactionID: txnID) == nil)
+
+        var ipv6Value = buildSTUNResponse(
+            attrType: 0x0020,
+            xorMapped: true,
+            ip: "203.0.113.5",
+            port: 4001,
+            transactionID: txnID,
+            family: 0x02
+        )
+        #expect(STUNResponseHandler.parseResponse(&ipv6Value, expectedTransactionID: txnID) == nil)
+    }
+
     @Test("Invalid magic cookie returns nil")
     func testBadMagic() {
         var buf = ByteBuffer()
@@ -56,7 +88,9 @@ struct STUNParsingTests {
         xorMapped: Bool,
         ip: String,
         port: UInt16,
-        transactionID: [UInt8] = Array(repeating: 0, count: 12)
+        transactionID: [UInt8] = Array(repeating: 0, count: 12),
+        attrLength: UInt16 = 8,
+        family: UInt8 = 0x01
     ) -> ByteBuffer {
         let parts = ip.split(separator: ".").compactMap { UInt8($0) }
         let ipNum = UInt32(parts[0]) << 24 | UInt32(parts[1]) << 16 | UInt32(parts[2]) << 8 | UInt32(parts[3])
@@ -68,9 +102,9 @@ struct STUNParsingTests {
 
         var attrBuf = ByteBuffer()
         attrBuf.writeInteger(attrType, endianness: .big)
-        attrBuf.writeInteger(UInt16(8), endianness: .big)
+        attrBuf.writeInteger(attrLength, endianness: .big)
         attrBuf.writeInteger(UInt8(0))
-        attrBuf.writeInteger(UInt8(0x01))
+        attrBuf.writeInteger(family)
         attrBuf.writeInteger(xPort, endianness: .big)
         attrBuf.writeInteger(xAddr, endianness: .big)
 

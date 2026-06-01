@@ -78,6 +78,57 @@ struct NodeRecordTests {
         #expect(!tampered.verify(at: 101))
     }
 
+    @Test("Time window rejects future and overlong records")
+    func testTimeWindowRejectsFutureAndOverlongRecords() {
+        let (pub, priv) = generateKeyPair()
+        let now: UInt64 = 1_700_000_000
+        let validFuture = NodeRecord.create(
+            publicKey: pub,
+            host: "1.2.3.4",
+            port: 4001,
+            sequenceNumber: 1,
+            signingKey: priv,
+            issuedAt: now + NodeRecord.maxFutureSkewSeconds,
+            ttlSeconds: 10
+        )!
+        #expect(validFuture.verify(at: now))
+
+        let tooFarFuture = NodeRecord.create(
+            publicKey: pub,
+            host: "1.2.3.4",
+            port: 4001,
+            sequenceNumber: 2,
+            signingKey: priv,
+            issuedAt: now + NodeRecord.maxFutureSkewSeconds + 1,
+            ttlSeconds: 10
+        )!
+        #expect(!tooFarFuture.verify(at: now))
+
+        let boundedTTL = NodeRecord.create(
+            publicKey: pub,
+            host: "1.2.3.4",
+            port: 4001,
+            sequenceNumber: 3,
+            signingKey: priv,
+            issuedAt: now,
+            ttlSeconds: NodeRecord.maxTTLSeconds + 1
+        )!
+        #expect(boundedTTL.expiresAt == now + NodeRecord.maxTTLSeconds)
+        #expect(boundedTTL.verify(at: now))
+
+        let overlong = NodeRecord(
+            publicKey: pub,
+            host: "1.2.3.4",
+            port: 4001,
+            sequenceNumber: 4,
+            issuedAt: now,
+            expiresAt: now + NodeRecord.maxTTLSeconds + 1,
+            signature: boundedTTL.signature
+        )
+        #expect(!overlong.isTimeValid(at: now))
+        #expect(!overlong.verify(at: now))
+    }
+
     @Test("Create fails with invalid signing key")
     func testInvalidSigningKey() {
         let (pub, _) = generateKeyPair()

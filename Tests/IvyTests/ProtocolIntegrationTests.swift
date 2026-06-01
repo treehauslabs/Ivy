@@ -40,6 +40,33 @@ struct ProtocolIntegrationTests {
         PinAnnouncementSignature.sign(rootCID: rootCID, publicKey: publicKey, expiry: expiry, fee: fee, signingKey: privateKey)!
     }
 
+    @Test("Pin announcement signature binds all mutable fields")
+    func testPinAnnouncementSignatureBindsFields() {
+        let (publicKey, privateKey) = generateKeyPair()
+        let expiry: UInt64 = 1_700_000_000
+        let signature = pinSignature(rootCID: "QmRoot", publicKey: publicKey, expiry: expiry, fee: 5, privateKey: privateKey)
+
+        #expect(PinAnnouncementSignature.verify(rootCID: "QmRoot", publicKey: publicKey, expiry: expiry, fee: 5, signature: signature))
+        #expect(!PinAnnouncementSignature.verify(rootCID: "QmOther", publicKey: publicKey, expiry: expiry, fee: 5, signature: signature))
+        #expect(!PinAnnouncementSignature.verify(rootCID: "QmRoot", publicKey: String(repeating: "0", count: 64), expiry: expiry, fee: 5, signature: signature))
+        #expect(!PinAnnouncementSignature.verify(rootCID: "QmRoot", publicKey: publicKey, expiry: expiry + 1, fee: 5, signature: signature))
+        #expect(!PinAnnouncementSignature.verify(rootCID: "QmRoot", publicKey: publicKey, expiry: expiry, fee: 6, signature: signature))
+
+        var tamperedSignature = signature
+        tamperedSignature[0] ^= 0x01
+        #expect(!PinAnnouncementSignature.verify(rootCID: "QmRoot", publicKey: publicKey, expiry: expiry, fee: 5, signature: tamperedSignature))
+    }
+
+    @Test("Pin announcement expiry is bounded")
+    func testPinAnnouncementExpiryBounded() {
+        let now: UInt64 = 1_700_000_000
+        #expect(!PinAnnouncementSignature.isExpiryValid(now, now: now))
+        #expect(PinAnnouncementSignature.isExpiryValid(now + 1, now: now))
+        #expect(PinAnnouncementSignature.isExpiryValid(now + PinAnnouncementSignature.maxTTLSeconds, now: now))
+        #expect(!PinAnnouncementSignature.isExpiryValid(now + PinAnnouncementSignature.maxTTLSeconds + 1, now: now))
+        #expect(!PinAnnouncementSignature.isExpiryValid(UInt64.max, now: now))
+    }
+
     @Test("Pin announcement stored and discoverable")
     func testPinAnnouncementStored() async throws {
         let config = testConfig(publicKey: "node-a")
@@ -101,6 +128,31 @@ struct ProtocolIntegrationTests {
 
         let stored = await nodeA.storedPinAnnouncements(for: "QmRoot")
         #expect(stored.isEmpty)
+        bSide.close()
+    }
+
+    @Test("Expired and far-future pin announcements rejected")
+    func testOutOfWindowPinAnnouncementsRejected() async throws {
+        let nodeA = Ivy(config: testConfig(publicKey: "node-a"))
+        let (pubB, privB) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let now = UInt64(Date().timeIntervalSince1970)
+        for (rootCID, expiry) in [
+            ("QmExpiredPin", now),
+            ("QmFarFuturePin", now + PinAnnouncementSignature.maxTTLSeconds + 3600)
+        ] {
+            let signature = pinSignature(rootCID: rootCID, publicKey: pubB, expiry: expiry, fee: 5, privateKey: privB)
+            bSide.send(.pinAnnounce(rootCID: rootCID, publicKey: pubB, expiry: expiry, signature: signature, fee: 5))
+        }
+        try await Task.sleep(for: .milliseconds(100))
+
+        #expect(await nodeA.storedPinAnnouncements(for: "QmExpiredPin").isEmpty)
+        #expect(await nodeA.storedPinAnnouncements(for: "QmFarFuturePin").isEmpty)
         bSide.close()
     }
 
