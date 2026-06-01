@@ -8,8 +8,9 @@ struct STUNParsingTests {
 
     @Test("Parse XOR-MAPPED-ADDRESS IPv4")
     func testXorMappedAddress() {
-        var buf = buildSTUNResponse(attrType: 0x0020, xorMapped: true, ip: "203.0.113.5", port: 4001)
-        let addr = STUNResponseHandler.parseResponse(&buf)
+        let txnID = Array(UInt8(1)...UInt8(12))
+        var buf = buildSTUNResponse(attrType: 0x0020, xorMapped: true, ip: "203.0.113.5", port: 4001, transactionID: txnID)
+        let addr = STUNResponseHandler.parseResponse(&buf, expectedTransactionID: txnID)
         #expect(addr != nil)
         #expect(addr?.host == "203.0.113.5")
         #expect(addr?.port == 4001)
@@ -17,11 +18,20 @@ struct STUNParsingTests {
 
     @Test("Parse MAPPED-ADDRESS IPv4")
     func testMappedAddress() {
-        var buf = buildSTUNResponse(attrType: 0x0001, xorMapped: false, ip: "192.168.1.1", port: 8080)
-        let addr = STUNResponseHandler.parseResponse(&buf)
+        let txnID = Array(UInt8(13)...UInt8(24))
+        var buf = buildSTUNResponse(attrType: 0x0001, xorMapped: false, ip: "192.168.1.1", port: 8080, transactionID: txnID)
+        let addr = STUNResponseHandler.parseResponse(&buf, expectedTransactionID: txnID)
         #expect(addr != nil)
         #expect(addr?.host == "192.168.1.1")
         #expect(addr?.port == 8080)
+    }
+
+    @Test("Mismatched transaction ID returns nil")
+    func testMismatchedTransactionID() {
+        let txnID = Array(UInt8(1)...UInt8(12))
+        let otherTxnID = Array(UInt8(21)...UInt8(32))
+        var buf = buildSTUNResponse(attrType: 0x0020, xorMapped: true, ip: "203.0.113.5", port: 4001, transactionID: txnID)
+        #expect(STUNResponseHandler.parseResponse(&buf, expectedTransactionID: otherTxnID) == nil)
     }
 
     @Test("Invalid magic cookie returns nil")
@@ -41,7 +51,13 @@ struct STUNParsingTests {
         #expect(STUNResponseHandler.parseResponse(&buf) == nil)
     }
 
-    private func buildSTUNResponse(attrType: UInt16, xorMapped: Bool, ip: String, port: UInt16) -> ByteBuffer {
+    private func buildSTUNResponse(
+        attrType: UInt16,
+        xorMapped: Bool,
+        ip: String,
+        port: UInt16,
+        transactionID: [UInt8] = Array(repeating: 0, count: 12)
+    ) -> ByteBuffer {
         let parts = ip.split(separator: ".").compactMap { UInt8($0) }
         let ipNum = UInt32(parts[0]) << 24 | UInt32(parts[1]) << 16 | UInt32(parts[2]) << 8 | UInt32(parts[3])
 
@@ -62,7 +78,7 @@ struct STUNParsingTests {
         buf.writeInteger(UInt16(0x0101), endianness: .big)
         buf.writeInteger(UInt16(attrBuf.readableBytes), endianness: .big)
         buf.writeInteger(magic, endianness: .big)
-        buf.writeRepeatingByte(0, count: 12)
+        buf.writeBytes(transactionID)
         buf.writeBuffer(&attrBuf)
 
         return buf
