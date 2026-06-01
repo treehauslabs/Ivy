@@ -5,6 +5,8 @@ import NIOFoundationCompat
 import Tally
 
 public final class PeerConnection: @unchecked Sendable {
+    static let inboundBufferLimit = 256
+
     public internal(set) var id: PeerID
     public let endpoint: PeerEndpoint
     let channel: Channel
@@ -15,7 +17,9 @@ public final class PeerConnection: @unchecked Sendable {
         self.id = id
         self.endpoint = endpoint
         self.channel = channel
-        let (stream, continuation) = AsyncStream<Message>.makeStream()
+        let (stream, continuation) = AsyncStream<Message>.makeStream(
+            bufferingPolicy: .bufferingNewest(Self.inboundBufferLimit)
+        )
         self.inbound = stream
         self.inboundContinuation = continuation
     }

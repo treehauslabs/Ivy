@@ -41,13 +41,19 @@ struct BoundedSet<Element: Hashable & Sendable>: Sendable {
         storage.removeAll()
         insertionOrder.removeAll()
     }
+
+    @discardableResult
+    mutating func remove(_ element: Element) -> Bool {
+        guard storage.remove(element) != nil else { return false }
+        insertionOrder.removeAll { $0 == element }
+        return true
+    }
 }
 
 struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private var storage: [Key: Value]
-    // Parallel array of keys — O(1) random access for sampling, O(1) swap-remove
-    // by consulting `keyIndex` below. Order is NOT insertion order after
-    // swap-removes; callers that need oldest-first semantics should not use this.
+    // Parallel insertion-order array of keys for O(1) random sampling and
+    // bounded oldest-first overflow eviction.
     private var keys_: ContiguousArray<Key>
     private var keyIndex: [Key: Int]
     let capacity: Int
@@ -71,16 +77,13 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
             if let value = newValue {
                 if storage[key] == nil {
                     if storage.count >= capacity {
-                        // Fallback eviction: evict one pseudo-random entry to make
-                        // room. Callers (e.g. ProfitWeightedStore) should make
-                        // explicit room via `removeValue` before inserting; this
-                        // path is a safety valve.
+                        // Fallback eviction: shed oldest entries to make room.
+                        // Callers (e.g. ProfitWeightedStore) should make explicit
+                        // room via `removeValue` before inserting; this path is a
+                        // safety valve.
                         let evictCount = Swift.max(capacity / 4, 1)
                         for _ in 0..<Swift.min(evictCount, keys_.count) {
-                            let evicted = keys_[keys_.count - 1]
-                            storage.removeValue(forKey: evicted)
-                            keyIndex.removeValue(forKey: evicted)
-                            keys_.removeLast()
+                            removeOldestKeyTracking()
                         }
                     }
                     keyIndex[key] = keys_.count
@@ -151,13 +154,22 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
 
     private mutating func removeKeyTracking(_ key: Key) {
         guard let idx = keyIndex.removeValue(forKey: key) else { return }
-        let lastIdx = keys_.count - 1
-        if idx != lastIdx {
-            let lastKey = keys_[lastIdx]
-            keys_[idx] = lastKey
-            keyIndex[lastKey] = idx
+        keys_.remove(at: idx)
+        if idx < keys_.count {
+            for shiftedIdx in idx..<keys_.count {
+                keyIndex[keys_[shiftedIdx]] = shiftedIdx
+            }
         }
-        keys_.removeLast()
+    }
+
+    private mutating func removeOldestKeyTracking() {
+        guard !keys_.isEmpty else { return }
+        let evicted = keys_.removeFirst()
+        storage.removeValue(forKey: evicted)
+        keyIndex.removeValue(forKey: evicted)
+        for idx in keys_.indices {
+            keyIndex[keys_[idx]] = idx
+        }
     }
 }
 

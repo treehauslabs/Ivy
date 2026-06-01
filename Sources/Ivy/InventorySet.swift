@@ -2,20 +2,22 @@ import Foundation
 
 public struct InventorySet: Sendable {
     private var recent: BoundedSet<String>
-    private var filter: BloomFilter
 
     public init(capacity: Int = 65_536, bloomBits: Int = 1 << 20, bloomHashes: Int = 7) {
         self.recent = BoundedSet(capacity: capacity)
-        self.filter = BloomFilter(bits: bloomBits, hashCount: bloomHashes)
     }
 
     public mutating func insert(_ cid: String) {
         recent.insert(cid)
-        filter.insert(cid)
     }
 
     public func contains(_ cid: String) -> Bool {
-        recent.contains(cid) || filter.mightContain(cid)
+        recent.contains(cid)
+    }
+
+    @discardableResult
+    public mutating func remove(_ cid: String) -> Bool {
+        recent.remove(cid)
     }
 
     public var count: Int { recent.count }
