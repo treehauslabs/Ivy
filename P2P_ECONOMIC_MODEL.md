@@ -69,31 +69,31 @@ This means:
 
 ### The Bootstrap Problem
 
-When a node discovers a new child chain (via a `GenesisAction` on the parent chain), it needs peers for that chain's overlay. But it has no connections to child chain peers yet.
+When a node discovers a new child overlay (in Lattice, via a `GenesisAction` on the parent chain), it needs peers for that overlay. But it has no connections to child-overlay peers yet.
 
-Pin discovery on the nexus DHT cannot solve this — the nexus keyspace is organized around nexus peer IDs, and the K closest nexus nodes to a child chain CID hash have no reason to know about child chain pinners.
+Pin discovery on the root overlay's DHT cannot solve this — that keyspace is organized around the root overlay's peer IDs, and the K closest root nodes to a child-overlay CID hash have no reason to know about child-overlay pinners.
 
-### Resolution Through Merged Mining
+### Resolution Through the Parent Overlay
 
-Parent chain peers already have child chain data. Merged mining means parent chain blocks embed child chain blocks — every parent chain peer that processed the `GenesisAction` has the child chain's genesis and subsequent blocks.
+The key is that **parent-overlay peers already hold the child's data**. Whenever the parent's data contains the child's — e.g. under *merged mining*, where parent-overlay blocks embed child-overlay blocks (Lattice's model) — every parent peer that processed the child's registration already has the child overlay's genesis and subsequent data.
 
 The bootstrap flow:
 
-1. Node is on the parent chain, connected to parent chain peers.
-2. A parent chain block arrives containing a `GenesisAction` for child chain X. The genesis CID is now known.
-3. Parent chain peers that processed this block already serve chain X data.
-4. Those peers become the initial entries in the node's chain X routing table.
-5. Through those initial peers, the node discovers more chain X participants via peer exchange and builds out the routing table.
+1. Node is on the parent overlay, connected to parent-overlay peers.
+2. A parent-overlay block arrives registering child overlay X (in Lattice, a `GenesisAction`). The genesis CID is now known.
+3. Parent-overlay peers that processed this block already serve overlay X data.
+4. Those peers become the initial entries in the node's overlay X routing table.
+5. Through those initial peers, the node discovers more overlay X participants via peer exchange and builds out the routing table.
 
 ### Hierarchical Bootstrap
 
-This mechanism is recursive. It is not specific to the nexus:
+This mechanism is recursive. It is not specific to the root overlay:
 
-- The nexus bootstraps its direct children
-- Each child chain bootstraps its own children
+- The root overlay bootstraps its direct children
+- Each child overlay bootstraps its own children
 - Each grandchild bootstraps its children
 
-Every chain bootstraps the chains it parents. The parent-child relationship is the only cross-chain link. The nexus is the root of the tree, but has no special discovery role beyond being the chain that every node participates in.
+Every overlay bootstraps the overlays it parents. The parent-child relationship is the only cross-overlay link. The root overlay is the root of the tree (in Lattice, the nexus), but has no special discovery role beyond being the overlay every node participates in.
 
 ### Reputation Inheritance
 
@@ -167,9 +167,9 @@ Each chain overlay needs enough peers for reliable operation:
 
 Nodes monitor per-chain peer counts. When a chain's routing table falls below a minimum threshold:
 
-1. Query existing chain peers for additional peers (peer exchange within the chain overlay)
-2. Ask parent chain peers for more child chain participants (re-bootstrap from parent)
-3. Accept inbound connections from new chain participants
+1. Query existing overlay peers for additional peers (peer exchange within the overlay)
+2. Ask parent-overlay peers for more child-overlay participants (re-bootstrap from parent)
+3. Accept inbound connections from new overlay participants
 
 ## Future Extension: Credit Line Routing
 
