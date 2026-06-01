@@ -1377,16 +1377,20 @@ public actor Ivy {
         guard record.verify() else { return }
         guard record.serialize().count <= NodeRecord.maxSize else { return }
         if let existing = nodeRecordCache[record.publicKey] {
-            guard record.sequenceNumber > existing.sequenceNumber else { return }
+            if existing.isExpired() {
+                nodeRecordCache.removeValue(forKey: record.publicKey)
+            } else {
+                guard record.sequenceNumber > existing.sequenceNumber else { return }
+            }
         }
         nodeRecordCache[record.publicKey] = record
     }
 
     private func handleGetNodeRecord(publicKey: String, from peer: PeerID) {
         guard tally.shouldAllow(peer: peer) else { return }
-        if publicKey == config.publicKey, let local = localNodeRecord {
+        if publicKey == config.publicKey, let local = localNodeRecord, !local.isExpired() {
             fireToPeer(peer, .nodeRecord(record: local))
-        } else if let cached = nodeRecordCache[publicKey] {
+        } else if let cached = cachedNodeRecord(for: publicKey) {
             fireToPeer(peer, .nodeRecord(record: cached))
         }
     }
@@ -1407,7 +1411,7 @@ public actor Ivy {
     }
 
     public func publishNodeRecord() {
-        guard let record = localNodeRecord else { return }
+        guard let record = localNodeRecord, !record.isExpired() else { return }
         let msg = Message.nodeRecord(record: record)
         let keyHash = Router.hash(config.publicKey)
         let closest = router.closestPeers(to: keyHash, count: config.kBucketSize)
@@ -1419,7 +1423,7 @@ public actor Ivy {
     }
 
     public func lookupNodeRecord(publicKey: String) async -> NodeRecord? {
-        if let cached = nodeRecordCache[publicKey] { return cached }
+        if let cached = cachedNodeRecord(for: publicKey) { return cached }
         let keyHash = Router.hash(publicKey)
         let closest = router.closestPeers(to: keyHash, count: config.maxConcurrentRequests)
         for entry in closest {
@@ -1428,11 +1432,20 @@ public actor Ivy {
             fireToPeer(entry.id, .getNodeRecord(publicKey: publicKey))
         }
         try? await Task.sleep(for: .milliseconds(500))
-        return nodeRecordCache[publicKey]
+        return cachedNodeRecord(for: publicKey)
     }
 
     public func nodeRecord(for publicKey: String) -> NodeRecord? {
-        nodeRecordCache[publicKey]
+        cachedNodeRecord(for: publicKey)
+    }
+
+    private func cachedNodeRecord(for publicKey: String) -> NodeRecord? {
+        guard let record = nodeRecordCache[publicKey] else { return nil }
+        if record.isExpired() {
+            nodeRecordCache.removeValue(forKey: publicKey)
+            return nil
+        }
+        return record
     }
 
     // MARK: - Public API (Application-Facing)

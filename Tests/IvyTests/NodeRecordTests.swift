@@ -16,20 +16,23 @@ struct NodeRecordTests {
     @Test("Create and verify roundtrip")
     func testCreateAndVerify() {
         let (pub, priv) = generateKeyPair()
-        let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv)
+        let now: UInt64 = 1_700_000_000
+        let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv, issuedAt: now)
         #expect(record != nil)
-        #expect(record!.verify())
+        #expect(record!.verify(at: now))
         #expect(record!.publicKey == pub)
         #expect(record!.host == "1.2.3.4")
         #expect(record!.port == 4001)
         #expect(record!.sequenceNumber == 1)
+        #expect(record!.issuedAt == now)
+        #expect(record!.expiresAt == now + NodeRecord.defaultTTLSeconds)
     }
 
     @Test("Verify rejects tampered host")
     func testTamperedHost() {
         let (pub, priv) = generateKeyPair()
         let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv)!
-        let tampered = NodeRecord(publicKey: pub, host: "5.6.7.8", port: 4001, sequenceNumber: 1, signature: record.signature)
+        let tampered = NodeRecord(publicKey: pub, host: "5.6.7.8", port: 4001, sequenceNumber: 1, issuedAt: record.issuedAt, expiresAt: record.expiresAt, signature: record.signature)
         #expect(!tampered.verify())
     }
 
@@ -37,7 +40,7 @@ struct NodeRecordTests {
     func testTamperedPort() {
         let (pub, priv) = generateKeyPair()
         let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv)!
-        let tampered = NodeRecord(publicKey: pub, host: "1.2.3.4", port: 9999, sequenceNumber: 1, signature: record.signature)
+        let tampered = NodeRecord(publicKey: pub, host: "1.2.3.4", port: 9999, sequenceNumber: 1, issuedAt: record.issuedAt, expiresAt: record.expiresAt, signature: record.signature)
         #expect(!tampered.verify())
     }
 
@@ -45,7 +48,7 @@ struct NodeRecordTests {
     func testTamperedSeq() {
         let (pub, priv) = generateKeyPair()
         let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv)!
-        let tampered = NodeRecord(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 2, signature: record.signature)
+        let tampered = NodeRecord(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 2, issuedAt: record.issuedAt, expiresAt: record.expiresAt, signature: record.signature)
         #expect(!tampered.verify())
     }
 
@@ -54,8 +57,25 @@ struct NodeRecordTests {
         let (pub, priv) = generateKeyPair()
         let (otherPub, _) = generateKeyPair()
         let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv)!
-        let tampered = NodeRecord(publicKey: otherPub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signature: record.signature)
+        let tampered = NodeRecord(publicKey: otherPub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, issuedAt: record.issuedAt, expiresAt: record.expiresAt, signature: record.signature)
         #expect(!tampered.verify())
+    }
+
+    @Test("Verify rejects expired record")
+    func testExpiredRecord() {
+        let (pub, priv) = generateKeyPair()
+        let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv, issuedAt: 100, ttlSeconds: 10)!
+        #expect(record.verify(at: 109))
+        #expect(!record.verify(at: 110))
+        #expect(record.isExpired(at: 110))
+    }
+
+    @Test("Verify rejects tampered expiry")
+    func testTamperedExpiry() {
+        let (pub, priv) = generateKeyPair()
+        let record = NodeRecord.create(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, signingKey: priv, issuedAt: 100, ttlSeconds: 10)!
+        let tampered = NodeRecord(publicKey: pub, host: "1.2.3.4", port: 4001, sequenceNumber: 1, issuedAt: 100, expiresAt: 200, signature: record.signature)
+        #expect(!tampered.verify(at: 101))
     }
 
     @Test("Create fails with invalid signing key")
@@ -260,8 +280,30 @@ struct NodeRecordProtocolTests {
         await nodeA.registerLocalPeer(aSide, as: peerBID)
         try await Task.sleep(for: .milliseconds(50))
 
-        let forged = NodeRecord(publicKey: pubB, host: "evil.com", port: 666, sequenceNumber: 1, signature: Data(repeating: 0xFF, count: 64))
+        let now = UInt64(Date().timeIntervalSince1970)
+        let forged = NodeRecord(publicKey: pubB, host: "evil.com", port: 666, sequenceNumber: 1, issuedAt: now, expiresAt: now + 3600, signature: Data(repeating: 0xFF, count: 64))
         bSide.send(Message.nodeRecord(record: forged))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let cached = await nodeA.nodeRecord(for: pubB)
+        #expect(cached == nil)
+        bSide.close()
+    }
+
+    @Test("Expired record rejected by cache")
+    func testExpiredRecordRejectedByCache() async throws {
+        let (pubA, privA) = generateKeyPair()
+        let nodeA = Ivy(config: makeConfig(pub: pubA, priv: privA))
+        let (pubB, privB) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let now = UInt64(Date().timeIntervalSince1970)
+        let expired = NodeRecord.create(publicKey: pubB, host: "10.0.0.1", port: 4001, sequenceNumber: 1, signingKey: privB, issuedAt: now - 10, ttlSeconds: 1)!
+        bSide.send(Message.nodeRecord(record: expired))
         try await Task.sleep(for: .milliseconds(100))
 
         let cached = await nodeA.nodeRecord(for: pubB)
@@ -273,7 +315,7 @@ struct NodeRecordProtocolTests {
     func testGetNodeRecordServesCached() async throws {
         let (pubA, privA) = generateKeyPair()
         let nodeA = Ivy(config: makeConfig(pub: pubA, priv: privA))
-        let (pubB, privB) = generateKeyPair()
+        let (pubB, _) = generateKeyPair()
         let (pubC, privC) = generateKeyPair()
         let peerBID = PeerID(publicKey: pubB)
         let localID = await nodeA.localID
