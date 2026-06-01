@@ -2,9 +2,9 @@
 
 ## Overview
 
-Ivy is a peer-to-peer network for **multi-overlay** architectures: each overlay (a "chain") maintains its own Kademlia overlay, a parent overlay can bootstrap a child overlay's peer set, and peer quality is managed through Tally reputation with PoW identity floors.
+Ivy is a peer-to-peer network for **multi-chain** architectures: each chain maintains its own Kademlia overlay (DHT), a parent chain can bootstrap a child chain's peer set, and peer quality is managed through Tally reputation with PoW identity floors.
 
-> This document describes the **generic** model and uses **Lattice** as the running example (its `Nexus` root and child chains). Nothing here is Lattice-specific — the same model applies to any multi-overlay host; the Lattice-specific deployment lives in the `lattice-node` docs.
+> This document describes the **generic** model and uses **Lattice** as the running example (its `Nexus` root chain and child chains). Nothing here is Lattice-specific: a "chain" is any path-identified routing partition (its own keyspace, DHT, and peer set) — not necessarily a blockchain — and the same model applies to any multi-chain host. The Lattice-specific deployment lives in the `lattice-node` docs.
 
 The current model uses peer exchange (PEX) with Tally reputation — nodes connect freely, serve data cooperatively, and build trust through successful exchanges. This document also describes a credit line extension that can be enabled per-node for chains that want paid data availability, without changing the protocol.
 
@@ -12,7 +12,7 @@ The current model uses peer exchange (PEX) with Tally reputation — nodes conne
 
 ### One Overlay Per Chain
 
-Each chain (overlay) in the tree operates its own Kademlia DHT. A node's routing table for chain X contains K entries — peers that participate in chain X, each tracked by Tally for reputation.
+Each chain in the tree operates its own Kademlia overlay (DHT). A node's routing table for chain X contains K entries — peers that participate in chain X, each tracked by Tally for reputation.
 
 All chain operations stay within the chain's overlay:
 
@@ -21,7 +21,7 @@ All chain operations stay within the chain's overlay:
 - **Block gossip**: Announce new blocks to chain overlay peers.
 - **Pin announcements** (`pinAnnounce`): Declare that you serve specific CIDs, stored by K closest nodes in the chain overlay.
 
-There is no global routing table. The root overlay (in the Lattice example, the nexus chain — which every node participates in, since merged mining requires it) is the root of the tree, not a separate discovery layer.
+There is no global routing table. The root chain (in the Lattice example, the nexus — which every node participates in, since merged mining requires it) is the root of the tree, not a separate discovery layer.
 
 ### Routing Table Structure
 
@@ -69,31 +69,31 @@ This means:
 
 ### The Bootstrap Problem
 
-When a node discovers a new child overlay (in Lattice, via a `GenesisAction` on the parent chain), it needs peers for that overlay. But it has no connections to child-overlay peers yet.
+When a node discovers a new child chain (in Lattice, via a `GenesisAction` on the parent chain), it needs peers for that chain. But it has no connections to child-chain peers yet.
 
-Pin discovery on the root overlay's DHT cannot solve this — that keyspace is organized around the root overlay's peer IDs, and the K closest root nodes to a child-overlay CID hash have no reason to know about child-overlay pinners.
+Pin discovery on the root chain's DHT cannot solve this — that keyspace is organized around the root chain's peer IDs, and the K closest root nodes to a child-chain CID hash have no reason to know about child-chain pinners.
 
-### Resolution Through the Parent Overlay
+### Resolution Through the Parent Chain
 
-The key is that **parent-overlay peers already hold the child's data**. Whenever the parent's data contains the child's — e.g. under *merged mining*, where parent-overlay blocks embed child-overlay blocks (Lattice's model) — every parent peer that processed the child's registration already has the child overlay's genesis and subsequent data.
+The key is that **parent-chain peers already hold the child's data**. Whenever the parent's data contains the child's — e.g. under *merged mining*, where parent-chain blocks embed child-chain blocks (Lattice's model) — every parent peer that processed the child's registration already has the child chain's genesis and subsequent data.
 
 The bootstrap flow:
 
-1. Node is on the parent overlay, connected to parent-overlay peers.
-2. A parent-overlay block arrives registering child overlay X (in Lattice, a `GenesisAction`). The genesis CID is now known.
-3. Parent-overlay peers that processed this block already serve overlay X data.
-4. Those peers become the initial entries in the node's overlay X routing table.
-5. Through those initial peers, the node discovers more overlay X participants via peer exchange and builds out the routing table.
+1. Node is on the parent chain, connected to parent-chain peers.
+2. A parent-chain block arrives registering child chain X (in Lattice, a `GenesisAction`). The genesis CID is now known.
+3. Parent-chain peers that processed this block already serve chain X data.
+4. Those peers become the initial entries in the node's chain X routing table.
+5. Through those initial peers, the node discovers more chain X participants via peer exchange and builds out the routing table.
 
 ### Hierarchical Bootstrap
 
-This mechanism is recursive. It is not specific to the root overlay:
+This mechanism is recursive. It is not specific to the root chain:
 
-- The root overlay bootstraps its direct children
-- Each child overlay bootstraps its own children
+- The root chain bootstraps its direct children
+- Each child chain bootstraps its own children
 - Each grandchild bootstraps its children
 
-Every overlay bootstraps the overlays it parents. The parent-child relationship is the only cross-overlay link. The root overlay is the root of the tree (in Lattice, the nexus), but has no special discovery role beyond being the overlay every node participates in.
+Every chain bootstraps the chains it parents. The parent-child relationship is the only cross-chain link. The root chain is the root of the tree (in Lattice, the nexus), but has no special discovery role beyond being the chain every node participates in.
 
 ### Reputation Inheritance
 
@@ -167,9 +167,9 @@ Each chain overlay needs enough peers for reliable operation:
 
 Nodes monitor per-chain peer counts. When a chain's routing table falls below a minimum threshold:
 
-1. Query existing overlay peers for additional peers (peer exchange within the overlay)
-2. Ask parent-overlay peers for more child-overlay participants (re-bootstrap from parent)
-3. Accept inbound connections from new overlay participants
+1. Query existing chain peers for additional peers (peer exchange within the chain overlay)
+2. Ask parent-chain peers for more child-chain participants (re-bootstrap from parent)
+3. Accept inbound connections from new chain participants
 
 ## Future Extension: Credit Line Routing
 
