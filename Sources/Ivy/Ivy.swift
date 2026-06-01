@@ -51,6 +51,9 @@ public actor Ivy {
     private static let announceGossipRefillPerSec: Double = 50
     private var pexTask: Task<Void, Never>?
     private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
+    private var pendingNeighborResponses: [UUID: CheckedContinuation<[PeerEndpoint], Never>] = [:]
+    private var queuedNeighborResponses: [[PeerEndpoint]] = []
+    private var acceptingNeighborResponses = false
     private var healthMonitor: PeerHealthMonitor?
     private var haveSet = InventorySet()
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
@@ -489,28 +492,32 @@ public actor Ivy {
 
     public func findNode(target: String) async -> [PeerEndpoint] {
         let targetHash = Router.hash(target)
-        var queried: Set<String> = []
-        var previousClosest: [String] = []
         let lookupParallelism = min(Self.kademliaLookupParallelism, max(1, config.kBucketSize))
         // Convergence normally stops the lookup; k rounds is only a safety guard.
         let maxLookupRounds = max(1, config.kBucketSize)
+        var candidatesByKey: [String: Router.BucketEntry] = [:]
+        var queried: Set<String> = []
+        var previousCandidateKeys: [String] = []
+        queuedNeighborResponses.removeAll()
+        acceptingNeighborResponses = true
+        defer {
+            acceptingNeighborResponses = false
+            queuedNeighborResponses.removeAll()
+        }
 
         for _ in 0..<maxLookupRounds {
-            let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
-            let closestKeys = closest.map { $0.id.publicKey }
-            if closestKeys == previousClosest {
-                let hasUnqueriedReachable = closest.contains {
+            for entry in router.closestPeers(to: targetHash, count: config.kBucketSize) {
+                candidatesByKey[entry.id.publicKey] = entry
+            }
+
+            let candidates = closestCandidateEntries(candidatesByKey.values, to: targetHash)
+            let candidateKeys = candidates.map { $0.id.publicKey }
+            let toQuery = candidates
+                .filter {
                     !queried.contains($0.id.publicKey) &&
                     (connections[$0.id] != nil || localPeers[$0.id] != nil)
                 }
-                if !hasUnqueriedReachable { break }
-            }
-            previousClosest = closestKeys
-
-            let toQuery = closest.filter {
-                !queried.contains($0.id.publicKey) &&
-                (connections[$0.id] != nil || localPeers[$0.id] != nil)
-            }.prefix(lookupParallelism)
+                .prefix(lookupParallelism)
 
             if toQuery.isEmpty { break }
 
@@ -519,10 +526,28 @@ public actor Ivy {
                 fireToPeer(entry.id, .findNode(target: Data(targetHash)))
             }
 
-            try? await Task.sleep(for: .milliseconds(500))
+            let responses = await collectNeighborResponses(expected: toQuery.count, timeout: .milliseconds(500))
+            for endpoint in responses.flatMap({ $0 }) {
+                let id = PeerID(publicKey: endpoint.publicKey)
+                candidatesByKey[id.publicKey] = Router.BucketEntry(
+                    id: id,
+                    hash: Router.hash(id.publicKey),
+                    endpoint: endpoint,
+                    lastSeen: .now
+                )
+            }
+
+            let stabilized = candidateKeys == previousCandidateKeys
+            previousCandidateKeys = candidateKeys
+            if stabilized && !candidates.contains(where: { !queried.contains($0.id.publicKey) }) {
+                break
+            }
         }
 
-        return router.closestPeers(to: targetHash, count: config.kBucketSize).map { $0.endpoint }
+        for entry in router.closestPeers(to: targetHash, count: config.kBucketSize) {
+            candidatesByKey[entry.id.publicKey] = entry
+        }
+        return closestCandidateEntries(candidatesByKey.values, to: targetHash).map { $0.endpoint }
     }
 
     // MARK: - Serving
@@ -767,9 +792,14 @@ public actor Ivy {
 
         case .neighbors(let endpoints):
             guard tally.shouldAllow(peer: peer) else { return }
+            var accepted: [PeerEndpoint] = []
             for ep in endpoints {
-                addDiscoveredPeer(ep, source: "neighbors", from: peer)
+                if isAcceptableDiscoveredEndpoint(ep, source: "neighbors", from: peer) {
+                    accepted.append(ep)
+                    _ = addDiscoveredPeer(ep, source: "neighbors", from: peer)
+                }
             }
+            receiveNeighborResponse(accepted)
 
         case .announceBlock(let cid):
             // Rate-limit per-peer broadcast relaying. One announce triggers N
@@ -1412,6 +1442,49 @@ public actor Ivy {
         for cont in waiters { cont.resume(returning: peers) }
     }
 
+    private func collectNeighborResponses(expected: Int, timeout: Duration) async -> [[PeerEndpoint]] {
+        guard expected > 0 else { return [] }
+        var responses: [[PeerEndpoint]] = []
+        responses.reserveCapacity(expected)
+        for _ in 0..<expected {
+            let response = await nextNeighborResponse(timeout: timeout)
+            if response.isEmpty { break }
+            responses.append(response)
+        }
+        return responses
+    }
+
+    private func nextNeighborResponse(timeout: Duration) async -> [PeerEndpoint] {
+        if !queuedNeighborResponses.isEmpty {
+            return queuedNeighborResponses.removeFirst()
+        }
+
+        let id = UUID()
+        return await withCheckedContinuation { cont in
+            pendingNeighborResponses[id] = cont
+            Task.detached { [weak self] in
+                try? await Task.sleep(for: timeout)
+                await self?.resolveNeighborResponse(id: id, endpoints: [])
+            }
+        }
+    }
+
+    private func receiveNeighborResponse(_ endpoints: [PeerEndpoint]) {
+        if let id = pendingNeighborResponses.keys.first,
+           let cont = pendingNeighborResponses.removeValue(forKey: id) {
+            cont.resume(returning: endpoints)
+            return
+        }
+        if acceptingNeighborResponses && queuedNeighborResponses.count < config.kBucketSize {
+            queuedNeighborResponses.append(endpoints)
+        }
+    }
+
+    private func resolveNeighborResponse(id: UUID, endpoints: [PeerEndpoint]) {
+        guard let cont = pendingNeighborResponses.removeValue(forKey: id) else { return }
+        cont.resume(returning: endpoints)
+    }
+
     /// Generate a Curve25519 key pair with target difficulty.
     public static func generateKey(targetDifficulty: Int, maxAttempts: Int = 100_000_000) -> (publicKey: String, privateKey: Data)? {
         for _ in 0..<maxAttempts {
@@ -1821,6 +1894,9 @@ public actor Ivy {
         for (_, cont) in pendingPEX {
             cont.resume(returning: [])
         }
+        for (_, cont) in pendingNeighborResponses {
+            cont.resume(returning: [])
+        }
         for (_, continuations) in pendingFindPins {
             for cont in continuations { cont.resume(returning: []) }
         }
@@ -1831,6 +1907,13 @@ public actor Ivy {
             cont.resume(returning: [])
         }
         pendingPEX.removeAll()
+
+        for (_, cont) in pendingNeighborResponses {
+            cont.resume(returning: [])
+        }
+        pendingNeighborResponses.removeAll()
+        queuedNeighborResponses.removeAll()
+        acceptingNeighborResponses = false
 
         for (cid, _) in pendingRequests {
             resolvePending(cid: cid, data: nil)
@@ -1858,6 +1941,16 @@ public actor Ivy {
         for cont in continuations {
             cont.resume(returning: data)
         }
+    }
+
+    private func closestCandidateEntries(
+        _ entries: some Sequence<Router.BucketEntry>,
+        to targetHash: [UInt8]
+    ) -> [Router.BucketEntry] {
+        Array(entries)
+            .sorted { Router.isCloser($0.hash, than: $1.hash, to: targetHash) }
+            .prefix(config.kBucketSize)
+            .map { $0 }
     }
 
     private func startListener() async throws {
