@@ -64,7 +64,7 @@ This document inventories what Ivy currently implements versus what state-of-the
 
 **Why it matters**: Solana's Turbine uses 32:32 erasure coding (tolerates 50% loss) to propagate ~100MB/s of block data across thousands of validators in ~200ms. Without erasure coding, packet loss requires retransmission round-trips that compound at each relay hop.
 
-**Ivy gap**: No erasure coding. Block propagation relies on full retransmission or compact block reconstruction. For high-throughput chains on Lattice, this will be a bottleneck.
+**Ivy gap**: No erasure coding. Block propagation relies on full retransmission or compact block reconstruction. For high-throughput consuming chains, this will be a bottleneck.
 
 **Impact**: High for high-throughput chains. Lower priority for low-TPS chains where compact blocks suffice.
 
@@ -170,7 +170,7 @@ This document inventories what Ivy currently implements versus what state-of-the
 
 **Ivy gap**: No DAS primitives. No erasure coding (prerequisite). No KZG commitment support. No column/row-based gossip subscription.
 
-**Impact**: Low-Medium for Lattice today. High if Lattice adopts a modular architecture where data availability is separated from execution. This is a forward-looking capability.
+**Impact**: Low-Medium for a typical consuming chain today. High if the host adopts a modular architecture where data availability is separated from execution. This is a forward-looking capability.
 
 **Implementation sketch**:
 - Prerequisite: erasure coding (Gap 2.2)
@@ -192,7 +192,7 @@ This document inventories what Ivy currently implements versus what state-of-the
 
 **Ivy gap**: `newTxHashes` sends only `(chainHash, txHashes)`. No per-transaction metadata. Receivers must request transactions blind.
 
-**Impact**: Low-Medium. Useful once Lattice supports multiple transaction types with different processing requirements.
+**Impact**: Low-Medium. Useful once a consuming chain supports multiple transaction types with different processing requirements.
 
 **Implementation sketch**:
 - Extend `newTxHashes` to `newTxAnnounce(chainHash, announcements: [(hash, type, size)])`
@@ -227,11 +227,11 @@ This document inventories what Ivy currently implements versus what state-of-the
 
 **What it is**: Standardized cross-chain communication where chains maintain light clients of each other and off-chain relayers transport state proofs between them. Used by Cosmos IBC (115+ connected chains) and Polkadot XCM.
 
-**Why it matters**: Lattice is a multi-chain architecture. Chains in the hierarchy need to communicate: child chains settle to parent chains, cross-chain transfers need proof relay, and shared security (merged mining) needs coordination.
+**Why it matters**: a consuming chain may be a multi-chain architecture (Lattice is one such). Chains in a hierarchy need to communicate: child chains settle to parent chains, cross-chain transfers need proof relay, and shared security (merged mining) needs coordination.
 
 **Ivy gap**: `chainAnnounce` broadcasts to a destination hash, and `chainPath` identifies chains in the hierarchy, but there is no structured cross-chain message protocol. No light client state management. No proof relay. Cross-chain communication is currently application-layer responsibility.
 
-**Impact**: Medium-High for Lattice. Cross-chain messaging is fundamental to a multi-chain architecture, but much of the complexity is in the consensus/application layer rather than the P2P layer.
+**Impact**: Medium-High for a multi-chain host. Cross-chain messaging is fundamental to a multi-chain architecture, but much of the complexity is in the consensus/application layer rather than the P2P layer.
 
 **Implementation sketch**:
 - New messages: `crossChainPacket(sourceChain, destChain, proof, payload)`, `crossChainAck(sourceChain, destChain, sequence)`
@@ -262,7 +262,7 @@ This document inventories what Ivy currently implements versus what state-of-the
 **P0** = Implement next. Direct bandwidth/latency improvement for all chains.
 **P1** = Implement for production hardening. Security and multi-chain support.
 **P2** = Implement when specific chain requirements demand it.
-**P3** = Forward-looking. Implement when Lattice architecture requires it.
+**P3** = Forward-looking. Implement when the consuming chain's architecture requires it.
 
 ---
 
