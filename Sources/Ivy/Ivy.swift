@@ -297,6 +297,7 @@ public actor Ivy {
         if let conn = connections.removeValue(forKey: peer) {
             conn.cancel()
         }
+        router.removePeer(peer)
         peerChainPorts.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
         if let monitor = healthMonitor {
@@ -647,6 +648,7 @@ public actor Ivy {
                 conn.id = realID
                 connections[realID] = conn
                 let endpoint = PeerEndpoint(publicKey: publicKey, host: conn.endpoint.host, port: conn.endpoint.port)
+                router.removePeer(peer)
                 router.addPeer(realID, endpoint: endpoint, tally: tally)
                 Task { await self.creditLedger.establish(with: realID) }
             }
@@ -696,6 +698,7 @@ public actor Ivy {
         connections.removeValue(forKey: peer)
         connectingPeers.remove(peer)
         connectingEndpoints.removeValue(forKey: peer)
+        router.removePeer(peer)
         cleanupPendingForPeer(peer)
         delegate?.ivy(self, didDisconnect: peer)
 

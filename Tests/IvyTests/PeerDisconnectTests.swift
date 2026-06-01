@@ -6,6 +6,37 @@ import Tally
 @Suite("Peer disconnect cleanup")
 struct PeerDisconnectTests {
 
+    @Test("Disconnect removes peer from routing table")
+    func disconnectRemovesPeerFromRouter() async {
+        let node = Ivy(config: IvyConfig(
+            publicKey: "disconnect-router-node",
+            listenPort: 0,
+            bootstrapPeers: [],
+            enableLocalDiscovery: false,
+            healthConfig: PeerHealthConfig(
+                keepaliveInterval: .seconds(999),
+                staleTimeout: .seconds(999),
+                maxMissedPongs: 99,
+                enabled: false
+            ),
+            enablePEX: false,
+            replicationInterval: .seconds(999)
+        ))
+        let peer = PeerID(publicKey: "disconnect-router-peer")
+        await node.addToRouter(
+            peer,
+            endpoint: PeerEndpoint(publicKey: peer.publicKey, host: "local", port: 0)
+        )
+
+        var routedPeers = await node.allRouterPeers()
+        #expect(routedPeers.contains { $0.id == peer })
+
+        await node.disconnect(peer)
+
+        routedPeers = await node.allRouterPeers()
+        #expect(!routedPeers.contains { $0.id == peer })
+    }
+
     /// With content-addressed routing, pendingVolumeRequests is keyed by rootCID.
     /// Disconnecting one peer does not cancel the fetch — other peers may still
     /// serve the content. cleanupAllPending() handles full teardown.

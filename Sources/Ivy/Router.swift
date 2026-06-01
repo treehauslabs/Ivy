@@ -45,7 +45,7 @@ public struct Router: Sendable {
         }
     }
 
-    public func addPeer(_ id: PeerID, hash peerHash: [UInt8], endpoint: PeerEndpoint, tally: Tally) {
+    public func addPeer(_ id: PeerID, hash peerHash: [UInt8], endpoint: PeerEndpoint, tally _: Tally) {
         let idx = min(Self.commonPrefixLength(localHash, peerHash), 255)
 
         _state.withLock { state in
@@ -60,19 +60,16 @@ public struct Router: Sendable {
                 state.buckets[idx].append(BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now))
                 return
             }
-            let newRep = tally.reputation(for: id)
-            var worstIdx = 0
-            var worstRep = tally.reputation(for: bucket[0].id)
-            for i in 1..<bucket.count {
-                let rep = tally.reputation(for: bucket[i].id)
-                if rep < worstRep {
-                    worstRep = rep
-                    worstIdx = i
-                }
-            }
-            if newRep > worstRep {
-                state.buckets[idx][worstIdx] = BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now)
-            }
+            // Kademlia keeps old live contacts. A full bucket is only freed by
+            // explicit liveness failure/removal, not by a newcomer's reputation.
+        }
+    }
+
+    public func removePeer(_ id: PeerID) {
+        let peerHash = cachedHash(id.publicKey)
+        let idx = min(Self.commonPrefixLength(localHash, peerHash), 255)
+        _state.withLock { state in
+            state.buckets[idx].removeAll { $0.id == id }
         }
     }
 
