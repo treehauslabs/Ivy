@@ -318,13 +318,16 @@ struct NodeRecordProtocolTests {
         let (pubB, _) = generateKeyPair()
         let (pubC, privC) = generateKeyPair()
         let peerBID = PeerID(publicKey: pubB)
+        let peerCID = PeerID(publicKey: pubC)
         let localID = await nodeA.localID
         let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        let (cSide, cNodeSide) = LocalPeerConnection.pair(localID: peerCID, remoteID: localID)
         await nodeA.registerLocalPeer(aSide, as: peerBID)
+        await nodeA.registerLocalPeer(cNodeSide, as: peerCID)
         try await Task.sleep(for: .milliseconds(50))
 
         let recordC = NodeRecord.create(publicKey: pubC, host: "10.0.0.3", port: 4003, sequenceNumber: 1, signingKey: privC)!
-        bSide.send(Message.nodeRecord(record: recordC))
+        cSide.send(Message.nodeRecord(record: recordC))
         try await Task.sleep(for: .milliseconds(50))
 
         bSide.send(Message.getNodeRecord(publicKey: pubC))
@@ -339,6 +342,96 @@ struct NodeRecordProtocolTests {
         }
         #expect(receivedRecord != nil)
         #expect(receivedRecord! == recordC)
+        bSide.close()
+        cSide.close()
+    }
+
+    @Test("Unsolicited third-party record rejected")
+    func testUnsolicitedThirdPartyRecordRejected() async throws {
+        let (pubA, privA) = generateKeyPair()
+        let nodeA = Ivy(config: makeConfig(pub: pubA, priv: privA))
+        let (pubB, _) = generateKeyPair()
+        let (pubC, privC) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        try await Task.sleep(for: .milliseconds(50))
+
+        let recordC = NodeRecord.create(publicKey: pubC, host: "10.0.0.3", port: 4003, sequenceNumber: 1, signingKey: privC)!
+        bSide.send(Message.nodeRecord(record: recordC))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let cached = await nodeA.nodeRecord(for: pubC)
+        #expect(cached == nil)
+        bSide.close()
+    }
+
+    @Test("Solicited third-party record response accepted")
+    func testSolicitedThirdPartyRecordAccepted() async throws {
+        let (pubA, privA) = generateKeyPair()
+        let nodeA = Ivy(config: makeConfig(pub: pubA, priv: privA))
+        let (pubB, _) = generateKeyPair()
+        let (pubC, privC) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        await nodeA.addToRouter(peerBID, endpoint: PeerEndpoint(publicKey: pubB, host: "local", port: 1))
+
+        let recordC = NodeRecord.create(publicKey: pubC, host: "10.0.0.3", port: 4003, sequenceNumber: 1, signingKey: privC)!
+        let lookup = Task { await nodeA.lookupNodeRecord(publicKey: pubC) }
+
+        var messages = bSide.messages.makeAsyncIterator()
+        while let message = await messages.next() {
+            if case .getNodeRecord(let publicKey) = message {
+                #expect(publicKey == pubC)
+                bSide.send(Message.nodeRecord(record: recordC))
+                break
+            }
+        }
+
+        let resolved = await lookup.value
+        #expect(resolved == recordC)
+        bSide.close()
+    }
+
+    @Test("Invalid solicited record does not consume lookup authorization")
+    func testInvalidSolicitedRecordDoesNotConsumeLookupAuthorization() async throws {
+        let (pubA, privA) = generateKeyPair()
+        let nodeA = Ivy(config: makeConfig(pub: pubA, priv: privA))
+        let (pubB, _) = generateKeyPair()
+        let (pubC, privC) = generateKeyPair()
+        let peerBID = PeerID(publicKey: pubB)
+        let localID = await nodeA.localID
+        let (bSide, aSide) = LocalPeerConnection.pair(localID: peerBID, remoteID: localID)
+        await nodeA.registerLocalPeer(aSide, as: peerBID)
+        await nodeA.addToRouter(peerBID, endpoint: PeerEndpoint(publicKey: pubB, host: "local", port: 1))
+
+        let invalid = NodeRecord(
+            publicKey: pubC,
+            host: "10.0.0.3",
+            port: 4003,
+            sequenceNumber: 1,
+            issuedAt: UInt64(Date().timeIntervalSince1970),
+            expiresAt: UInt64(Date().timeIntervalSince1970) + 3600,
+            signature: Data(repeating: 0xFF, count: 64)
+        )
+        let valid = NodeRecord.create(publicKey: pubC, host: "10.0.0.3", port: 4003, sequenceNumber: 1, signingKey: privC)!
+        let lookup = Task { await nodeA.lookupNodeRecord(publicKey: pubC) }
+
+        var messages = bSide.messages.makeAsyncIterator()
+        while let message = await messages.next() {
+            if case .getNodeRecord(let publicKey) = message {
+                #expect(publicKey == pubC)
+                bSide.send(Message.nodeRecord(record: invalid))
+                bSide.send(Message.nodeRecord(record: valid))
+                break
+            }
+        }
+
+        let resolved = await lookup.value
+        #expect(resolved == valid)
         bSide.close()
     }
 
