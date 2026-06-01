@@ -50,20 +50,20 @@ Per-chain tables ensure:
 A single physical connection between two nodes serves all chains they both participate in. Peers advertise which chains they serve, and each node places the peer into the routing table for every shared chain.
 
 ```
-Node A serves: [Nexus, Chain X, Chain Y]
-Node B serves: [Nexus, Chain X, Chain Z]
+Node A serves: [Root, Chain X, Chain Y]
+Node B serves: [Root, Chain X, Chain Z]
 
 One TCP connection between A and B.
-B appears in A's routing tables for: Nexus, Chain X
-A appears in B's routing tables for: Nexus, Chain X
+B appears in A's routing tables for: Root, Chain X
+A appears in B's routing tables for: Root, Chain X
 ```
 
 This means:
-- **One connection, many roles.** A peer in your nexus routing table that also serves chain X appears in both tables. No duplicate connections.
-- **Shared Tally reputation.** A peer's behavior on one chain informs its reputation on all shared chains. A peer that delivers blocks reliably on the nexus is likely reliable on chain X too.
+- **One connection, many roles.** A peer in your root routing table that also serves chain X appears in both tables. No duplicate connections.
+- **Shared Tally reputation.** A peer's behavior on one chain informs its reputation on all shared chains. A peer that delivers blocks reliably on the root chain is likely reliable on chain X too.
 - **Chain membership is dynamic.** A peer can start serving a new child chain at any time. It announces the new chain, and connected peers add it to that chain's routing table without reconnecting.
-- **Message routing is chain-scoped.** Each message is tagged with its chain context. A `findPins` for chain X routes through chain X's routing table, even if the physical connection also carries nexus traffic.
-- **Routing table slots are independent.** A peer consuming a slot in the nexus table does not consume a slot in chain X's table — each chain has its own K-bucket structure. A well-connected peer may appear in many chain tables simultaneously.
+- **Message routing is chain-scoped.** Each message is tagged with its chain context. A `findPins` for chain X routes through chain X's routing table, even if the physical connection also carries root-chain traffic.
+- **Routing table slots are independent.** A peer consuming a slot in the root table does not consume a slot in chain X's table — each chain has its own K-bucket structure. A well-connected peer may appear in many chain tables simultaneously.
 
 ## Parent-Child Chain Bootstrap
 
