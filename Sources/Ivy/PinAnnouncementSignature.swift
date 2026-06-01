@@ -6,9 +6,9 @@ public enum PinAnnouncementSignature {
 
     public static func signingMaterial(rootCID: String, publicKey: String, expiry: UInt64, fee: UInt64) -> Data {
         var data = Data()
-        data.appendLengthPrefixedString(domain)
-        data.appendLengthPrefixedString(rootCID)
-        data.appendLengthPrefixedString(publicKey)
+        guard data.appendLengthPrefixedString(domain),
+              data.appendLengthPrefixedString(rootCID),
+              data.appendLengthPrefixedString(publicKey) else { return Data() }
         data.appendUInt64(expiry)
         data.appendUInt64(fee)
         return data

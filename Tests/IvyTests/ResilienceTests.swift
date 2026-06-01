@@ -257,6 +257,33 @@ struct MessageValidationTests {
         #expect(msg == nil)
     }
 
+    @Test("Oversized outbound counts are rejected")
+    func testOversizedOutboundCountsRejected() {
+        let peer = PeerEndpoint(publicKey: "pk", host: "127.0.0.1", port: 4001)
+        let peers = Array(repeating: peer, count: Int(MessageLimits.maxNeighborCount) + 1)
+        #expect(Message.neighbors(peers, nonce: 1).serialize().isEmpty)
+
+        let cids = Array(repeating: "cid", count: Int(UInt16.max) + 1)
+        #expect(Message.want(rootCIDs: cids).serialize().isEmpty)
+
+        let items = Array(
+            repeating: (cid: "cid", data: Data()),
+            count: Int(MessageLimits.maxTransactionCount) + 1
+        )
+        #expect(Message.blocks(rootCID: "root", items: items).serialize().isEmpty)
+        #expect(Message.pushVolume(rootCID: "root", items: items).serialize().isEmpty)
+    }
+
+    @Test("Oversized outbound fields are rejected")
+    func testOversizedOutboundFieldsRejected() {
+        let longString = String(repeating: "x", count: Int(MessageLimits.maxStringLength) + 1)
+        #expect(Message.dontHave(cid: longString).serialize().isEmpty)
+
+        let largePayload = Data(repeating: 0, count: Int(MessageLimits.maxDataPayload) + 1)
+        #expect(Message.block(cid: "cid", data: largePayload).serialize().isEmpty)
+        #expect(Message.frame(.block(cid: "cid", data: largePayload)).isEmpty)
+    }
+
     @Test("Frame size limit enforced")
     func testFrameSizeLimit() {
         #expect(MessageLimits.maxFrameSize == 4 * 1024 * 1024)

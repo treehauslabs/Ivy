@@ -106,7 +106,13 @@ public enum Message: Sendable {
     }
 
     public func serialize() -> Data {
-        var buf = Data(capacity: estimatedSize())
+        var buf = Data(capacity: min(estimatedSize(), Int(MessageLimits.maxFrameSize)))
+        guard encodePayload(into: &buf),
+              buf.count <= Int(MessageLimits.maxFrameSize) else { return Data() }
+        return buf
+    }
+
+    private func encodePayload(into buf: inout Data) -> Bool {
         switch self {
         case .ping(let nonce):
             buf.append(Tag.ping.rawValue)
@@ -116,65 +122,69 @@ public enum Message: Sendable {
             buf.appendUInt64(nonce)
         case .block(let cid, let data):
             buf.append(Tag.block.rawValue)
-            buf.appendLengthPrefixedString(cid)
-            buf.appendLengthPrefixedData(data)
+            guard buf.appendLengthPrefixedString(cid),
+                  buf.appendLengthPrefixedData(data) else { return false }
         case .dontHave(let cid):
             buf.append(Tag.dontHave.rawValue)
-            buf.appendLengthPrefixedString(cid)
+            guard buf.appendLengthPrefixedString(cid) else { return false }
         case .findNode(let target, let fee, let nonce):
             buf.append(Tag.findNode.rawValue)
-            buf.appendLengthPrefixedData(target)
+            guard buf.appendLengthPrefixedData(target) else { return false }
             buf.appendUInt64(fee)
             buf.appendUInt64(nonce)
         case .neighbors(let peers, let nonce):
             buf.append(Tag.neighbors.rawValue)
-            buf.appendUInt16(UInt16(peers.count))
+            guard buf.appendCount(peers.count, max: MessageLimits.maxNeighborCount) else { return false }
             for peer in peers {
-                buf.appendLengthPrefixedString(peer.publicKey)
-                buf.appendLengthPrefixedString(peer.host)
+                guard buf.appendLengthPrefixedString(peer.publicKey),
+                      buf.appendLengthPrefixedString(peer.host) else { return false }
                 buf.appendUInt16(peer.port)
             }
             buf.appendUInt64(nonce)
         case .announceBlock(let cid):
             buf.append(Tag.announceBlock.rawValue)
-            buf.appendLengthPrefixedString(cid)
+            guard buf.appendLengthPrefixedString(cid) else { return false }
         case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let chainPorts, let signature):
             buf.append(Tag.identify.rawValue)
-            buf.appendLengthPrefixedString(publicKey)
-            buf.appendLengthPrefixedString(observedHost)
+            guard buf.appendLengthPrefixedString(publicKey),
+                  buf.appendLengthPrefixedString(observedHost) else { return false }
             buf.appendUInt16(observedPort)
-            buf.appendUInt16(UInt16(listenAddrs.count))
+            guard buf.appendCount(listenAddrs.count, max: MessageLimits.maxListenAddrs) else { return false }
             for (host, port) in listenAddrs {
-                buf.appendLengthPrefixedString(host)
+                guard buf.appendLengthPrefixedString(host) else { return false }
                 buf.appendUInt16(port)
             }
-            buf.appendUInt16(UInt16(chainPorts.count))
+            guard buf.appendCount(chainPorts.count, max: MessageLimits.maxChainPorts) else { return false }
             for (chain, port) in chainPorts.sorted(by: { $0.key < $1.key }) {
-                buf.appendLengthPrefixedString(chain)
+                guard buf.appendLengthPrefixedString(chain) else { return false }
                 buf.appendUInt16(port)
             }
-            buf.appendLengthPrefixedData(signature)
+            guard buf.appendLengthPrefixedData(signature) else { return false }
         case .dhtForward(let cid, let ttl, let fee, let target, let selector):
             buf.append(Tag.dhtForward.rawValue)
-            buf.appendLengthPrefixedString(cid)
+            guard buf.appendLengthPrefixedString(cid) else { return false }
             buf.appendUInt8(ttl)
             buf.appendUInt64(fee)
             buf.appendUInt8(target != nil ? 1 : 0)
-            if let target { buf.appendLengthPrefixedData(target) }
+            if let target {
+                guard buf.appendLengthPrefixedData(target) else { return false }
+            }
             buf.appendUInt8(selector != nil ? 1 : 0)
-            if let selector { buf.appendLengthPrefixedString(selector) }
+            if let selector {
+                guard buf.appendLengthPrefixedString(selector) else { return false }
+            }
         case .want(let rootCIDs):
             buf.append(Tag.want.rawValue)
-            buf.appendUInt16(UInt16(rootCIDs.count))
+            guard buf.appendCount(rootCIDs.count, max: MessageLimits.maxTxCIDCount) else { return false }
             for cid in rootCIDs {
-                buf.appendLengthPrefixedString(cid)
+                guard buf.appendLengthPrefixedString(cid) else { return false }
             }
         case .wantVolume(let rootCID, let cids):
             buf.append(Tag.wantVolume.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(cids.count))
+            guard buf.appendLengthPrefixedString(rootCID),
+                  buf.appendCount(cids.count, max: MessageLimits.maxTxCIDCount) else { return false }
             for cid in cids {
-                buf.appendLengthPrefixedString(cid)
+                guard buf.appendLengthPrefixedString(cid) else { return false }
             }
         case .pexRequest(let nonce):
             buf.append(Tag.pexRequest.rawValue)
@@ -182,73 +192,77 @@ public enum Message: Sendable {
         case .pexResponse(let nonce, let peers):
             buf.append(Tag.pexResponse.rawValue)
             buf.appendUInt64(nonce)
-            buf.appendUInt16(UInt16(peers.count))
+            guard buf.appendCount(peers.count, max: MessageLimits.maxPexPeerCount) else { return false }
             for peer in peers {
-                buf.appendLengthPrefixedString(peer.publicKey)
-                buf.appendLengthPrefixedString(peer.host)
+                guard buf.appendLengthPrefixedString(peer.publicKey),
+                      buf.appendLengthPrefixedString(peer.host) else { return false }
                 buf.appendUInt16(peer.port)
             }
         case .findPins(let cid, let fee):
             buf.append(Tag.findPins.rawValue)
-            buf.appendLengthPrefixedString(cid)
+            guard buf.appendLengthPrefixedString(cid) else { return false }
             buf.appendUInt64(fee)
         case .pins(let cid, let providers):
             buf.append(Tag.pins.rawValue)
-            buf.appendLengthPrefixedString(cid)
-            buf.appendUInt16(UInt16(providers.count))
+            guard buf.appendLengthPrefixedString(cid),
+                  buf.appendCount(providers.count, max: MessageLimits.maxNeighborCount) else { return false }
             for pk in providers {
-                buf.appendLengthPrefixedString(pk)
+                guard buf.appendLengthPrefixedString(pk) else { return false }
             }
         case .pinAnnounce(let rootCID, let publicKey, let expiry, let signature, let fee):
             buf.append(Tag.pinAnnounce.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendLengthPrefixedString(publicKey)
+            guard buf.appendLengthPrefixedString(rootCID),
+                  buf.appendLengthPrefixedString(publicKey) else { return false }
             buf.appendUInt64(expiry)
-            buf.appendLengthPrefixedData(signature)
+            guard buf.appendLengthPrefixedData(signature) else { return false }
             buf.appendUInt64(fee)
         case .pinStored(let rootCID):
             buf.append(Tag.pinStored.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
+            guard buf.appendLengthPrefixedString(rootCID) else { return false }
         case .deliveryAck(let requestId):
             buf.append(Tag.deliveryAck.rawValue)
             buf.appendUInt64(requestId)
         case .peerMessage(let topic, let payload):
             buf.append(Tag.peerMessage.rawValue)
-            buf.appendLengthPrefixedString(topic)
-            buf.appendLengthPrefixedData(payload)
+            guard buf.appendLengthPrefixedString(topic),
+                  buf.appendLengthPrefixedData(payload) else { return false }
         case .blocks(let rootCID, let items):
             buf.append(Tag.blocks.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(items.count))
+            guard buf.appendLengthPrefixedString(rootCID),
+                  buf.appendCount(items.count, max: MessageLimits.maxTransactionCount) else { return false }
             for item in items {
-                buf.appendLengthPrefixedString(item.cid)
-                buf.appendLengthPrefixedData(item.data)
+                guard buf.appendLengthPrefixedString(item.cid),
+                      buf.appendLengthPrefixedData(item.data) else { return false }
             }
         case .notHave(let rootCID):
             buf.append(Tag.notHave.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
+            guard buf.appendLengthPrefixedString(rootCID) else { return false }
         case .announceVolume(let rootCID, let childCIDs, let totalSize):
             buf.append(Tag.announceVolume.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(childCIDs.count))
-            for cid in childCIDs { buf.appendLengthPrefixedString(cid) }
+            guard buf.appendLengthPrefixedString(rootCID),
+                  buf.appendCount(childCIDs.count, max: MessageLimits.maxTxCIDCount) else { return false }
+            for cid in childCIDs {
+                guard buf.appendLengthPrefixedString(cid) else { return false }
+            }
             buf.appendUInt64(totalSize)
         case .pushVolume(let rootCID, let items):
             buf.append(Tag.pushVolume.rawValue)
-            buf.appendLengthPrefixedString(rootCID)
-            buf.appendUInt16(UInt16(items.count))
+            guard buf.appendLengthPrefixedString(rootCID),
+                  buf.appendCount(items.count, max: MessageLimits.maxTransactionCount) else { return false }
             for item in items {
-                buf.appendLengthPrefixedString(item.cid)
-                buf.appendLengthPrefixedData(item.data)
+                guard buf.appendLengthPrefixedString(item.cid),
+                      buf.appendLengthPrefixedData(item.data) else { return false }
             }
         case .nodeRecord(let record):
             buf.append(Tag.nodeRecord.rawValue)
-            buf.append(record.serialize())
+            let encoded = record.serialize()
+            guard !encoded.isEmpty else { return false }
+            buf.append(encoded)
         case .getNodeRecord(let publicKey):
             buf.append(Tag.getNodeRecord.rawValue)
-            buf.appendLengthPrefixedString(publicKey)
+            guard buf.appendLengthPrefixedString(publicKey) else { return false }
         }
-        return buf
+        return true
     }
 
     public static func deserialize(_ data: Data) -> Message? {
@@ -431,6 +445,8 @@ public enum Message: Sendable {
 
     public static func frame(_ message: Message) -> Data {
         let payload = message.serialize()
+        guard !payload.isEmpty,
+              payload.count <= Int(MessageLimits.maxFrameSize) else { return Data() }
         var frame = Data(capacity: 4 + payload.count)
         frame.appendUInt32(UInt32(payload.count))
         frame.append(payload)
@@ -467,16 +483,29 @@ extension Data {
     mutating func appendUInt64(_ value: UInt64) {
         Swift.withUnsafeBytes(of: value.bigEndian) { append(contentsOf: $0) }
     }
+    @discardableResult
     @inline(__always)
-    mutating func appendLengthPrefixedString(_ string: String) {
+    mutating func appendCount(_ count: Int, max: UInt16) -> Bool {
+        guard count >= 0, count <= Int(max) else { return false }
+        appendUInt16(UInt16(count))
+        return true
+    }
+    @discardableResult
+    @inline(__always)
+    mutating func appendLengthPrefixedString(_ string: String) -> Bool {
         let utf8 = string.utf8
+        guard utf8.count <= Int(MessageLimits.maxStringLength) else { return false }
         appendUInt16(UInt16(utf8.count))
         append(contentsOf: utf8)
+        return true
     }
+    @discardableResult
     @inline(__always)
-    mutating func appendLengthPrefixedData(_ data: Data) {
+    mutating func appendLengthPrefixedData(_ data: Data) -> Bool {
+        guard data.count <= Int(MessageLimits.maxDataPayload) else { return false }
         appendUInt32(UInt32(data.count))
         append(data)
+        return true
     }
 }
 

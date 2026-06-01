@@ -104,7 +104,7 @@ public struct NodeRecord: Sendable, Equatable {
         expiresAt: UInt64
     ) -> Data {
         var data = Data()
-        data.appendLengthPrefixedString("ivy.nodeRecord.v2")
+        guard data.appendLengthPrefixedString("ivy.nodeRecord.v2") else { return Data() }
         data.append(contentsOf: publicKey.utf8)
         data.append(contentsOf: host.utf8)
         var p = port.bigEndian
@@ -120,13 +120,13 @@ public struct NodeRecord: Sendable, Equatable {
 
     public func serialize() -> Data {
         var buf = Data()
-        buf.appendLengthPrefixedString(publicKey)
-        buf.appendLengthPrefixedString(host)
+        guard buf.appendLengthPrefixedString(publicKey),
+              buf.appendLengthPrefixedString(host) else { return Data() }
         buf.appendUInt16(port)
         buf.appendUInt64(sequenceNumber)
         buf.appendUInt64(issuedAt)
         buf.appendUInt64(expiresAt)
-        buf.appendLengthPrefixedData(signature)
+        guard buf.appendLengthPrefixedData(signature) else { return Data() }
         return buf
     }
 
