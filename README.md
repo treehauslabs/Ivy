@@ -12,7 +12,7 @@
 
 Ivy is a full-featured peer-to-peer networking stack that replaces blind peer selection with evidence-based trust. Every routing decision — which peer to query, which connection to keep, who gets served under load — is informed by measured behavior: bytes relayed, latency observed, challenges solved. The result is a self-healing network where honest nodes naturally route through honest nodes.
 
-Ivy powers the networking layer for [Lattice](https://github.com/treehauslabs/lattice-node), with Volume-granular storage by [VolumeBroker](https://github.com/treehauslabs/VolumeBroker) and reputation accounting by [Tally](https://github.com/treehauslabs/Tally).
+Ivy is a standalone networking stack and is not tied to any particular chain — reputation accounting comes from its dependency [Tally](https://github.com/treehauslabs/Tally). It is used in production by [Lattice](https://github.com/treehauslabs/lattice-node) (with Volume-granular storage by [VolumeBroker](https://github.com/treehauslabs/VolumeBroker)) as **one example consumer**; nothing in Ivy is Lattice-specific.
 
 ---
 
@@ -24,7 +24,6 @@ Ivy powers the networking layer for [Lattice](https://github.com/treehauslabs/la
 - [NAT Traversal](#nat-traversal)
 - [Content Routing](#content-routing)
 - [Gossip & Announcements](#gossip--announcements)
-- [Chain-Aware Networking](#chain-aware-networking)
 - [Reputation System](#reputation-system)
 - [Peer Health](#peer-health)
 - [Quick Start](#quick-start)
@@ -186,7 +185,7 @@ This creates rapid, protocol-level block propagation without polling.
 
 ### Inline Block Push
 
-The `sendBlock(cid:data:)` method broadcasts block data inline to all connected peers, bypassing Tally rate limiting. This is used by the blockchain layer to push freshly mined blocks to peers without requiring a round-trip fetch. The payload is identical to a `BLOCK` response but sent unsolicited as a `BLOCK_PUSH` message.
+The `sendBlock(cid:data:)` method broadcasts block data inline to all connected peers, bypassing Tally rate limiting. The consuming application uses it to push newly produced or received content (e.g. a freshly accepted block) to peers without requiring a round-trip fetch. The payload is identical to a `BLOCK` response but sent unsolicited as a `BLOCK_PUSH` message.
 
 ### Peer Announces
 

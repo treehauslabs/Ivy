@@ -2,7 +2,9 @@
 
 ## Overview
 
-Ivy is a peer-to-peer network serving Lattice's multi-chain architecture. Each chain maintains its own Kademlia overlay, parent chains bootstrap child chain peer sets, and peer quality is managed through Tally reputation with PoW identity floors.
+Ivy is a peer-to-peer network for **multi-overlay** architectures: each overlay (a "chain") maintains its own Kademlia overlay, a parent overlay can bootstrap a child overlay's peer set, and peer quality is managed through Tally reputation with PoW identity floors.
+
+> This document describes the **generic** model and uses **Lattice** as the running example (its `Nexus` root and child chains). Nothing here is Lattice-specific — the same model applies to any multi-overlay host; the Lattice-specific deployment lives in the `lattice-node` docs.
 
 The current model uses peer exchange (PEX) with Tally reputation — nodes connect freely, serve data cooperatively, and build trust through successful exchanges. This document also describes a credit line extension that can be enabled per-node for chains that want paid data availability, without changing the protocol.
 
@@ -10,7 +12,7 @@ The current model uses peer exchange (PEX) with Tally reputation — nodes conne
 
 ### One Overlay Per Chain
 
-Each chain in the Lattice tree operates its own Kademlia DHT. A node's routing table for chain X contains K entries — peers that participate in chain X, each tracked by Tally for reputation.
+Each chain (overlay) in the tree operates its own Kademlia DHT. A node's routing table for chain X contains K entries — peers that participate in chain X, each tracked by Tally for reputation.
 
 All chain operations stay within the chain's overlay:
 
@@ -19,7 +21,7 @@ All chain operations stay within the chain's overlay:
 - **Block gossip**: Announce new blocks to chain overlay peers.
 - **Pin announcements** (`pinAnnounce`): Declare that you serve specific CIDs, stored by K closest nodes in the chain overlay.
 
-There is no global routing table. The nexus chain's overlay (which every node participates in, since merged mining requires it) is the root of the tree, not a separate discovery layer.
+There is no global routing table. The root overlay (in the Lattice example, the nexus chain — which every node participates in, since merged mining requires it) is the root of the tree, not a separate discovery layer.
 
 ### Routing Table Structure
 
