@@ -57,10 +57,11 @@ struct MessageTests {
     @Test("FindNode roundtrip")
     func testFindNodeRoundtrip() {
         let target = Data(repeating: 0xAB, count: 32)
-        let msg = Message.findNode(target: target)
+        let msg = Message.findNode(target: target, nonce: 42)
         let decoded = Message.deserialize(msg.serialize())
-        if case .findNode(let t, _) = decoded {
+        if case .findNode(let t, _, let nonce) = decoded {
             #expect(t == target)
+            #expect(nonce == 42)
         } else {
             Issue.record("Expected findNode")
         }
@@ -72,14 +73,15 @@ struct MessageTests {
             PeerEndpoint(publicKey: "key1", host: "192.168.1.1", port: 4001),
             PeerEndpoint(publicKey: "key2", host: "10.0.0.1", port: 4002),
         ]
-        let msg = Message.neighbors(peers)
+        let msg = Message.neighbors(peers, nonce: 99)
         let decoded = Message.deserialize(msg.serialize())
-        if case .neighbors(let p) = decoded {
+        if case .neighbors(let p, let nonce) = decoded {
             #expect(p.count == 2)
             #expect(p[0].publicKey == "key1")
             #expect(p[0].host == "192.168.1.1")
             #expect(p[0].port == 4001)
             #expect(p[1].publicKey == "key2")
+            #expect(nonce == 99)
         } else {
             Issue.record("Expected neighbors")
         }

@@ -5,8 +5,8 @@ public enum Message: Sendable {
     case pong(nonce: UInt64)
     case block(cid: String, data: Data)
     case dontHave(cid: String)
-    case findNode(target: Data, fee: UInt64 = 0)
-    case neighbors([PeerEndpoint])
+    case findNode(target: Data, fee: UInt64 = 0, nonce: UInt64 = 0)
+    case neighbors([PeerEndpoint], nonce: UInt64 = 0)
     case announceBlock(cid: String)
 
     case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data)
@@ -118,11 +118,12 @@ public enum Message: Sendable {
         case .dontHave(let cid):
             buf.append(Tag.dontHave.rawValue)
             buf.appendLengthPrefixedString(cid)
-        case .findNode(let target, let fee):
+        case .findNode(let target, let fee, let nonce):
             buf.append(Tag.findNode.rawValue)
             buf.appendLengthPrefixedData(target)
             buf.appendUInt64(fee)
-        case .neighbors(let peers):
+            buf.appendUInt64(nonce)
+        case .neighbors(let peers, let nonce):
             buf.append(Tag.neighbors.rawValue)
             buf.appendUInt16(UInt16(peers.count))
             for peer in peers {
@@ -130,6 +131,7 @@ public enum Message: Sendable {
                 buf.appendLengthPrefixedString(peer.host)
                 buf.appendUInt16(peer.port)
             }
+            buf.appendUInt64(nonce)
         case .announceBlock(let cid):
             buf.append(Tag.announceBlock.rawValue)
             buf.appendLengthPrefixedString(cid)
@@ -260,7 +262,8 @@ public enum Message: Sendable {
         case .findNode:
             guard let target = reader.readData() else { return nil }
             let fee = reader.readUInt64() ?? 0
-            return .findNode(target: target, fee: fee)
+            let nonce = reader.readUInt64() ?? 0
+            return .findNode(target: target, fee: fee, nonce: nonce)
         case .neighbors:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
             var peers = [PeerEndpoint]()
@@ -271,7 +274,8 @@ public enum Message: Sendable {
                       let port = reader.readUInt16() else { return nil }
                 peers.append(PeerEndpoint(publicKey: key, host: host, port: port))
             }
-            return .neighbors(peers)
+            let nonce = reader.readUInt64() ?? 0
+            return .neighbors(peers, nonce: nonce)
         case .announceBlock:
             guard let cid = reader.readString() else { return nil }
             return .announceBlock(cid: cid)

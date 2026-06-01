@@ -18,6 +18,11 @@ public enum IvyError: Error, Sendable {
     case identityVerificationFailed
 }
 
+private struct PendingNeighborResponse: Sendable {
+    let peer: PeerID
+    let continuation: CheckedContinuation<[PeerEndpoint], Never>?
+}
+
 public actor Ivy {
     public let config: IvyConfig
     public let tally: Tally
@@ -51,9 +56,9 @@ public actor Ivy {
     private static let announceGossipRefillPerSec: Double = 50
     private var pexTask: Task<Void, Never>?
     private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
-    private var pendingNeighborResponses: [UUID: CheckedContinuation<[PeerEndpoint], Never>] = [:]
-    private var queuedNeighborResponses: [[PeerEndpoint]] = []
-    private var acceptingNeighborResponses = false
+    private var pendingNeighborLookupNonces: Set<UInt64> = []
+    private var pendingNeighborResponses: [UInt64: PendingNeighborResponse] = [:]
+    private var completedNeighborResponses: [UInt64: [PeerEndpoint]] = [:]
     private var healthMonitor: PeerHealthMonitor?
     private var haveSet = InventorySet()
     private var localPeers: [PeerID: LocalPeerConnection] = [:]
@@ -498,12 +503,6 @@ public actor Ivy {
         var candidatesByKey: [String: Router.BucketEntry] = [:]
         var queried: Set<String> = []
         var previousCandidateKeys: [String] = []
-        queuedNeighborResponses.removeAll()
-        acceptingNeighborResponses = true
-        defer {
-            acceptingNeighborResponses = false
-            queuedNeighborResponses.removeAll()
-        }
 
         for _ in 0..<maxLookupRounds {
             for entry in router.closestPeers(to: targetHash, count: config.kBucketSize) {
@@ -521,12 +520,16 @@ public actor Ivy {
 
             if toQuery.isEmpty { break }
 
+            var nonces: [UInt64] = []
+            nonces.reserveCapacity(toQuery.count)
             for entry in toQuery {
                 queried.insert(entry.id.publicKey)
-                fireToPeer(entry.id, .findNode(target: Data(targetHash)))
+                let nonce = makeFindNodeNonce()
+                nonces.append(nonce)
+                requestNeighbors(from: entry.id, targetHash: targetHash, nonce: nonce, timeout: .milliseconds(500))
             }
 
-            let responses = await collectNeighborResponses(expected: toQuery.count, timeout: .milliseconds(500))
+            let responses = await collectNeighborResponses(nonces: nonces)
             for endpoint in responses.flatMap({ $0 }) {
                 let id = PeerID(publicKey: endpoint.publicKey)
                 candidatesByKey[id.publicKey] = Router.BucketEntry(
@@ -784,14 +787,15 @@ public actor Ivy {
         case .dontHave:
             tally.recordFailure(peer: peer)
 
-        case .findNode(let target, _):
+        case .findNode(let target, _, let nonce):
             guard tally.shouldAllow(peer: peer) else { return }
             let closest = router.closestPeers(to: Array(target), count: config.kBucketSize)
             let endpoints = closest.map { $0.endpoint }
-            fireToPeer(peer, .neighbors(endpoints))
+            fireToPeer(peer, .neighbors(endpoints, nonce: nonce))
 
-        case .neighbors(let endpoints):
+        case .neighbors(let endpoints, let nonce):
             guard tally.shouldAllow(peer: peer) else { return }
+            guard isExpectedNeighborResponse(nonce: nonce, from: peer) else { return }
             var accepted: [PeerEndpoint] = []
             for ep in endpoints {
                 if isAcceptableDiscoveredEndpoint(ep, source: "neighbors", from: peer) {
@@ -799,7 +803,7 @@ public actor Ivy {
                     _ = addDiscoveredPeer(ep, source: "neighbors", from: peer)
                 }
             }
-            receiveNeighborResponse(accepted)
+            receiveNeighborResponse(nonce: nonce, endpoints: accepted, from: peer)
 
         case .announceBlock(let cid):
             // Rate-limit per-peer broadcast relaying. One announce triggers N
@@ -1442,47 +1446,78 @@ public actor Ivy {
         for cont in waiters { cont.resume(returning: peers) }
     }
 
-    private func collectNeighborResponses(expected: Int, timeout: Duration) async -> [[PeerEndpoint]] {
-        guard expected > 0 else { return [] }
+    private func collectNeighborResponses(nonces: [UInt64]) async -> [[PeerEndpoint]] {
+        guard !nonces.isEmpty else { return [] }
         var responses: [[PeerEndpoint]] = []
-        responses.reserveCapacity(expected)
-        for _ in 0..<expected {
-            let response = await nextNeighborResponse(timeout: timeout)
-            if response.isEmpty { break }
-            responses.append(response)
+        responses.reserveCapacity(nonces.count)
+        for nonce in nonces {
+            let response = await nextNeighborResponse(nonce: nonce)
+            if !response.isEmpty {
+                responses.append(response)
+            }
         }
         return responses
     }
 
-    private func nextNeighborResponse(timeout: Duration) async -> [PeerEndpoint] {
-        if !queuedNeighborResponses.isEmpty {
-            return queuedNeighborResponses.removeFirst()
+    private func requestNeighbors(from peer: PeerID, targetHash: [UInt8], nonce: UInt64, timeout: Duration) {
+        pendingNeighborLookupNonces.insert(nonce)
+        pendingNeighborResponses[nonce] = PendingNeighborResponse(
+            peer: peer,
+            continuation: nil
+        )
+        Task.detached { [weak self] in
+            try? await Task.sleep(for: timeout)
+            await self?.resolveNeighborResponse(nonce: nonce, endpoints: [])
         }
+        fireToPeer(peer, .findNode(target: Data(targetHash), nonce: nonce))
+    }
 
-        let id = UUID()
+    private func nextNeighborResponse(nonce: UInt64) async -> [PeerEndpoint] {
+        if let endpoints = completedNeighborResponses.removeValue(forKey: nonce) {
+            pendingNeighborLookupNonces.remove(nonce)
+            pendingNeighborResponses.removeValue(forKey: nonce)
+            return endpoints
+        }
         return await withCheckedContinuation { cont in
-            pendingNeighborResponses[id] = cont
-            Task.detached { [weak self] in
-                try? await Task.sleep(for: timeout)
-                await self?.resolveNeighborResponse(id: id, endpoints: [])
+            if let pending = pendingNeighborResponses[nonce] {
+                pendingNeighborResponses[nonce] = PendingNeighborResponse(peer: pending.peer, continuation: cont)
+            } else {
+                pendingNeighborResponses[nonce] = PendingNeighborResponse(peer: localID, continuation: cont)
             }
         }
     }
 
-    private func receiveNeighborResponse(_ endpoints: [PeerEndpoint]) {
-        if let id = pendingNeighborResponses.keys.first,
-           let cont = pendingNeighborResponses.removeValue(forKey: id) {
-            cont.resume(returning: endpoints)
+    private func receiveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint], from peer: PeerID) {
+        guard isExpectedNeighborResponse(nonce: nonce, from: peer) else { return }
+        if pendingNeighborResponses[nonce]?.continuation == nil {
+            completedNeighborResponses[nonce] = endpoints
+            pendingNeighborResponses.removeValue(forKey: nonce)
+            pendingNeighborLookupNonces.remove(nonce)
             return
         }
-        if acceptingNeighborResponses && queuedNeighborResponses.count < config.kBucketSize {
-            queuedNeighborResponses.append(endpoints)
-        }
+        resolveNeighborResponse(nonce: nonce, endpoints: endpoints)
     }
 
-    private func resolveNeighborResponse(id: UUID, endpoints: [PeerEndpoint]) {
-        guard let cont = pendingNeighborResponses.removeValue(forKey: id) else { return }
+    private func resolveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint]) {
+        guard let pending = pendingNeighborResponses.removeValue(forKey: nonce) else { return }
+        pendingNeighborLookupNonces.remove(nonce)
+        guard let cont = pending.continuation else {
+            completedNeighborResponses[nonce] = endpoints
+            return
+        }
         cont.resume(returning: endpoints)
+    }
+
+    private func isExpectedNeighborResponse(nonce: UInt64, from peer: PeerID) -> Bool {
+        pendingNeighborLookupNonces.contains(nonce) && pendingNeighborResponses[nonce]?.peer == peer
+    }
+
+    private func makeFindNodeNonce() -> UInt64 {
+        var nonce = UInt64.random(in: 1...UInt64.max)
+        while pendingNeighborLookupNonces.contains(nonce) {
+            nonce = UInt64.random(in: 1...UInt64.max)
+        }
+        return nonce
     }
 
     /// Generate a Curve25519 key pair with target difficulty.
@@ -1894,9 +1929,11 @@ public actor Ivy {
         for (_, cont) in pendingPEX {
             cont.resume(returning: [])
         }
-        for (_, cont) in pendingNeighborResponses {
-            cont.resume(returning: [])
+        for (_, pending) in pendingNeighborResponses {
+            pending.continuation?.resume(returning: [])
         }
+        pendingNeighborLookupNonces.removeAll()
+        completedNeighborResponses.removeAll()
         for (_, continuations) in pendingFindPins {
             for cont in continuations { cont.resume(returning: []) }
         }
@@ -1908,12 +1945,12 @@ public actor Ivy {
         }
         pendingPEX.removeAll()
 
-        for (_, cont) in pendingNeighborResponses {
-            cont.resume(returning: [])
+        for (_, pending) in pendingNeighborResponses {
+            pending.continuation?.resume(returning: [])
         }
         pendingNeighborResponses.removeAll()
-        queuedNeighborResponses.removeAll()
-        acceptingNeighborResponses = false
+        pendingNeighborLookupNonces.removeAll()
+        completedNeighborResponses.removeAll()
 
         for (cid, _) in pendingRequests {
             resolvePending(cid: cid, data: nil)

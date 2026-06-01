@@ -64,7 +64,7 @@ private func nextMessage(
 @Suite("Routing ingress hardening")
 struct RoutingIngressHardeningTests {
 
-    @Test("Neighbors only inserts endpoints that pass routing identity and address validation")
+    @Test("Solicited neighbors only inserts endpoints that pass routing identity and address validation")
     func neighborsRejectInvalidDiscoveredEndpoints() async throws {
         let requiredBits = 2
         let node = Ivy(config: routingConfig(publicKey: "routing-node", minPeerKeyBits: requiredBits))
@@ -72,24 +72,116 @@ struct RoutingIngressHardeningTests {
         let peerID = PeerID(publicKey: "routing-neighbor-sender")
         let (peerSide, nodeSide) = LocalPeerConnection.pair(localID: peerID, remoteID: localID)
         await node.registerLocalPeer(nodeSide, as: peerID)
+        await node.addToRouter(peerID, endpoint: PeerEndpoint(publicKey: peerID.publicKey, host: "local", port: 1))
 
         let badKey = keyWithDifficulty(lessThan: requiredBits)
         let goodKey = keyWithDifficulty(atLeast: requiredBits)
+
+        var lookup: Task<[PeerEndpoint], Never>!
+        let request = try await nextMessage(from: peerSide) {
+            lookup = Task { await node.findNode(target: goodKey) }
+        }
+        guard case .findNode(_, _, let nonce) = request else {
+            Issue.record("Expected findNode")
+            return
+        }
 
         peerSide.send(.neighbors([
             PeerEndpoint(publicKey: badKey, host: "10.0.0.1", port: 4001),
             PeerEndpoint(publicKey: goodKey, host: "10.0.0.2", port: 4001),
             PeerEndpoint(publicKey: keyWithDifficulty(atLeast: requiredBits), host: "0.0.0.0", port: 4001),
             PeerEndpoint(publicKey: keyWithDifficulty(atLeast: requiredBits), host: "10.0.0.3", port: 0)
-        ]))
-        try await Task.sleep(for: .milliseconds(100))
+        ], nonce: nonce))
+        _ = await lookup.value
 
         let routedKeys = await Set(node.allRouterPeers().map { $0.id.publicKey })
         #expect(!routedKeys.contains(badKey))
         #expect(routedKeys.contains(goodKey))
-        #expect(routedKeys.count == 1)
+        #expect(routedKeys.count == 2)
 
         peerSide.close()
+    }
+
+    @Test("Unsolicited neighbors responses do not mutate routing table")
+    func unsolicitedNeighborsResponseIsIgnored() async throws {
+        let node = Ivy(config: routingConfig(publicKey: "routing-unsolicited-neighbors-node"))
+        let localID = await node.localID
+        let peerID = PeerID(publicKey: "routing-unsolicited-neighbors-sender")
+        let (peerSide, nodeSide) = LocalPeerConnection.pair(localID: peerID, remoteID: localID)
+        await node.registerLocalPeer(nodeSide, as: peerID)
+
+        let advertised = PeerEndpoint(publicKey: "routing-unsolicited-neighbor", host: "10.0.0.1", port: 4001)
+        peerSide.send(.neighbors([advertised], nonce: 0xfeed))
+        try await Task.sleep(for: .milliseconds(100))
+
+        let routedKeys = await Set(node.allRouterPeers().map { $0.id.publicKey })
+        #expect(!routedKeys.contains(advertised.publicKey))
+
+        peerSide.close()
+    }
+
+    @Test("Neighbors response with wrong nonce does not mutate routing table")
+    func wrongNonceNeighborsResponseIsIgnored() async throws {
+        let node = Ivy(config: routingConfig(publicKey: "routing-wrong-nonce-node"))
+        let localID = await node.localID
+        let peerID = PeerID(publicKey: "routing-wrong-nonce-sender")
+        let (peerSide, nodeSide) = LocalPeerConnection.pair(localID: peerID, remoteID: localID)
+        await node.registerLocalPeer(nodeSide, as: peerID)
+        await node.addToRouter(peerID, endpoint: PeerEndpoint(publicKey: peerID.publicKey, host: "local", port: 1))
+
+        let advertised = PeerEndpoint(publicKey: "routing-wrong-nonce-neighbor", host: "10.0.0.1", port: 4001)
+        var lookup: Task<[PeerEndpoint], Never>!
+        let request = try await nextMessage(from: peerSide) {
+            lookup = Task { await node.findNode(target: advertised.publicKey) }
+        }
+        guard case .findNode(_, _, let nonce) = request else {
+            Issue.record("Expected findNode")
+            return
+        }
+
+        peerSide.send(.neighbors([advertised], nonce: nonce &+ 1))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!(await Set(node.allRouterPeers().map { $0.id.publicKey })).contains(advertised.publicKey))
+
+        peerSide.send(.neighbors([advertised], nonce: nonce))
+        _ = await lookup.value
+        #expect((await Set(node.allRouterPeers().map { $0.id.publicKey })).contains(advertised.publicKey))
+
+        peerSide.close()
+    }
+
+    @Test("Neighbors response from wrong peer does not satisfy stolen nonce")
+    func wrongPeerNeighborsResponseIsIgnored() async throws {
+        let node = Ivy(config: routingConfig(publicKey: "routing-wrong-peer-node"))
+        let localID = await node.localID
+        let queriedID = PeerID(publicKey: "routing-queried-peer")
+        let wrongID = PeerID(publicKey: "routing-wrong-peer")
+        let (queriedSide, queriedNodeSide) = LocalPeerConnection.pair(localID: queriedID, remoteID: localID)
+        let (wrongSide, wrongNodeSide) = LocalPeerConnection.pair(localID: wrongID, remoteID: localID)
+        await node.registerLocalPeer(queriedNodeSide, as: queriedID)
+        await node.registerLocalPeer(wrongNodeSide, as: wrongID)
+        await node.addToRouter(queriedID, endpoint: PeerEndpoint(publicKey: queriedID.publicKey, host: "local", port: 1))
+
+        let advertised = PeerEndpoint(publicKey: "routing-stolen-nonce-neighbor", host: "10.0.0.1", port: 4001)
+        var lookup: Task<[PeerEndpoint], Never>!
+        let request = try await nextMessage(from: queriedSide) {
+            lookup = Task { await node.findNode(target: advertised.publicKey) }
+        }
+        guard case .findNode(_, _, let nonce) = request else {
+            Issue.record("Expected findNode")
+            return
+        }
+
+        wrongSide.send(.neighbors([advertised], nonce: nonce))
+        try await Task.sleep(for: .milliseconds(100))
+        #expect(!(await Set(node.allRouterPeers().map { $0.id.publicKey })).contains(advertised.publicKey))
+
+        queriedSide.send(.neighbors([advertised], nonce: nonce))
+        _ = await lookup.value
+        #expect((await Set(node.allRouterPeers().map { $0.id.publicKey })).contains(advertised.publicKey))
+
+        queriedSide.close()
+        wrongSide.close()
     }
 
     @Test("Unsolicited PEX responses do not mutate routing table or earn success")

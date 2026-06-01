@@ -307,7 +307,7 @@ struct EconomicMessageTests {
         let target = Data(repeating: 0xBB, count: 32)
         let msg = Message.findNode(target: target, fee: 25)
         let decoded = Message.deserialize(msg.serialize())
-        if case .findNode(let t, let fee) = decoded {
+        if case .findNode(let t, let fee, _) = decoded {
             #expect(t == target)
             #expect(fee == 25)
         } else {
@@ -320,7 +320,7 @@ struct EconomicMessageTests {
         let target = Data(repeating: 0xCC, count: 32)
         let msg = Message.findNode(target: target)
         let decoded = Message.deserialize(msg.serialize())
-        if case .findNode(let t, let fee) = decoded {
+        if case .findNode(let t, let fee, _) = decoded {
             #expect(t == target)
             #expect(fee == 0)
         } else {
