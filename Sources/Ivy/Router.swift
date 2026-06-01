@@ -78,29 +78,7 @@ public struct Router: Sendable {
 
     public func closestPeers(to target: [UInt8], count: Int) -> [BucketEntry] {
         _state.withLock { state in
-            let targetBucket = min(Self.commonPrefixLength(localHash, target), 255)
-
-            var candidates: [BucketEntry] = []
-            candidates.reserveCapacity(count * 2)
-
-            candidates.append(contentsOf: state.buckets[targetBucket])
-
-            var lo = targetBucket - 1
-            var hi = targetBucket + 1
-            while candidates.count < count && (lo >= 0 || hi < 256) {
-                if hi < 256 {
-                    candidates.append(contentsOf: state.buckets[hi])
-                    hi += 1
-                }
-                if lo >= 0 {
-                    candidates.append(contentsOf: state.buckets[lo])
-                    lo -= 1
-                }
-            }
-
-            if candidates.count <= count {
-                return candidates
-            }
+            var candidates = state.buckets.flatMap { $0 }
             candidates.sort { Self.isCloser($0.hash, than: $1.hash, to: target) }
             return Array(candidates.prefix(count))
         }

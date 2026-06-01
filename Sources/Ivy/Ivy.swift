@@ -494,7 +494,7 @@ public actor Ivy {
             let closest = router.closestPeers(to: targetHash, count: config.kBucketSize)
             let toQuery = closest.filter {
                 !queried.contains($0.id.publicKey) &&
-                connections[$0.id] != nil
+                (connections[$0.id] != nil || localPeers[$0.id] != nil)
             }.prefix(3)
 
             if toQuery.isEmpty { break }
