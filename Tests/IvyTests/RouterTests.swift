@@ -73,8 +73,8 @@ struct RouterTests {
         #expect(d1 <= d2)
     }
 
-    @Test("Bucket eviction prefers higher reputation")
-    func testBucketEviction() {
+    @Test("Full bucket keeps existing peers instead of reputation-evicting")
+    func fullBucketKeepsExistingPeers() {
         let tally = Tally()
         let router = Router(localID: PeerID(publicKey: "local"), k: 2)
 
@@ -104,9 +104,44 @@ struct RouterTests {
         let ep = PeerEndpoint(publicKey: goodPeer, host: "5.6.7.8", port: 4001)
         router.addPeer(PeerID(publicKey: goodPeer), endpoint: ep, tally: tally)
 
-        let all = router.allPeers()
-        let hasGood = all.contains { $0.id.publicKey == goodPeer }
-        #expect(hasGood)
+        let keys = Set(router.allPeers().map { $0.id.publicKey })
+        #expect(keys == Set(peers.prefix(2)))
+        #expect(!keys.contains(goodPeer))
+    }
+
+    @Test("Removing a peer frees its bucket slot")
+    func removePeerFreesBucketSlot() {
+        let tally = Tally()
+        let router = Router(localID: PeerID(publicKey: "local"), k: 2)
+
+        var peers: [String] = []
+        let localHash = Router.hash("local")
+        for i in 0..<100 {
+            let key = "removable-candidate-\(i)"
+            let cpl = Router.commonPrefixLength(localHash, Router.hash(key))
+            if cpl == 0 {
+                peers.append(key)
+            }
+            if peers.count >= 3 { break }
+        }
+        guard peers.count >= 3 else { return }
+
+        for key in peers.prefix(2) {
+            router.addPeer(
+                PeerID(publicKey: key),
+                endpoint: PeerEndpoint(publicKey: key, host: "1.2.3.4", port: 4001),
+                tally: tally
+            )
+        }
+        router.removePeer(PeerID(publicKey: peers[0]))
+        router.addPeer(
+            PeerID(publicKey: peers[2]),
+            endpoint: PeerEndpoint(publicKey: peers[2], host: "5.6.7.8", port: 4001),
+            tally: tally
+        )
+
+        let keys = Set(router.allPeers().map { $0.id.publicKey })
+        #expect(keys == Set([peers[1], peers[2]]))
     }
 
     @Test("All peers returns full list")
