@@ -18,12 +18,12 @@ public enum IvyError: Error, Sendable {
     case identityVerificationFailed
 }
 
-private struct PendingNeighborResponse: Sendable {
+struct PendingNeighborResponse: Sendable {
     let peer: PeerID
     let continuation: CheckedContinuation<[PeerEndpoint], Never>?
 }
 
-private struct PendingFindPins {
+struct PendingFindPins {
     var continuations: [CheckedContinuation<[PeerID], Never>]
     var expectedPeers: Set<String>
     let generation: UInt64
@@ -40,57 +40,57 @@ public actor Ivy {
     public weak var dataSource: IvyDataSource?
     public func setDataSource(_ ds: IvyDataSource?) { dataSource = ds }
     public var chainPorts: [String: UInt16] = [:]
-    private var peerChainPorts: [PeerID: [String: UInt16]] = [:]
+    var peerChainPorts: [PeerID: [String: UInt16]] = [:]
 
-    private var connections: [PeerID: PeerConnection] = [:]
-    private var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
-    private var serverChannel: Channel?
+    var connections: [PeerID: PeerConnection] = [:]
+    var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
+    var serverChannel: Channel?
     #if canImport(Network)
-    private var discovery: LocalDiscovery?
+    var discovery: LocalDiscovery?
     #endif
-    private var running = false
+    var running = false
 
-    private let stunClient: STUNClient
+    let stunClient: STUNClient
     private(set) public var publicAddress: ObservedAddress?
-    private var pendingForwards: [String: [PeerID: UInt64]] = [:]
-    private var pendingForwardCountsByPeer: [PeerID: Int] = [:]
-    private var pendingForwardCount = 0
-    private var nextPendingForwardGeneration: UInt64 = 0
-    private static let maxPendingForwards = 4_096
-    private static let maxPendingForwardsPerPeer = 128
+    var pendingForwards: [String: [PeerID: UInt64]] = [:]
+    var pendingForwardCountsByPeer: [PeerID: Int] = [:]
+    var pendingForwardCount = 0
+    var nextPendingForwardGeneration: UInt64 = 0
+    static let maxPendingForwards = 4_096
+    static let maxPendingForwardsPerPeer = 128
     /// Per-peer token bucket for gossip relay. Prevents a single peer
     /// from driving unbounded outbound broadcast amplification.
-    private var gossipBuckets: [PeerID: TokenBucket] = [:]
-    private static let announceGossipCapacity: Double = 200
-    private static let announceGossipRefillPerSec: Double = 50
-    private var pexTask: Task<Void, Never>?
-    private var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
-    private var pendingNeighborLookupNonces: Set<UInt64> = []
-    private var pendingNeighborResponses: [UInt64: PendingNeighborResponse] = [:]
-    private var completedNeighborResponses: [UInt64: [PeerEndpoint]] = [:]
-    private var healthMonitor: PeerHealthMonitor?
-    private var haveSet = InventorySet()
-    private var localPeers: [PeerID: LocalPeerConnection] = [:]
-    private var _serviceBus: LocalServiceBus?
-    private var connectingPeers: Set<PeerID> = []
-    private var connectingEndpoints: [PeerID: PeerEndpoint] = [:]
-    private var reconnectAttempts: [PeerID: Int] = [:]
-    private var reconnectTasks: [PeerID: Task<Void, Never>] = [:]
-    private var intentionallyDisconnectedPeers: Set<PeerID> = []
-    private static let reconnectBaseDelayMs: UInt64 = 500
-    private static let reconnectMaxDelayMs: UInt64 = 30_000
-    private static let reconnectJitterMs: UInt64 = 250
-    private static let kademliaLookupParallelism = 3
+    var gossipBuckets: [PeerID: TokenBucket] = [:]
+    static let announceGossipCapacity: Double = 200
+    static let announceGossipRefillPerSec: Double = 50
+    var pexTask: Task<Void, Never>?
+    var pendingPEX: [UInt64: CheckedContinuation<[PeerEndpoint], Never>] = [:]
+    var pendingNeighborLookupNonces: Set<UInt64> = []
+    var pendingNeighborResponses: [UInt64: PendingNeighborResponse] = [:]
+    var completedNeighborResponses: [UInt64: [PeerEndpoint]] = [:]
+    var healthMonitor: PeerHealthMonitor?
+    var haveSet = InventorySet()
+    var localPeers: [PeerID: LocalPeerConnection] = [:]
+    var _serviceBus: LocalServiceBus?
+    var connectingPeers: Set<PeerID> = []
+    var connectingEndpoints: [PeerID: PeerEndpoint] = [:]
+    var reconnectAttempts: [PeerID: Int] = [:]
+    var reconnectTasks: [PeerID: Task<Void, Never>] = [:]
+    var intentionallyDisconnectedPeers: Set<PeerID> = []
+    static let reconnectBaseDelayMs: UInt64 = 500
+    static let reconnectMaxDelayMs: UInt64 = 30_000
+    static let reconnectJitterMs: UInt64 = 250
+    static let kademliaLookupParallelism = 3
 
-    private var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
+    var pinAnnouncements: BoundedDictionary<String, [(publicKey: String, expiry: UInt64)]> = BoundedDictionary(capacity: 10_000)
 
-    private var nodeRecordCache: BoundedDictionary<String, NodeRecord> = BoundedDictionary(capacity: 5_000)
-    private var pendingNodeRecordRequests: [PeerID: Set<String>] = [:]
-    private var localNodeRecord: NodeRecord?
-    private var localRecordSeq: UInt64 = 0
+    var nodeRecordCache: BoundedDictionary<String, NodeRecord> = BoundedDictionary(capacity: 5_000)
+    var pendingNodeRecordRequests: [PeerID: Set<String>] = [:]
+    var localNodeRecord: NodeRecord?
+    var localRecordSeq: UInt64 = 0
 
     // Volume tracking: root CID → provider peer(s) for DHT routing
-    private var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
+    var providerRecords: BoundedDictionary<String, [PeerID]> = BoundedDictionary(capacity: 10_000)
 
     // CONTENT-ADDRESSING INVARIANT
     // ─────────────────────────────────────────────────────────────────────────
@@ -103,14 +103,14 @@ public actor Ivy {
     // Peer identity is tracked only for tally/reputation and DHT routing
     // (who to ask), never for demultiplexing responses (what was asked).
     // ─────────────────────────────────────────────────────────────────────────
-    private struct PendingVolumeRequest {
+    struct PendingVolumeRequest {
         var continuations: [CheckedContinuation<[String: Data], Never>]
         var candidates: Set<PeerID>
     }
 
-    private var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
-    private var pendingFindPins: [String: PendingFindPins] = [:]
-    private var nextFindPinsGeneration: UInt64 = 0
+    var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
+    var pendingFindPins: [String: PendingFindPins] = [:]
+    var nextFindPinsGeneration: UInt64 = 0
 
     public let creditLedger: CreditLineLedger
 
@@ -229,7 +229,7 @@ public actor Ivy {
         sendIdentify(to: conn)
     }
 
-    private func reserveOutgoingDial(to endpoint: PeerEndpoint) -> Bool {
+    func reserveOutgoingDial(to endpoint: PeerEndpoint) -> Bool {
         let peer = PeerID(publicKey: endpoint.publicKey)
         guard connections[peer] == nil, !connectingPeers.contains(peer) else { return false }
 
@@ -251,7 +251,7 @@ public actor Ivy {
         return true
     }
 
-    private func finishOutgoingDial(to peer: PeerID, connected: Bool) {
+    func finishOutgoingDial(to peer: PeerID, connected: Bool) {
         connectingPeers.remove(peer)
         connectingEndpoints.removeValue(forKey: peer)
         if connected {
@@ -360,7 +360,7 @@ public actor Ivy {
     }
 
     /// Broadcast a pre-serialized payload to all connected network peers except `excluding`.
-    private func broadcastPayload(_ payload: Data, excluding: PeerID? = nil) {
+    func broadcastPayload(_ payload: Data, excluding: PeerID? = nil) {
         for (peer, conn) in connections {
             if let excluded = excluding, peer == excluded { continue }
             guard tally.shouldAllow(peer: peer) else { continue }
@@ -390,7 +390,7 @@ public actor Ivy {
         return await fetchWithNewConnections(cid: cid)
     }
 
-    private func fetchViaDHT(cid: String) async -> Data? {
+    func fetchViaDHT(cid: String) async -> Data? {
         await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
                 guard !Task.isCancelled else { continuation.resume(returning: nil); return }
@@ -424,7 +424,7 @@ public actor Ivy {
         }
     }
 
-    private func fetchWithNewConnections(cid: String) async -> Data? {
+    func fetchWithNewConnections(cid: String) async -> Data? {
         let cidHash = Router.hash(cid)
         let closest = router.closestPeers(to: cidHash, count: config.maxConcurrentRequests * 2)
 
@@ -505,66 +505,6 @@ public actor Ivy {
         }
     }
 
-    // MARK: - DHT
-
-    public func findNode(target: String) async -> [PeerEndpoint] {
-        let targetHash = Router.hash(target)
-        let lookupParallelism = min(Self.kademliaLookupParallelism, max(1, config.kBucketSize))
-        // Convergence normally stops the lookup; k rounds is only a safety guard.
-        let maxLookupRounds = max(1, config.kBucketSize)
-        var candidatesByKey: [String: Router.BucketEntry] = [:]
-        var queried: Set<String> = []
-        var previousCandidateKeys: [String] = []
-
-        for _ in 0..<maxLookupRounds {
-            for entry in router.closestPeers(to: targetHash, count: config.kBucketSize) {
-                candidatesByKey[entry.id.publicKey] = entry
-            }
-
-            let candidates = closestCandidateEntries(candidatesByKey.values, to: targetHash)
-            let candidateKeys = candidates.map { $0.id.publicKey }
-            let toQuery = candidates
-                .filter {
-                    !queried.contains($0.id.publicKey) &&
-                    (connections[$0.id] != nil || localPeers[$0.id] != nil)
-                }
-                .prefix(lookupParallelism)
-
-            if toQuery.isEmpty { break }
-
-            var nonces: [UInt64] = []
-            nonces.reserveCapacity(toQuery.count)
-            for entry in toQuery {
-                queried.insert(entry.id.publicKey)
-                let nonce = makeFindNodeNonce()
-                nonces.append(nonce)
-                requestNeighbors(from: entry.id, targetHash: targetHash, nonce: nonce, timeout: .milliseconds(500))
-            }
-
-            let responses = await collectNeighborResponses(nonces: nonces)
-            for endpoint in responses.flatMap({ $0 }) {
-                let id = PeerID(publicKey: endpoint.publicKey)
-                candidatesByKey[id.publicKey] = Router.BucketEntry(
-                    id: id,
-                    hash: Router.hash(id.publicKey),
-                    endpoint: endpoint,
-                    lastSeen: .now
-                )
-            }
-
-            let stabilized = candidateKeys == previousCandidateKeys
-            previousCandidateKeys = candidateKeys
-            if stabilized && !candidates.contains(where: { !queried.contains($0.id.publicKey) }) {
-                break
-            }
-        }
-
-        for entry in router.closestPeers(to: targetHash, count: config.kBucketSize) {
-            candidatesByKey[entry.id.publicKey] = entry
-        }
-        return closestCandidateEntries(candidatesByKey.values, to: targetHash).map { $0.endpoint }
-    }
-
     // MARK: - Serving
 
     public func handleBlockRequest(cid: String, from peer: PeerID) async {
@@ -586,7 +526,7 @@ public actor Ivy {
 
     // MARK: - Identify Protocol
 
-    private func sendIdentify(to conn: PeerConnection) {
+    func sendIdentify(to conn: PeerConnection) {
         let observedHost = conn.endpoint.host
         let observedPort = conn.endpoint.port
         var listenAddrs: [(String, UInt16)] = [("0.0.0.0", config.listenPort)]
@@ -615,7 +555,7 @@ public actor Ivy {
         }
     }
 
-    private func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) async {
+    func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) async {
         let realID = PeerID(publicKey: publicKey)
 
         // Require a valid identity signature. An empty or missing signature allows
@@ -677,7 +617,7 @@ public actor Ivy {
         // discovery, such as STUN, may mutate publicAddress and NodeRecord.
     }
 
-    private func hexDecode(_ hex: String) -> Data? {
+    func hexDecode(_ hex: String) -> Data? {
         guard hex.count % 2 == 0 else { return nil }
         var data = Data(capacity: hex.count / 2)
         var index = hex.startIndex
@@ -692,7 +632,7 @@ public actor Ivy {
 
     // MARK: - Message Handling
 
-    private func handleInbound(_ conn: PeerConnection) async {
+    func handleInbound(_ conn: PeerConnection) async {
         for await message in conn.messages {
             await handleMessage(message, from: conn.id)
         }
@@ -713,7 +653,7 @@ public actor Ivy {
         }
     }
 
-    private func scheduleReconnect(to endpoint: PeerEndpoint, peer: PeerID) {
+    func scheduleReconnect(to endpoint: PeerEndpoint, peer: PeerID) {
         guard connections[peer] == nil,
               !connectingPeers.contains(peer),
               reconnectTasks[peer] == nil else { return }
@@ -729,7 +669,7 @@ public actor Ivy {
         reconnectTasks[peer] = task
     }
 
-    private func reconnectDelay(for peer: PeerID) -> Duration {
+    func reconnectDelay(for peer: PeerID) -> Duration {
         let attempt = min((reconnectAttempts[peer] ?? 0) + 1, 16)
         reconnectAttempts[peer] = attempt
 
@@ -740,7 +680,7 @@ public actor Ivy {
         return .milliseconds(capped + jitter)
     }
 
-    private func runScheduledReconnect(to endpoint: PeerEndpoint, peer: PeerID) async {
+    func runScheduledReconnect(to endpoint: PeerEndpoint, peer: PeerID) async {
         reconnectTasks.removeValue(forKey: peer)
         guard running,
               connections[peer] == nil,
@@ -754,7 +694,7 @@ public actor Ivy {
         }
     }
 
-    private func handleMessage(_ message: Message, from peer: PeerID) async {
+    func handleMessage(_ message: Message, from peer: PeerID) async {
         if let monitor = healthMonitor {
             await monitor.recordActivity(from: peer)
         }
@@ -885,20 +825,20 @@ public actor Ivy {
 
     // MARK: - Credit Line Metering
 
-    private func meterSent(peer: PeerID, bytes: Int) async {
+    func meterSent(peer: PeerID, bytes: Int) async {
         await creditLedger.earnFromRelay(peer: peer, amount: Int64(bytes))
     }
 
-    private func meterReceived(peer: PeerID, bytes: Int) async {
+    func meterReceived(peer: PeerID, bytes: Int) async {
         await creditLedger.chargeForRelay(peer: peer, amount: Int64(bytes))
     }
 
-    private func hasCreditCapacity(peer: PeerID) async -> Bool {
+    func hasCreditCapacity(peer: PeerID) async -> Bool {
         guard let line = await creditLedger.creditLine(for: peer) else { return true }
         return !line.needsSettlement
     }
 
-    private func admitGossipRelay(from peer: PeerID) -> Bool {
+    func admitGossipRelay(from peer: PeerID) -> Bool {
         var bucket = gossipBuckets[peer] ?? TokenBucket(
             capacity: Self.announceGossipCapacity,
             refillPerSec: Self.announceGossipRefillPerSec
@@ -909,201 +849,6 @@ public actor Ivy {
             if let first = gossipBuckets.first { gossipBuckets.removeValue(forKey: first.key) }
         }
         return admitted
-    }
-
-    // MARK: - DHT Forwarding
-
-    private func handleDHTForward(cid: String, ttl: UInt8, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer), await hasCreditCapacity(peer: peer) else {
-            fireToPeer(peer, .dontHave(cid: cid), bypassBudget: true)
-            return
-        }
-
-        let advertisedAvailable = haveSet.contains(cid)
-        var data: Data?
-        if advertisedAvailable {
-            data = await getLocalBlock(cid: cid)
-        }
-
-        if let data {
-            fireToPeer(peer, .block(cid: cid, data: data), bypassBudget: true)
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
-            tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
-            await meterSent(peer: peer, bytes: data.count)
-        } else if ttl > 0 {
-            if advertisedAvailable {
-                haveSet.remove(cid)
-            }
-            guard addPendingForward(cid: cid, requester: peer) else { return }
-            let cidHash = Router.hash(cid)
-            let closest = router.closestPeers(to: cidHash, count: 3)
-            for entry in closest {
-                guard entry.id != peer, entry.id != localID else { continue }
-                let reachable = connections[entry.id] != nil
-                guard reachable else { continue }
-                fireToPeer(entry.id, .dhtForward(cid: cid, ttl: ttl - 1))
-            }
-        } else if advertisedAvailable {
-            haveSet.remove(cid)
-        }
-        // ttl == 0 and not found: silently fail (requester has its own timeout)
-    }
-
-    private func resolveForwards(cid: String, data: Data, from peer: PeerID) {
-        guard let requesters = removePendingForwards(for: cid) else { return }
-        let payload = Message.block(cid: cid, data: data).serialize(maxFrameSize: config.maxFrameSize)
-        let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
-        for requester in requesters.keys {
-            firePayloadToPeer(requester, payload)
-            tally.recordSent(peer: requester, bytes: data.count, cpl: cpl)
-        }
-    }
-
-    private func addPendingForward(cid: String, requester: PeerID) -> Bool {
-        if pendingForwards[cid]?[requester] != nil { return true }
-        guard pendingForwardCount < Self.maxPendingForwards else { return false }
-        guard (pendingForwardCountsByPeer[requester] ?? 0) < Self.maxPendingForwardsPerPeer else { return false }
-
-        nextPendingForwardGeneration &+= 1
-        let generation = nextPendingForwardGeneration
-        pendingForwards[cid, default: [:]][requester] = generation
-        pendingForwardCountsByPeer[requester, default: 0] += 1
-        pendingForwardCount += 1
-
-        Task {
-            try? await Task.sleep(for: config.requestTimeout)
-            self.expirePendingForward(cid: cid, requester: requester, generation: generation)
-        }
-        return true
-    }
-
-    private func expirePendingForward(cid: String, requester: PeerID, generation: UInt64) {
-        guard pendingForwards[cid]?[requester] == generation else { return }
-        removePendingForward(cid: cid, requester: requester)
-    }
-
-    private func removePendingForward(cid: String, requester: PeerID) {
-        guard pendingForwards[cid]?.removeValue(forKey: requester) != nil else { return }
-        if pendingForwards[cid]?.isEmpty == true {
-            pendingForwards.removeValue(forKey: cid)
-        }
-        if let count = pendingForwardCountsByPeer[requester], count > 1 {
-            pendingForwardCountsByPeer[requester] = count - 1
-        } else {
-            pendingForwardCountsByPeer.removeValue(forKey: requester)
-        }
-        pendingForwardCount = max(pendingForwardCount - 1, 0)
-    }
-
-    private func removePendingForwards(for cid: String) -> [PeerID: UInt64]? {
-        guard let requesters = pendingForwards.removeValue(forKey: cid) else { return nil }
-        for requester in requesters.keys {
-            if let count = pendingForwardCountsByPeer[requester], count > 1 {
-                pendingForwardCountsByPeer[requester] = count - 1
-            } else {
-                pendingForwardCountsByPeer.removeValue(forKey: requester)
-            }
-            pendingForwardCount = max(pendingForwardCount - 1, 0)
-        }
-        return requesters
-    }
-
-    // MARK: - want (passive responder)
-
-    private func handleWant(rootCIDs: [String], from peer: PeerID) async {
-        for rootCID in rootCIDs {
-            await handleWant(rootCID: rootCID, requestedCIDs: [], from: peer)
-        }
-    }
-
-    private func handleWant(rootCID: String, requestedCIDs: [String], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
-        let requested = orderedRequestedCIDs(rootCID: rootCID, requestedCIDs: requestedCIDs)
-        var items = await dataSource?.volumeData(for: rootCID, cids: requested) ?? []
-        guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
-            fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
-            return
-        }
-
-        items = budgetedWantItems(rootCID: rootCID, items: items)
-        guard !items.isEmpty, items.contains(where: { $0.cid == rootCID }) else {
-            fireToPeer(peer, .notHave(rootCID: rootCID), bypassBudget: true)
-            return
-        }
-
-        fireToPeer(peer, .blocks(rootCID: rootCID, items: items))
-        let totalBytes = items.reduce(0) { $0 + $1.data.count }
-        if totalBytes > 0 {
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
-            tally.recordSent(peer: peer, bytes: totalBytes, cpl: cpl)
-            await meterSent(peer: peer, bytes: totalBytes)
-        }
-    }
-
-    private func orderedRequestedCIDs(rootCID: String, requestedCIDs: [String]) -> [String] {
-        guard !requestedCIDs.isEmpty else { return [] }
-        var seen: Set<String> = []
-        var ordered: [String] = []
-        for cid in [rootCID] + requestedCIDs where seen.insert(cid).inserted {
-            ordered.append(cid)
-        }
-        return ordered
-    }
-
-    private func budgetedWantItems(rootCID: String, items: [(cid: String, data: Data)]) -> [(cid: String, data: Data)] {
-        let maxBytes = Int(config.maxFrameSize) - 1024
-        let ordered = items.sorted { lhs, rhs in
-            if lhs.cid == rootCID { return true }
-            if rhs.cid == rootCID { return false }
-            return lhs.cid < rhs.cid
-        }
-        var total = 0
-        var result: [(cid: String, data: Data)] = []
-        for item in ordered {
-            let itemCost = item.cid.utf8.count + item.data.count + 8
-            guard total + itemCost <= maxBytes else { continue }
-            result.append(item)
-            total += itemCost
-        }
-        return result
-    }
-
-    private func handleBlocks(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
-        guard pendingVolumeRequests[rootCID] != nil else { return }
-        guard !items.isEmpty else {
-            markVolumeCandidateDone(rootCID: rootCID, peer: peer)
-            return
-        }
-
-        var result: [String: Data] = [:]
-        for item in items {
-            guard ContentAddressVerifier.data(item.data, matches: item.cid) else {
-                tally.recordFailure(peer: peer)
-                markVolumeCandidateDone(rootCID: rootCID, peer: peer)
-                return
-            }
-            result[item.cid] = item.data
-        }
-
-        guard result[rootCID] != nil else {
-            markVolumeCandidateDone(rootCID: rootCID, peer: peer)
-            return
-        }
-
-        for cid in result.keys {
-            haveSet.insert(cid)
-        }
-
-        var totalReceived = 0
-        for item in items {
-            let cpl = Router.commonPrefixLength(router.localHash, Router.hash(item.cid))
-            tally.recordReceived(peer: peer, bytes: item.data.count, cpl: cpl)
-            totalReceived += item.data.count
-        }
-        if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
-        tally.recordSuccess(peer: peer)
-        recordVolumeProvider(rootCID: rootCID, peer: peer)
-        resolveVolumeRequest(key: rootCID, result: result)
     }
 
     // MARK: - Local Peers
@@ -1127,339 +872,11 @@ public actor Ivy {
         localPeers.removeValue(forKey: peerID)
     }
 
-    private func handleLocalInbound(_ conn: LocalPeerConnection, from peer: PeerID) async {
+    func handleLocalInbound(_ conn: LocalPeerConnection, from peer: PeerID) async {
         for await message in conn.messages {
             await handleMessage(message, from: peer)
         }
         localPeers.removeValue(forKey: peer)
-    }
-
-    // MARK: - Peer Exchange (PEX)
-
-    private func startPEX() {
-        pexTask = Task { [weak self] in
-            guard let self else { return }
-            try? await Task.sleep(for: .seconds(30))
-            while !Task.isCancelled {
-                await self.runPEXRound()
-                try? await Task.sleep(for: self.config.pexInterval)
-            }
-        }
-    }
-
-    private func runPEXRound() async {
-        let peerList = Array(connections.keys)
-        guard !peerList.isEmpty else { return }
-
-        let target = peerList.randomElement()!
-        let nonce = UInt64.random(in: 0...UInt64.max)
-
-        let discovered: [PeerEndpoint] = await withTaskCancellationHandler {
-            await withCheckedContinuation { cont in
-                guard !Task.isCancelled else { cont.resume(returning: []); return }
-                pendingPEX[nonce] = cont
-                fireToPeer(target, .pexRequest(nonce: nonce))
-                Task {
-                    try? await Task.sleep(for: .seconds(10))
-                    if let pending = self.pendingPEX.removeValue(forKey: nonce) {
-                        pending.resume(returning: [])
-                    }
-                }
-            }
-        } onCancel: {
-            Task { await self.resolvePendingPEX(nonce: nonce) }
-        }
-
-        for ep in discovered {
-            if addDiscoveredPeer(ep, source: "pex", from: target) != nil {
-                Task { try? await connect(to: ep) }
-            }
-        }
-    }
-
-    private func handlePEXRequest(nonce: UInt64, from peer: PeerID) {
-        guard tally.shouldAllow(peer: peer) else { return }
-
-        let peerHash = router.cachedHash(peer.publicKey)
-        let maxPeers = config.pexMaxPeers
-
-        let allPeers = router.closestPeers(to: peerHash, count: maxPeers * 2)
-
-        var selected = [PeerEndpoint]()
-        selected.reserveCapacity(maxPeers)
-        for entry in allPeers {
-            if entry.id == peer || entry.id == localID { continue }
-            if entry.endpoint.host == "0.0.0.0" || entry.endpoint.host == "unknown" { continue }
-            selected.append(entry.endpoint)
-            if selected.count >= maxPeers { break }
-        }
-
-        fireToPeer(peer, .pexResponse(nonce: nonce, peers: selected))
-    }
-
-    private func handlePEXResponse(nonce: UInt64, peers: [PeerEndpoint], from peer: PeerID) {
-        guard let cont = pendingPEX.removeValue(forKey: nonce) else {
-            config.logger.warning("Ignoring unsolicited PEX response from \(peer.publicKey.prefix(16))…")
-            return
-        }
-
-        let accepted = peers.filter { isAcceptableDiscoveredEndpoint($0, source: "pex", from: peer) }
-        if accepted.count == peers.count {
-            tally.recordSuccess(peer: peer)
-        } else {
-            tally.recordFailure(peer: peer)
-        }
-        cont.resume(returning: accepted)
-    }
-
-#if DEBUG
-    func receivePEXResponseForTesting(nonce: UInt64, peers: [PeerEndpoint], from peer: PeerID) async -> [PeerEndpoint] {
-        await withCheckedContinuation { cont in
-            pendingPEX[nonce] = cont
-            handlePEXResponse(nonce: nonce, peers: peers, from: peer)
-        }
-    }
-#endif
-
-    @discardableResult
-    private func addDiscoveredPeer(_ endpoint: PeerEndpoint, source: String, from peer: PeerID) -> PeerID? {
-        guard isAcceptableDiscoveredEndpoint(endpoint, source: source, from: peer) else {
-            return nil
-        }
-
-        let discovered = PeerID(publicKey: endpoint.publicKey)
-        guard connections[discovered] == nil else { return nil }
-        router.addPeer(discovered, endpoint: endpoint, tally: tally)
-        return discovered
-    }
-
-    private func isAcceptableDiscoveredEndpoint(_ endpoint: PeerEndpoint, source: String, from peer: PeerID) -> Bool {
-        guard !endpoint.publicKey.isEmpty else {
-            config.logger.warning("Rejecting \(source) endpoint from \(peer.publicKey.prefix(16))…: empty public key")
-            return false
-        }
-
-        let discovered = PeerID(publicKey: endpoint.publicKey)
-        guard discovered != localID else { return false }
-
-        let host = endpoint.host.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !host.isEmpty,
-              host != "0.0.0.0",
-              host != "::",
-              host != "unknown",
-              endpoint.port != 0 else {
-            config.logger.warning("Rejecting \(source) endpoint \(endpoint.publicKey.prefix(16))… from \(peer.publicKey.prefix(16))…: unusable address")
-            return false
-        }
-
-        if config.minPeerKeyBits > 0 {
-            let bits = KeyDifficulty.trailingZeroBits(of: endpoint.publicKey)
-            guard bits >= config.minPeerKeyBits else {
-                config.logger.warning("Rejecting \(source) endpoint \(endpoint.publicKey.prefix(16))… from \(peer.publicKey.prefix(16))…: \(bits) key PoW bits, need \(config.minPeerKeyBits)")
-                return false
-            }
-        }
-
-        return true
-    }
-
-    // MARK: - Pin Announcements
-
-    private func handleFindPins(cid: String, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer) else { return }
-
-        let stored = pinAnnouncements[cid] ?? []
-        let providers = stored.map(\.publicKey)
-        fireToPeer(peer, .pins(cid: cid, providers: providers))
-    }
-
-    private func handlePinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64, from peer: PeerID) {
-        guard tally.shouldAllow(peer: peer) else { return }
-        guard publicKey == peer.publicKey else { return }
-        guard PinAnnouncementSignature.isExpiryValid(expiry) else { return }
-        guard PinAnnouncementSignature.verify(
-            rootCID: rootCID,
-            publicKey: publicKey,
-            expiry: expiry,
-            fee: fee,
-            signature: signature
-        ) else { return }
-
-        var existing = pinAnnouncements[rootCID] ?? []
-        existing.removeAll { $0.publicKey == publicKey }
-        existing.append((publicKey: publicKey, expiry: expiry))
-
-        if existing.count > Int(MessageLimits.maxNeighborCount) {
-            existing = Array(existing.suffix(Int(MessageLimits.maxNeighborCount)))
-        }
-        pinAnnouncements[rootCID] = existing
-
-        fireToPeer(peer, .pinStored(rootCID: rootCID))
-    }
-
-    /// Resolve any in-flight findPins waiters with the providers that just
-    /// arrived, and seed them as candidates for future fetches. Provider
-    /// peers may not be in our routing table yet; we just stash the keys
-    /// and let fetchVolume gate on connection-reachability.
-    private func handlePinsResponse(cid: String, providers: [String], from peer: PeerID) {
-        guard let pending = pendingFindPins[cid],
-              pending.expectedPeers.contains(peer.publicKey) else { return }
-        guard !providers.isEmpty else { return }
-
-        let peerIDs = providers.map { PeerID(publicKey: $0) }
-        if let waiters = pendingFindPins.removeValue(forKey: cid)?.continuations {
-            for cont in waiters { cont.resume(returning: peerIDs) }
-        }
-        for pk in providers {
-            let pid = PeerID(publicKey: pk)
-            recordVolumeProvider(rootCID: cid, peer: pid)
-        }
-    }
-
-    public func publishPinAnnounce(rootCID: String, expiry: UInt64, fee: UInt64) {
-        guard let signature = PinAnnouncementSignature.sign(
-            rootCID: rootCID,
-            publicKey: config.publicKey,
-            expiry: expiry,
-            fee: fee,
-            signingKey: config.signingKey
-        ) else {
-            return
-        }
-        publishPinAnnounce(rootCID: rootCID, expiry: expiry, signature: signature, fee: fee)
-    }
-
-    public func publishPinAnnounce(rootCID: String, expiry: UInt64, signature: Data, fee: UInt64) {
-        guard PinAnnouncementSignature.isExpiryValid(expiry) else { return }
-        guard PinAnnouncementSignature.verify(
-            rootCID: rootCID,
-            publicKey: config.publicKey,
-            expiry: expiry,
-            fee: fee,
-            signature: signature
-        ) else { return }
-
-        // Self-record: when we publish that we pin a CID, we are also a
-        // valid answer to findPins for that CID. Without this, a node that
-        // is itself in the closest-K to the CID hash never appears in its
-        // own responses — IPFS provider records are bidirectional.
-        var existing = pinAnnouncements[rootCID] ?? []
-        existing.removeAll { $0.publicKey == config.publicKey }
-        existing.append((publicKey: config.publicKey, expiry: expiry))
-        pinAnnouncements[rootCID] = existing
-
-        let msg = Message.pinAnnounce(rootCID: rootCID, publicKey: config.publicKey, expiry: expiry, signature: signature, fee: fee)
-        let cidHash = Router.hash(rootCID)
-        let closest = router.closestPeers(to: cidHash, count: config.kBucketSize)
-        for entry in closest {
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-            fireToPeer(entry.id, msg)
-        }
-    }
-
-    public func storedPinAnnouncements(for cid: String) -> [String] {
-        (pinAnnouncements[cid] ?? []).map(\.publicKey)
-    }
-
-    // MARK: - Node Records
-
-    private func handleNodeRecord(_ record: NodeRecord, from peer: PeerID) {
-        guard tally.shouldAllow(peer: peer) else { return }
-        let senderOwnsRecord = record.publicKey == peer.publicKey
-        let requestedFromPeer = hasPendingNodeRecordRequest(publicKey: record.publicKey, from: peer)
-        guard senderOwnsRecord || requestedFromPeer else { return }
-        guard record.verify() else { return }
-        guard record.serialize().count <= NodeRecord.maxSize else { return }
-        if let existing = nodeRecordCache[record.publicKey] {
-            if existing.isExpired() {
-                nodeRecordCache.removeValue(forKey: record.publicKey)
-            } else {
-                guard record.sequenceNumber > existing.sequenceNumber else { return }
-            }
-        }
-        if !senderOwnsRecord {
-            guard consumePendingNodeRecordRequest(publicKey: record.publicKey, from: peer) else { return }
-        }
-        nodeRecordCache[record.publicKey] = record
-    }
-
-    private func hasPendingNodeRecordRequest(publicKey: String, from peer: PeerID) -> Bool {
-        pendingNodeRecordRequests[peer]?.contains(publicKey) == true
-    }
-
-    private func consumePendingNodeRecordRequest(publicKey: String, from peer: PeerID) -> Bool {
-        guard var requestedKeys = pendingNodeRecordRequests[peer],
-              requestedKeys.remove(publicKey) != nil else { return false }
-        if requestedKeys.isEmpty {
-            pendingNodeRecordRequests.removeValue(forKey: peer)
-        } else {
-            pendingNodeRecordRequests[peer] = requestedKeys
-        }
-        return true
-    }
-
-    private func handleGetNodeRecord(publicKey: String, from peer: PeerID) {
-        guard tally.shouldAllow(peer: peer) else { return }
-        if publicKey == config.publicKey, let local = localNodeRecord, !local.isExpired() {
-            fireToPeer(peer, .nodeRecord(record: local))
-        } else if let cached = cachedNodeRecord(for: publicKey) {
-            fireToPeer(peer, .nodeRecord(record: cached))
-        }
-    }
-
-    public func updateNodeRecord() {
-        guard let addr = publicAddress else { return }
-        localRecordSeq += 1
-        localNodeRecord = NodeRecord.create(
-            publicKey: config.publicKey,
-            host: addr.host,
-            port: addr.port,
-            sequenceNumber: localRecordSeq,
-            signingKey: config.signingKey
-        )
-        if let record = localNodeRecord {
-            nodeRecordCache[config.publicKey] = record
-        }
-    }
-
-    public func publishNodeRecord() {
-        guard let record = localNodeRecord, !record.isExpired() else { return }
-        let msg = Message.nodeRecord(record: record)
-        let keyHash = Router.hash(config.publicKey)
-        let closest = router.closestPeers(to: keyHash, count: config.kBucketSize)
-        for entry in closest {
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-            fireToPeer(entry.id, msg)
-        }
-    }
-
-    public func lookupNodeRecord(publicKey: String) async -> NodeRecord? {
-        if let cached = cachedNodeRecord(for: publicKey) { return cached }
-        let keyHash = Router.hash(publicKey)
-        let closest = router.closestPeers(to: keyHash, count: config.maxConcurrentRequests)
-        for entry in closest {
-            let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
-            guard reachable else { continue }
-            pendingNodeRecordRequests[entry.id, default: []].insert(publicKey)
-            fireToPeer(entry.id, .getNodeRecord(publicKey: publicKey))
-        }
-        try? await Task.sleep(for: .milliseconds(500))
-        return cachedNodeRecord(for: publicKey)
-    }
-
-    public func nodeRecord(for publicKey: String) -> NodeRecord? {
-        cachedNodeRecord(for: publicKey)
-    }
-
-    private func cachedNodeRecord(for publicKey: String) -> NodeRecord? {
-        guard let record = nodeRecordCache[publicKey] else { return nil }
-        if record.isExpired() {
-            nodeRecordCache.removeValue(forKey: publicKey)
-            return nil
-        }
-        return record
     }
 
     // MARK: - Public API (Application-Facing)
@@ -1583,7 +1000,7 @@ public actor Ivy {
     /// IPFS-style provider record path — distinct from the routing-table
     /// XOR-closest-peer set which only covers peers we happen to have in
     /// our buckets, not the broader population that has announced pins.
-    private func findPinnersViaDHT(rootCID: String) async -> [PeerID] {
+    func findPinnersViaDHT(rootCID: String) async -> [PeerID] {
         let cidHash = Router.hash(rootCID)
         let initialTargets = reachablePinLookupTargets(for: cidHash)
         guard !initialTargets.isEmpty else {
@@ -1607,14 +1024,14 @@ public actor Ivy {
         return await queryPinners(rootCID: rootCID, targets: refreshedTargets)
     }
 
-    private func reachablePinLookupTargets(for cidHash: [UInt8]) -> [Router.BucketEntry] {
+    func reachablePinLookupTargets(for cidHash: [UInt8]) -> [Router.BucketEntry] {
         router.closestPeers(to: cidHash, count: config.maxConcurrentRequests).filter { entry in
             let reachable = connections[entry.id] != nil || localPeers[entry.id] != nil
             return reachable
         }
     }
 
-    private func queryPinners(rootCID: String, targets: [Router.BucketEntry]) async -> [PeerID] {
+    func queryPinners(rootCID: String, targets: [Router.BucketEntry]) async -> [PeerID] {
         guard !targets.isEmpty else { return [] }
         return await withCheckedContinuation { cont in
             let expected = Set(targets.map { $0.id.publicKey })
@@ -1643,23 +1060,23 @@ public actor Ivy {
         }
     }
 
-    private func resolvePendingPEX(nonce: UInt64) {
+    func resolvePendingPEX(nonce: UInt64) {
         if let cont = pendingPEX.removeValue(forKey: nonce) {
             cont.resume(returning: [])
         }
     }
 
-    private func resolvePendingFindPins(rootCID: String, peers: [PeerID]) {
+    func resolvePendingFindPins(rootCID: String, peers: [PeerID]) {
         guard let pending = pendingFindPins.removeValue(forKey: rootCID) else { return }
         for cont in pending.continuations { cont.resume(returning: peers) }
     }
 
-    private func resolvePendingFindPins(rootCID: String, peers: [PeerID], generation: UInt64) {
+    func resolvePendingFindPins(rootCID: String, peers: [PeerID], generation: UInt64) {
         guard pendingFindPins[rootCID]?.generation == generation else { return }
         resolvePendingFindPins(rootCID: rootCID, peers: peers)
     }
 
-    private func collectNeighborResponses(nonces: [UInt64]) async -> [[PeerEndpoint]] {
+    func collectNeighborResponses(nonces: [UInt64]) async -> [[PeerEndpoint]] {
         guard !nonces.isEmpty else { return [] }
         var responses: [[PeerEndpoint]] = []
         responses.reserveCapacity(nonces.count)
@@ -1672,7 +1089,7 @@ public actor Ivy {
         return responses
     }
 
-    private func requestNeighbors(from peer: PeerID, targetHash: [UInt8], nonce: UInt64, timeout: Duration) {
+    func requestNeighbors(from peer: PeerID, targetHash: [UInt8], nonce: UInt64, timeout: Duration) {
         pendingNeighborLookupNonces.insert(nonce)
         pendingNeighborResponses[nonce] = PendingNeighborResponse(
             peer: peer,
@@ -1685,7 +1102,7 @@ public actor Ivy {
         fireToPeer(peer, .findNode(target: Data(targetHash), nonce: nonce))
     }
 
-    private func nextNeighborResponse(nonce: UInt64) async -> [PeerEndpoint] {
+    func nextNeighborResponse(nonce: UInt64) async -> [PeerEndpoint] {
         if let endpoints = completedNeighborResponses.removeValue(forKey: nonce) {
             pendingNeighborLookupNonces.remove(nonce)
             pendingNeighborResponses.removeValue(forKey: nonce)
@@ -1700,7 +1117,7 @@ public actor Ivy {
         }
     }
 
-    private func receiveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint], from peer: PeerID) {
+    func receiveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint], from peer: PeerID) {
         guard isExpectedNeighborResponse(nonce: nonce, from: peer) else { return }
         if pendingNeighborResponses[nonce]?.continuation == nil {
             completedNeighborResponses[nonce] = endpoints
@@ -1711,7 +1128,7 @@ public actor Ivy {
         resolveNeighborResponse(nonce: nonce, endpoints: endpoints)
     }
 
-    private func resolveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint]) {
+    func resolveNeighborResponse(nonce: UInt64, endpoints: [PeerEndpoint]) {
         guard let pending = pendingNeighborResponses.removeValue(forKey: nonce) else { return }
         pendingNeighborLookupNonces.remove(nonce)
         guard let cont = pending.continuation else {
@@ -1721,11 +1138,11 @@ public actor Ivy {
         cont.resume(returning: endpoints)
     }
 
-    private func isExpectedNeighborResponse(nonce: UInt64, from peer: PeerID) -> Bool {
+    func isExpectedNeighborResponse(nonce: UInt64, from peer: PeerID) -> Bool {
         pendingNeighborLookupNonces.contains(nonce) && pendingNeighborResponses[nonce]?.peer == peer
     }
 
-    private func makeFindNodeNonce() -> UInt64 {
+    func makeFindNodeNonce() -> UInt64 {
         var nonce = UInt64.random(in: 1...UInt64.max)
         while pendingNeighborLookupNonces.contains(nonce) {
             nonce = UInt64.random(in: 1...UInt64.max)
@@ -1747,375 +1164,9 @@ public actor Ivy {
         return nil
     }
 
-    // MARK: - Volume-Aware Fetching
-
-    /// Handle announceVolume: record provider, gossip to other peers.
-    private func handleAnnounceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64, from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer), admitGossipRelay(from: peer) else { return }
-
-        // Dedup: don't process the same volume announcement twice
-        let dedupKey = "vol-\(rootCID)"
-        guard !haveSet.contains(dedupKey) else { return }
-        haveSet.insert(dedupKey)
-
-        recordVolumeProvider(rootCID: rootCID, peer: peer)
-
-        // Gossip relay to other connected peers (like announceBlock)
-        let payload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        broadcastPayload(payload, excluding: peer)
-
-        delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
-    }
-
-    private func handlePushVolume(rootCID: String, items: [(cid: String, data: Data)], from peer: PeerID) async {
-        guard tally.shouldAllow(peer: peer), admitGossipRelay(from: peer) else { return }
-
-        let dedupKey = "vol-\(rootCID)"
-        guard !haveSet.contains(dedupKey) else { return }
-
-        let childCIDs = items.map(\.cid)
-        var totalSize: UInt64 = 0
-        var verifiedCIDs: [String] = []
-
-        guard items.contains(where: { $0.cid == rootCID }) else {
-            tally.recordFailure(peer: peer)
-            return
-        }
-        for (cid, data) in items {
-            guard ContentAddressVerifier.data(data, matches: cid) else {
-                tally.recordFailure(peer: peer)
-                return
-            }
-            verifiedCIDs.append(cid)
-            totalSize += UInt64(data.count)
-        }
-        for cid in verifiedCIDs {
-            haveSet.insert(cid)
-        }
-        haveSet.insert(dedupKey)
-        recordVolumeProvider(rootCID: rootCID, peer: peer)
-
-        let totalBytes = items.reduce(0) { $0 + $1.data.count }
-        let cpl = Router.commonPrefixLength(router.localHash, Router.hash(rootCID))
-        tally.recordReceived(peer: peer, bytes: totalBytes, cpl: cpl)
-        tally.recordSuccess(peer: peer)
-
-        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        broadcastPayload(announcePayload, excluding: peer)
-
-        delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
-    }
-
-    /// Record that a peer served content belonging to a volume (provider memory).
-    private func recordVolumeProvider(rootCID: String, peer: PeerID) {
-        var providers = providerRecords[rootCID] ?? []
-        if !providers.contains(peer) {
-            providers.append(peer)
-            if providers.count > 8 { providers = Array(providers.suffix(8)) }
-            providerRecords[rootCID] = providers
-        }
-    }
-
-    public func publishVolume(rootCID: String, items: [(cid: String, data: Data)]) async {
-        let childCIDs = items.map(\.cid)
-        let totalSize = UInt64(items.reduce(0) { $0 + $1.data.count })
-
-        for (cid, _) in items {
-            haveSet.insert(cid)
-        }
-
-        // High-bandwidth push: proactively send full volume data to top-reputation peers
-        // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
-        let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        let highBWPeers = selectHighBandwidthPeers(count: config.highBandwidthPeers)
-        var pushedPeers: Set<PeerID> = []
-        for peer in highBWPeers {
-            if let conn = connections[peer] {
-                conn.fireAndForget(highBWPayload)
-                pushedPeers.insert(peer)
-            }
-        }
-
-        // Announce volume metadata to remaining peers
-        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        for (peer, conn) in connections where !pushedPeers.contains(peer) {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(announcePayload)
-        }
-        for (_, local) in localPeers {
-            local.send(.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize))
-        }
-    }
-
-    /// Select the top N peers by reputation for high-bandwidth proactive push.
-    /// Analogous to Bitcoin's BIP 152 high-bandwidth peer selection.
-    private func selectHighBandwidthPeers(count: Int) -> [PeerID] {
-        guard count > 0 else { return [] }
-        let candidates = Array(connections.keys)
-        guard !candidates.isEmpty else { return [] }
-
-        // Sort by reputation (highest first), take top N
-        let sorted = candidates.sorted { a, b in
-            tally.reputation(for: a) > tally.reputation(for: b)
-        }
-        return Array(sorted.prefix(count))
-    }
-
-    /// Fetch from all directly connected peers — no DHT lookup.
-    /// Registers the continuation before any async work so cleanupAllPending
-    /// can cancel it immediately without waiting for a DHT timeout.
-    public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
-        let candidates = Array(connections.keys) + Array(localPeers.keys)
-        guard !candidates.isEmpty else { return [:] }
-        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
-    }
-
-    public func fetchVolume(rootCID: String) async -> [String: Data] {
-        if let entries = await dataSource?.volumeData(for: rootCID, cids: []), !entries.isEmpty {
-            var result: [String: Data] = [:]
-            for item in entries { result[item.cid] = item.data }
-            return result
-        }
-        return await fetchVolumeFromNetwork(rootCID: rootCID)
-    }
-
-    /// Single-phase content fetch. Sends `want([rootCID])` to candidates and
-    /// waits for the first `blocks` response. Candidates are selected in order:
-    /// 1. Locally-known providers (provider records + pin announcements + DHT)
-    /// 2. All direct peers capped at maxWantCandidates
-    ///
-    /// Coalescing: if a waiter for this rootCID already exists, joins it without
-    /// sending new messages. First responder wakes all coalesced waiters.
-    private func fetchVolumeFromNetwork(rootCID: String, requestedCIDs: [String] = []) async -> [String: Data] {
-        // Coalesce: join an existing in-flight request for the same content.
-        if let existing = pendingVolumeRequests[rootCID] {
-            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
-            return await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
-                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
-                }
-            } onCancel: {
-                Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
-            }
-        }
-
-        // Build candidate list: known providers first, then broadcast fallback.
-        var candidates: [PeerID] = []
-        var seen: Set<String> = []
-
-        for p in providerRecords[rootCID] ?? [] {
-            guard connections[p] != nil || localPeers[p] != nil else { continue }
-            guard tally.shouldAllow(peer: p) else { continue }
-            if seen.insert(p.publicKey).inserted { candidates.append(p) }
-        }
-        for pk in storedPinAnnouncements(for: rootCID) {
-            let pid = PeerID(publicKey: pk)
-            guard connections[pid] != nil || localPeers[pid] != nil else { continue }
-            guard tally.shouldAllow(peer: pid) else { continue }
-            if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
-        }
-        if candidates.count < 2 {
-            let discovered = await findPinnersViaDHT(rootCID: rootCID)
-            for pid in discovered {
-                guard connections[pid] != nil || localPeers[pid] != nil else { continue }
-                guard tally.shouldAllow(peer: pid) else { continue }
-                if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
-            }
-        }
-        // Broadcast fallback: direct peers capped at maxWantCandidates
-        if candidates.isEmpty {
-            let allPeers = Array(connections.keys) + Array(localPeers.keys)
-            for p in allPeers {
-                guard tally.shouldAllow(peer: p) else { continue }
-                if seen.insert(p.publicKey).inserted { candidates.append(p) }
-                if candidates.count >= config.maxWantCandidates { break }
-            }
-        }
-
-        guard !candidates.isEmpty else { return [:] }
-        return await fetchWithCandidates(rootCID: rootCID, candidates: candidates, requestedCIDs: requestedCIDs)
-    }
-
-    /// Core send-and-wait: register continuation, send `want` to candidates,
-    /// first `blocks` response wins. Re-checks coalescing inside the continuation
-    /// to handle races where a concurrent fetch registered while we were in async
-    /// candidate discovery (e.g., the DHT lookup in fetchVolumeFromNetwork).
-    private func fetchWithCandidates(rootCID: String, candidates: [PeerID], requestedCIDs: [String] = []) async -> [String: Data] {
-        // Coalesce: join an existing in-flight request for this content.
-        if let existing = pendingVolumeRequests[rootCID] {
-            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
-            return await withTaskCancellationHandler {
-                await withCheckedContinuation { continuation in
-                    guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
-                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
-                }
-            } onCancel: {
-                Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
-            }
-        }
-
-        guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
-        return await withTaskCancellationHandler {
-            await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
-                // Re-check: a concurrent fetch may have registered while we were in async work.
-                if pendingVolumeRequests[rootCID] != nil {
-                    pendingVolumeRequests[rootCID]?.continuations.append(continuation)
-                    return
-                }
-                pendingVolumeRequests[rootCID] = PendingVolumeRequest(
-                    continuations: [continuation],
-                    candidates: Set(candidates)
-                )
-                let message: Message
-                if requestedCIDs.isEmpty {
-                    message = .want(rootCIDs: [rootCID])
-                } else {
-                    message = .wantVolume(rootCID: rootCID, cids: requestedCIDs)
-                }
-                let payload = message.serialize(maxFrameSize: config.maxFrameSize)
-                for peer in candidates {
-                    if let conn = connections[peer] {
-                        conn.fireAndForget(payload)
-                    } else if let local = localPeers[peer] {
-                        local.send(message)
-                    }
-                }
-                Task {
-                    try? await Task.sleep(for: self.config.requestTimeout)
-                    self.resolveVolumeRequest(key: rootCID, result: [:])
-                }
-            }
-        } onCancel: {
-            Task { await self.resolveVolumeRequestsForRoot(rootCID: rootCID) }
-        }
-    }
-
-    private func handleNotHave(rootCID: String, from peer: PeerID) {
-        markVolumeCandidateDone(rootCID: rootCID, peer: peer)
-    }
-
-    public func recordProvider(rootCID: String, peer: PeerID) {
-        recordVolumeProvider(rootCID: rootCID, peer: peer)
-    }
-
-    /// P-1003: batch variant — record one peer as provider for multiple CIDs in
-    /// a single actor hop instead of N sequential `recordProvider` calls.
-    public func recordProviders(rootCIDs: [String], peer: PeerID) {
-        for cid in rootCIDs where !cid.isEmpty {
-            recordVolumeProvider(rootCID: cid, peer: peer)
-        }
-    }
-
-    public func fetchVolume(rootCID: String, childCIDs: [String]) async -> [String: Data] {
-        var result: [String: Data] = [:]
-        var missing: [String] = []
-        for cid in childCIDs {
-            if let data = await getLocalBlock(cid: cid) {
-                result[cid] = data
-            } else {
-                missing.append(cid)
-            }
-        }
-        guard !missing.isEmpty else { return result }
-        let requested = orderedRequestedCIDs(rootCID: rootCID, requestedCIDs: missing)
-        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID, requestedCIDs: requested)
-        if let data = networkResult[rootCID] {
-            result[rootCID] = data
-        }
-        for cid in missing {
-            if let data = networkResult[cid] { result[cid] = data }
-        }
-        return result
-    }
-
-    /// Resolves the pending volume request for a given rootCID. Volume requests
-    /// are keyed by content, not by the peer that may serve it.
-    func resolveVolumeRequestsForRoot(rootCID: String) {
-        resolveVolumeRequest(key: rootCID, result: [:])
-    }
-
-    /// Returns true if a new continuation can be appended to `pendingRequests[cid]`.
-    /// Rejects when either the per-CID waiter list or the global pending-map
-    /// capacity would be exceeded.
-    private func canRegisterPending(cid: String) -> Bool {
-        if let existing = pendingRequests[cid] {
-            return existing.count < config.maxWaitersPerPendingCID
-        }
-        return pendingRequests.count < config.maxPendingRequests
-    }
-
-    private func markVolumeCandidateDone(rootCID: String, peer: PeerID) {
-        guard var request = pendingVolumeRequests[rootCID] else { return }
-        request.candidates.remove(peer)
-        if request.candidates.isEmpty {
-            resolveVolumeRequest(key: rootCID, result: [:])
-        } else {
-            pendingVolumeRequests[rootCID] = request
-        }
-    }
-
-    private func resolveVolumeRequest(key: String, result: [String: Data]) {
-        guard let request = pendingVolumeRequests.removeValue(forKey: key) else { return }
-        for cont in request.continuations {
-            cont.resume(returning: result)
-        }
-    }
-
-    /// Get known providers for a volume.
-    public func providers(for rootCID: String) -> [PeerID] {
-        providerRecords[rootCID] ?? []
-    }
-
-    // MARK: - Expiry
-
-    public func evict() {
-        evictExpiredPins()
-        evictExpiredProviders()
-    }
-
-    private func evictExpiredPins() {
-        let now = UInt64(Date().timeIntervalSince1970)
-        let rootCIDs = Array(pinAnnouncements.keys)
-        for rootCID in rootCIDs {
-            guard var announcements = pinAnnouncements[rootCID] else { continue }
-            announcements.removeAll { $0.expiry <= now }
-            if announcements.isEmpty {
-                pinAnnouncements.removeValue(forKey: rootCID)
-            } else {
-                pinAnnouncements[rootCID] = announcements
-            }
-        }
-    }
-
-    private func evictExpiredProviders() {
-        let rootCIDs = Array(providerRecords.keys)
-        for rootCID in rootCIDs {
-            let liveKeys: Set<String>
-            if let announcements = pinAnnouncements[rootCID] {
-                liveKeys = Set(announcements.map(\.publicKey))
-            } else {
-                liveKeys = []
-            }
-            if var providers = providerRecords[rootCID] {
-                providers.removeAll { !liveKeys.contains($0.publicKey) }
-                if providers.isEmpty {
-                    providerRecords.removeValue(forKey: rootCID)
-                } else {
-                    providerRecords[rootCID] = providers
-                }
-            }
-        }
-    }
-
     // MARK: - Cleanup
 
-    private func cleanupPendingForPeer(_ peer: PeerID) {
+    func cleanupPendingForPeer(_ peer: PeerID) {
         pendingNodeRecordRequests.removeValue(forKey: peer)
 
         let forwardCIDs = pendingForwards.compactMap { cid, peers in
@@ -2202,7 +1253,7 @@ public actor Ivy {
         pendingNodeRecordRequests.removeAll()
     }
 
-    private func clearPendingForwards() {
+    func clearPendingForwards() {
         pendingForwards.removeAll()
         pendingForwardCountsByPeer.removeAll()
         pendingForwardCount = 0
@@ -2210,18 +1261,18 @@ public actor Ivy {
 
     // MARK: - Private Helpers
 
-    private func getLocalBlock(cid: String) async -> Data? {
+    func getLocalBlock(cid: String) async -> Data? {
         return await dataSource?.data(for: cid)
     }
 
-    private func resolvePending(cid: String, data: Data?) {
+    func resolvePending(cid: String, data: Data?) {
         guard let continuations = pendingRequests.removeValue(forKey: cid) else { return }
         for cont in continuations {
             cont.resume(returning: data)
         }
     }
 
-    private func closestCandidateEntries(
+    func closestCandidateEntries(
         _ entries: some Sequence<Router.BucketEntry>,
         to targetHash: [UInt8]
     ) -> [Router.BucketEntry] {
@@ -2231,7 +1282,7 @@ public actor Ivy {
             .map { $0 }
     }
 
-    private func startListener() async throws {
+    func startListener() async throws {
         let ivyBox = UnsafeMutableTransferBox<Ivy>(self)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
@@ -2285,17 +1336,17 @@ public actor Ivy {
         }
     }
 
-    private func timeoutUnidentifiedPeer(_ peer: PeerID) {
+    func timeoutUnidentifiedPeer(_ peer: PeerID) {
         if connections[peer] != nil, peer.publicKey.hasPrefix("inbound-") {
             disconnect(peer)
         }
     }
 
-    private func trackPeerHealth(_ peer: PeerID) async {
+    func trackPeerHealth(_ peer: PeerID) async {
         await healthMonitor?.trackPeer(peer)
     }
 
-    private func movePeerHealthTracking(from oldPeer: PeerID, to newPeer: PeerID) async {
+    func movePeerHealthTracking(from oldPeer: PeerID, to newPeer: PeerID) async {
         await healthMonitor?.removePeer(oldPeer)
         await healthMonitor?.trackPeer(newPeer)
     }
@@ -2323,7 +1374,7 @@ public actor Ivy {
 #endif
 
     #if canImport(Network)
-    private func startLocalDiscovery() {
+    func startLocalDiscovery() {
         let d = LocalDiscovery(
             serviceType: config.serviceType,
             port: config.listenPort,
@@ -2340,7 +1391,7 @@ public actor Ivy {
 
     /// Extract the /16 subnet prefix from an IP address (first two octets).
     /// Used for diversity enforcement: max 2 connections per /16 subnet.
-    private static func ipSubnet(_ host: String) -> String {
+    static func ipSubnet(_ host: String) -> String {
         let parts = host.split(separator: ".")
         guard parts.count >= 2 else { return host }
         return "\(parts[0]).\(parts[1])"
