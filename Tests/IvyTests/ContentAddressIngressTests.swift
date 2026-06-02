@@ -22,8 +22,49 @@ private final class VolumeAnnouncementCollector: IvyDelegate, @unchecked Sendabl
     }
 }
 
+private final class BlockCollector: IvyDelegate, @unchecked Sendable {
+    private let lock = NSLock()
+    private var blocks: [String] = []
+
+    func ivy(_ ivy: Ivy, didReceiveBlock cid: String, data: Data, from peer: PeerID) {
+        lock.withLock { blocks.append(cid) }
+    }
+
+    var receivedBlocks: [String] {
+        lock.withLock { blocks }
+    }
+}
+
 @Suite("Content-Addressed Ingress")
 struct ContentAddressIngressTests {
+    @Test("tampered gossip block is dropped and the peer is penalized")
+    func tamperedGossipBlockIsDroppedAndPeerPenalized() async throws {
+        let node = Ivy(config: testConfig(publicKey: "gossip-block-verify"))
+        let collector = BlockCollector()
+        await node.setDelegate(collector)
+        let nodeID = await node.localID
+
+        let peer = PeerID(publicKey: "tampered-gossip-block-peer")
+        let (local, remote) = LocalPeerConnection.pair(localID: nodeID, remoteID: peer)
+        await node.registerLocalPeer(local, as: peer)
+        try await Task.sleep(for: .milliseconds(20))
+
+        let honestData = Data("honest gossip block bytes".utf8)
+        let cid = testCID(for: honestData)
+        let forgedData = Data("forged gossip block bytes".utf8)
+
+        // Drive a blob whose bytes do NOT match the claimed CID through the real
+        // gossip ingress (handleMessage -> .block content-address chokepoint).
+        remote.send(.block(cid: cid, data: forgedData))
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Invalid != unavailable: the tampered content must be dropped, never surfaced.
+        #expect(collector.receivedBlocks.isEmpty)
+        // Fail-closed: the serving peer is scored down via Tally.
+        let tally = await node.tally
+        #expect(tally.peerLedger(for: peer)?.failureCount == 1)
+    }
+
     @Test("mismatched block response does not resolve a pending fetch")
     func mismatchedBlockDoesNotResolveFetch() async throws {
         let node = Ivy(config: testConfig(publicKey: "requester-block-verify"))
