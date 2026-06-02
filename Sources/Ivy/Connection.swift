@@ -10,13 +10,15 @@ public final class PeerConnection: @unchecked Sendable {
     public internal(set) var id: PeerID
     public let endpoint: PeerEndpoint
     let channel: Channel
+    private let maxFrameSize: UInt32
     private let inbound: AsyncStream<Message>
     private let inboundContinuation: AsyncStream<Message>.Continuation
 
-    init(id: PeerID, endpoint: PeerEndpoint, channel: Channel) {
+    init(id: PeerID, endpoint: PeerEndpoint, channel: Channel, maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize) {
         self.id = id
         self.endpoint = endpoint
         self.channel = channel
+        self.maxFrameSize = maxFrameSize
         let (stream, continuation) = AsyncStream<Message>.makeStream(
             bufferingPolicy: .bufferingNewest(Self.inboundBufferLimit)
         )
@@ -24,13 +26,17 @@ public final class PeerConnection: @unchecked Sendable {
         self.inboundContinuation = continuation
     }
 
-    public static func dial(endpoint: PeerEndpoint, group: EventLoopGroup) async throws -> PeerConnection {
+    public static func dial(
+        endpoint: PeerEndpoint,
+        group: EventLoopGroup,
+        maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize
+    ) async throws -> PeerConnection {
         let id = PeerID(publicKey: endpoint.publicKey)
 
         let bootstrap = ClientBootstrap(group: group)
             .connectTimeout(.seconds(5))
             .channelInitializer { channel in
-                let handler = MessageFrameDecoder()
+                let handler = MessageFrameDecoder(maxFrameSize: maxFrameSize)
                 return channel.pipeline.addHandler(handler)
             }
 
@@ -39,7 +45,7 @@ public final class PeerConnection: @unchecked Sendable {
             port: Int(endpoint.port)
         ).get()
 
-        let peerConn = PeerConnection(id: id, endpoint: endpoint, channel: channel)
+        let peerConn = PeerConnection(id: id, endpoint: endpoint, channel: channel, maxFrameSize: maxFrameSize)
         let peerHandler = PeerChannelHandler(connection: peerConn)
         try await channel.pipeline.addHandler(peerHandler).get()
 
@@ -47,7 +53,7 @@ public final class PeerConnection: @unchecked Sendable {
     }
 
     public func send(_ message: Message) async throws {
-        let payload = message.serialize()
+        let payload = message.serialize(maxFrameSize: maxFrameSize)
         var buf = channel.allocator.buffer(capacity: 4 + payload.count)
         buf.writeInteger(UInt32(payload.count), endianness: .big)
         buf.writeBytes(payload)
@@ -62,7 +68,7 @@ public final class PeerConnection: @unchecked Sendable {
     }
 
     public func fireAndForgetMessage(_ message: Message) {
-        let payload = message.serialize()
+        let payload = message.serialize(maxFrameSize: maxFrameSize)
         fireAndForget(payload)
     }
 
@@ -86,7 +92,12 @@ final class MessageFrameDecoder: ChannelInboundHandler, RemovableChannelHandler,
     typealias InboundIn = ByteBuffer
     typealias InboundOut = Message
 
+    private let maxFrameSize: UInt32
     private var buffer: ByteBuffer = ByteBuffer()
+
+    init(maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize) {
+        self.maxFrameSize = maxFrameSize
+    }
 
     func channelRead(context: ChannelHandlerContext, data: NIOAny) {
         var incoming = unwrapInboundIn(data)
@@ -94,14 +105,14 @@ final class MessageFrameDecoder: ChannelInboundHandler, RemovableChannelHandler,
 
         while buffer.readableBytes >= 4 {
             guard let length = buffer.getInteger(at: buffer.readerIndex, endianness: .big, as: UInt32.self) else { break }
-            guard length > 0, length <= MessageLimits.maxFrameSize else {
+            guard length > 0, length <= maxFrameSize else {
                 context.close(promise: nil)
                 return
             }
             guard buffer.readableBytes >= 4 + Int(length) else { break }
             buffer.moveReaderIndex(forwardBy: 4)
             guard let data = buffer.readData(length: Int(length)) else { break }
-            if let message = Message.deserialize(data) {
+            if let message = Message.deserialize(data, maxDataPayload: maxFrameSize) {
                 context.fireChannelRead(wrapInboundOut(message))
             }
         }

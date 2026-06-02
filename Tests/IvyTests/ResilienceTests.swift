@@ -284,10 +284,26 @@ struct MessageValidationTests {
         #expect(Message.frame(.block(cid: "cid", data: largePayload)).isEmpty)
     }
 
-    @Test("Frame size limit enforced")
-    func testFrameSizeLimit() {
-        #expect(MessageLimits.maxFrameSize == 4 * 1024 * 1024)
-        #expect(MessageLimits.maxFrameSize < 64 * 1024 * 1024)
+    @Test("Frame size defaults and can be raised per message")
+    func testFrameSizeDefaultsAndCanBeRaisedPerMessage() {
+        #expect(IvyConfig.defaultMaxFrameSize == 4 * 1024 * 1024)
+        #expect(MessageLimits.maxDataPayload == IvyConfig.defaultMaxFrameSize)
+
+        let raisedFrameSize = IvyConfig.defaultMaxFrameSize + 8_192
+        let payload = Data(repeating: 0xAB, count: Int(IvyConfig.defaultMaxFrameSize) + 512)
+        let message = Message.block(cid: "cid", data: payload)
+
+        #expect(message.serialize().isEmpty)
+        let encoded = message.serialize(maxFrameSize: raisedFrameSize)
+        #expect(!encoded.isEmpty)
+        #expect(Message.deserialize(encoded) == nil)
+
+        if case .block(let cid, let data) = Message.deserialize(encoded, maxDataPayload: raisedFrameSize) {
+            #expect(cid == "cid")
+            #expect(data.count == payload.count)
+        } else {
+            Issue.record("Expected raised-cap block payload to round-trip")
+        }
     }
 }
 

@@ -105,14 +105,14 @@ public enum Message: Sendable {
         }
     }
 
-    public func serialize() -> Data {
-        var buf = Data(capacity: min(estimatedSize(), Int(MessageLimits.maxFrameSize)))
-        guard encodePayload(into: &buf),
-              buf.count <= Int(MessageLimits.maxFrameSize) else { return Data() }
+    public func serialize(maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize) -> Data {
+        var buf = Data(capacity: min(estimatedSize(), Int(maxFrameSize)))
+        guard encodePayload(into: &buf, maxDataPayload: maxFrameSize),
+              buf.count <= Int(maxFrameSize) else { return Data() }
         return buf
     }
 
-    private func encodePayload(into buf: inout Data) -> Bool {
+    private func encodePayload(into buf: inout Data, maxDataPayload: UInt32) -> Bool {
         switch self {
         case .ping(let nonce):
             buf.append(Tag.ping.rawValue)
@@ -123,13 +123,13 @@ public enum Message: Sendable {
         case .block(let cid, let data):
             buf.append(Tag.block.rawValue)
             guard buf.appendLengthPrefixedString(cid),
-                  buf.appendLengthPrefixedData(data) else { return false }
+                  buf.appendLengthPrefixedData(data, maxDataPayload: maxDataPayload) else { return false }
         case .dontHave(let cid):
             buf.append(Tag.dontHave.rawValue)
             guard buf.appendLengthPrefixedString(cid) else { return false }
         case .findNode(let target, let fee, let nonce):
             buf.append(Tag.findNode.rawValue)
-            guard buf.appendLengthPrefixedData(target) else { return false }
+            guard buf.appendLengthPrefixedData(target, maxDataPayload: maxDataPayload) else { return false }
             buf.appendUInt64(fee)
             buf.appendUInt64(nonce)
         case .neighbors(let peers, let nonce):
@@ -159,7 +159,7 @@ public enum Message: Sendable {
                 guard buf.appendLengthPrefixedString(chain) else { return false }
                 buf.appendUInt16(port)
             }
-            guard buf.appendLengthPrefixedData(signature) else { return false }
+            guard buf.appendLengthPrefixedData(signature, maxDataPayload: maxDataPayload) else { return false }
         case .dhtForward(let cid, let ttl, let fee, let target, let selector):
             buf.append(Tag.dhtForward.rawValue)
             guard buf.appendLengthPrefixedString(cid) else { return false }
@@ -167,7 +167,7 @@ public enum Message: Sendable {
             buf.appendUInt64(fee)
             buf.appendUInt8(target != nil ? 1 : 0)
             if let target {
-                guard buf.appendLengthPrefixedData(target) else { return false }
+                guard buf.appendLengthPrefixedData(target, maxDataPayload: maxDataPayload) else { return false }
             }
             buf.appendUInt8(selector != nil ? 1 : 0)
             if let selector {
@@ -214,7 +214,7 @@ public enum Message: Sendable {
             guard buf.appendLengthPrefixedString(rootCID),
                   buf.appendLengthPrefixedString(publicKey) else { return false }
             buf.appendUInt64(expiry)
-            guard buf.appendLengthPrefixedData(signature) else { return false }
+            guard buf.appendLengthPrefixedData(signature, maxDataPayload: maxDataPayload) else { return false }
             buf.appendUInt64(fee)
         case .pinStored(let rootCID):
             buf.append(Tag.pinStored.rawValue)
@@ -225,14 +225,14 @@ public enum Message: Sendable {
         case .peerMessage(let topic, let payload):
             buf.append(Tag.peerMessage.rawValue)
             guard buf.appendLengthPrefixedString(topic),
-                  buf.appendLengthPrefixedData(payload) else { return false }
+                  buf.appendLengthPrefixedData(payload, maxDataPayload: maxDataPayload) else { return false }
         case .blocks(let rootCID, let items):
             buf.append(Tag.blocks.rawValue)
             guard buf.appendLengthPrefixedString(rootCID),
                   buf.appendCount(items.count, max: MessageLimits.maxTransactionCount) else { return false }
             for item in items {
                 guard buf.appendLengthPrefixedString(item.cid),
-                      buf.appendLengthPrefixedData(item.data) else { return false }
+                      buf.appendLengthPrefixedData(item.data, maxDataPayload: maxDataPayload) else { return false }
             }
         case .notHave(let rootCID):
             buf.append(Tag.notHave.rawValue)
@@ -251,7 +251,7 @@ public enum Message: Sendable {
                   buf.appendCount(items.count, max: MessageLimits.maxTransactionCount) else { return false }
             for item in items {
                 guard buf.appendLengthPrefixedString(item.cid),
-                      buf.appendLengthPrefixedData(item.data) else { return false }
+                      buf.appendLengthPrefixedData(item.data, maxDataPayload: maxDataPayload) else { return false }
             }
         case .nodeRecord(let record):
             buf.append(Tag.nodeRecord.rawValue)
@@ -265,8 +265,11 @@ public enum Message: Sendable {
         return true
     }
 
-    public static func deserialize(_ data: Data) -> Message? {
-        var reader = DataReader(data)
+    public static func deserialize(
+        _ data: Data,
+        maxDataPayload: UInt32 = IvyConfig.defaultMaxFrameSize
+    ) -> Message? {
+        var reader = DataReader(data, maxDataPayload: maxDataPayload)
         guard let rawTag = reader.readUInt8(),
               let tag = Tag(rawValue: rawTag) else { return nil }
         switch tag {
@@ -443,10 +446,10 @@ public enum Message: Sendable {
         }
     }
 
-    public static func frame(_ message: Message) -> Data {
-        let payload = message.serialize()
+    public static func frame(_ message: Message, maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize) -> Data {
+        let payload = message.serialize(maxFrameSize: maxFrameSize)
         guard !payload.isEmpty,
-              payload.count <= Int(MessageLimits.maxFrameSize) else { return Data() }
+              payload.count <= Int(maxFrameSize) else { return Data() }
         var frame = Data(capacity: 4 + payload.count)
         frame.appendUInt32(UInt32(payload.count))
         frame.append(payload)
@@ -501,8 +504,11 @@ extension Data {
     }
     @discardableResult
     @inline(__always)
-    mutating func appendLengthPrefixedData(_ data: Data) -> Bool {
-        guard data.count <= Int(MessageLimits.maxDataPayload) else { return false }
+    mutating func appendLengthPrefixedData(
+        _ data: Data,
+        maxDataPayload: UInt32 = IvyConfig.defaultMaxFrameSize
+    ) -> Bool {
+        guard data.count <= Int(maxDataPayload) else { return false }
         appendUInt32(UInt32(data.count))
         append(data)
         return true
@@ -511,10 +517,12 @@ extension Data {
 
 struct DataReader {
     private let data: Data
+    private let maxDataPayload: UInt32
     private var offset: Int = 0
 
-    init(_ data: Data) {
+    init(_ data: Data, maxDataPayload: UInt32 = IvyConfig.defaultMaxFrameSize) {
         self.data = data
+        self.maxDataPayload = maxDataPayload
     }
 
     var remaining: Int { data.count - offset }
@@ -561,7 +569,7 @@ struct DataReader {
     }
 
     mutating func readData() -> Data? {
-        guard let len = readUInt32(), len <= MessageLimits.maxDataPayload else { return nil }
+        guard let len = readUInt32(), len <= maxDataPayload else { return nil }
         guard remaining >= Int(len) else { return nil }
         defer { offset += Int(len) }
         let start = data.startIndex + offset

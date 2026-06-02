@@ -207,7 +207,7 @@ public actor Ivy {
 
         let conn: PeerConnection
         do {
-            conn = try await PeerConnection.dial(endpoint: endpoint, group: group)
+            conn = try await PeerConnection.dial(endpoint: endpoint, group: group, maxFrameSize: config.maxFrameSize)
         } catch {
             finishOutgoingDial(to: peer, connected: false)
             throw error
@@ -351,7 +351,7 @@ public actor Ivy {
 
     func firePayloadToPeer(_ peer: PeerID, _ payload: Data) {
         if let local = localPeers[peer] {
-            if let msg = Message.deserialize(payload) { local.send(msg) }
+            if let msg = Message.deserialize(payload, maxDataPayload: config.maxFrameSize) { local.send(msg) }
             return
         }
         guard let conn = connections[peer] else { return }
@@ -465,7 +465,7 @@ public actor Ivy {
 
     public func publishBlock(cid: String, data: Data) async {
         haveSet.insert(cid)
-        let payload2 = Message.announceBlock(cid: cid).serialize()
+        let payload2 = Message.announceBlock(cid: cid).serialize(maxFrameSize: config.maxFrameSize)
         broadcastPayload(payload2)
         for (_, local) in localPeers {
             local.send(.announceBlock(cid: cid))
@@ -480,7 +480,7 @@ public actor Ivy {
 
     public func announceBlock(cid: String) {
         haveSet.insert(cid)
-        let payload = Message.announceBlock(cid: cid).serialize()
+        let payload = Message.announceBlock(cid: cid).serialize(maxFrameSize: config.maxFrameSize)
         broadcastPayload(payload)
     }
 
@@ -497,8 +497,8 @@ public actor Ivy {
     public func sendBlock(cid: String, data: Data) {
         haveSet.insert(cid)
         let msg = Message.block(cid: cid, data: data)
-        for (peer, conn) in connections {
-            conn.fireAndForget(msg.serialize())
+        for (_, conn) in connections {
+            conn.fireAndForget(msg.serialize(maxFrameSize: config.maxFrameSize))
         }
         for (peer, _) in localPeers {
             fireToPeer(peer, msg, bypassBudget: true)
@@ -818,7 +818,7 @@ public actor Ivy {
             if admitGossipRelay(from: peer), !haveSet.contains(cid) {
                 haveSet.insert(cid)
                 fireToPeer(peer, .dhtForward(cid: cid, ttl: 0))
-                let payload = Message.announceBlock(cid: cid).serialize()
+                let payload = Message.announceBlock(cid: cid).serialize(maxFrameSize: config.maxFrameSize)
                 broadcastPayload(payload, excluding: peer)
             }
             delegate?.ivy(self, didReceiveBlockAnnouncement: cid, from: peer)
@@ -951,7 +951,7 @@ public actor Ivy {
 
     private func resolveForwards(cid: String, data: Data, from peer: PeerID) {
         guard let requesters = removePendingForwards(for: cid) else { return }
-        let payload = Message.block(cid: cid, data: data).serialize()
+        let payload = Message.block(cid: cid, data: data).serialize(maxFrameSize: config.maxFrameSize)
         let cpl = Router.commonPrefixLength(router.localHash, Router.hash(cid))
         for requester in requesters.keys {
             firePayloadToPeer(requester, payload)
@@ -1051,7 +1051,7 @@ public actor Ivy {
     }
 
     private func budgetedWantItems(rootCID: String, items: [(cid: String, data: Data)]) -> [(cid: String, data: Data)] {
-        let maxBytes = Int(MessageLimits.maxFrameSize) - 1024
+        let maxBytes = Int(config.maxFrameSize) - 1024
         let ordered = items.sorted { lhs, rhs in
             if lhs.cid == rootCID { return true }
             if rhs.cid == rootCID { return false }
@@ -1761,7 +1761,8 @@ public actor Ivy {
         recordVolumeProvider(rootCID: rootCID, peer: peer)
 
         // Gossip relay to other connected peers (like announceBlock)
-        let payload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        let payload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
+            .serialize(maxFrameSize: config.maxFrameSize)
         broadcastPayload(payload, excluding: peer)
 
         delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
@@ -1800,7 +1801,8 @@ public actor Ivy {
         tally.recordReceived(peer: peer, bytes: totalBytes, cpl: cpl)
         tally.recordSuccess(peer: peer)
 
-        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
+            .serialize(maxFrameSize: config.maxFrameSize)
         broadcastPayload(announcePayload, excluding: peer)
 
         delegate?.ivy(self, didReceiveVolumeAnnouncement: rootCID, childCIDs: childCIDs, totalSize: totalSize, from: peer)
@@ -1826,7 +1828,8 @@ public actor Ivy {
 
         // High-bandwidth push: proactively send full volume data to top-reputation peers
         // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
-        let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items).serialize()
+        let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items)
+            .serialize(maxFrameSize: config.maxFrameSize)
         let highBWPeers = selectHighBandwidthPeers(count: config.highBandwidthPeers)
         var pushedPeers: Set<PeerID> = []
         for peer in highBWPeers {
@@ -1837,7 +1840,8 @@ public actor Ivy {
         }
 
         // Announce volume metadata to remaining peers
-        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize).serialize()
+        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
+            .serialize(maxFrameSize: config.maxFrameSize)
         for (peer, conn) in connections where !pushedPeers.contains(peer) {
             guard tally.shouldAllow(peer: peer) else { continue }
             conn.fireAndForget(announcePayload)
@@ -1974,7 +1978,7 @@ public actor Ivy {
                 } else {
                     message = .wantVolume(rootCID: rootCID, cids: requestedCIDs)
                 }
-                let payload = message.serialize()
+                let payload = message.serialize(maxFrameSize: config.maxFrameSize)
                 for peer in candidates {
                     if let conn = connections[peer] {
                         conn.fireAndForget(payload)
@@ -2232,7 +2236,7 @@ public actor Ivy {
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
             .childChannelInitializer { channel in
-                let decoder = MessageFrameDecoder()
+                let decoder = MessageFrameDecoder(maxFrameSize: ivyBox.value.config.maxFrameSize)
                 let acceptor = InboundConnectionAcceptor(ivy: ivyBox.value)
                 return channel.pipeline.addHandlers([decoder, acceptor])
             }
@@ -2256,7 +2260,12 @@ public actor Ivy {
         let host = remoteAddr?.ipAddress ?? "unknown"
         let port = UInt16(remoteAddr?.port ?? 0)
         let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: host, port: port)
-        let conn = PeerConnection(id: unknownID, endpoint: endpoint, channel: channel)
+        let conn = PeerConnection(
+            id: unknownID,
+            endpoint: endpoint,
+            channel: channel,
+            maxFrameSize: config.maxFrameSize
+        )
         let handler = PeerChannelHandler(connection: conn)
         _ = channel.pipeline.addHandler(handler)
         connections[unknownID] = conn
