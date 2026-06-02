@@ -32,7 +32,12 @@ private func generateKey() -> (publicKey: String, privateKey: String) {
     return (key.publicKey, privateKey)
 }
 
-private func makeConfig(port: UInt16, publicKey: String, bootstrapPeers: [PeerEndpoint] = []) -> IvyConfig {
+private func makeConfig(
+    port: UInt16,
+    publicKey: String,
+    bootstrapPeers: [PeerEndpoint] = [],
+    maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize
+) -> IvyConfig {
     _tcpHarnessLock.lock()
     let signingKey = _signingKeysByPublicKey[publicKey] ?? Data()
     _tcpHarnessLock.unlock()
@@ -46,7 +51,8 @@ private func makeConfig(port: UInt16, publicKey: String, bootstrapPeers: [PeerEn
         relayTimeout: .milliseconds(500),
         stunServers: [],
         enablePEX: false,
-        signingKey: signingKey
+        signingKey: signingKey,
+        maxFrameSize: maxFrameSize
     )
 }
 
@@ -492,6 +498,37 @@ struct TCPIntegrationTests {
             #expect(retrieved.count == 1_048_576, "Data size should be 1MB")
             #expect(retrieved == largeData, "Data should be intact")
         }
+
+        await ivy1.stop()
+        await ivy2.stop()
+    }
+
+    @Test("Raised frame cap carries payload above default over TCP")
+    func testRaisedFrameCapCarriesPayloadAboveDefault() async throws {
+        let kp1 = generateKey()
+        let kp2 = generateKey()
+        let p1 = nextPort(); let p2 = nextPort()
+        let raisedFrameSize = IvyConfig.defaultMaxFrameSize + 8_192
+
+        let ivy1 = Ivy(config: makeConfig(port: p1, publicKey: kp1.publicKey, maxFrameSize: raisedFrameSize))
+        let ivy2 = Ivy(config: makeConfig(port: p2, publicKey: kp2.publicKey, maxFrameSize: raisedFrameSize))
+        let collector = GossipCollector()
+        await ivy2.setDelegate(collector)
+
+        try await ivy1.start()
+        try await ivy2.start()
+
+        try await ivy2.connect(to: PeerEndpoint(publicKey: kp1.publicKey, host: "127.0.0.1", port: p1))
+        try await Task.sleep(for: .milliseconds(500))
+
+        let payload = Data(repeating: 0xC7, count: Int(IvyConfig.defaultMaxFrameSize) + 512)
+        #expect(Message.peerMessage(topic: "large", payload: payload).serialize().isEmpty)
+
+        await ivy1.broadcastMessage(topic: "large", payload: payload)
+        let delivered = try await eventually {
+            await collector.messages.contains { $0.topic == "large" && $0.payload.count == payload.count }
+        }
+        #expect(delivered)
 
         await ivy1.stop()
         await ivy2.stop()

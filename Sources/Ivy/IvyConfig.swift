@@ -2,6 +2,8 @@ import Foundation
 import Tally
 
 public struct IvyConfig: Sendable {
+    public static let defaultMaxFrameSize: UInt32 = 4 * 1024 * 1024
+
     public let publicKey: String
     public let listenPort: UInt16
     public let bootstrapPeers: [PeerEndpoint]
@@ -28,6 +30,10 @@ public struct IvyConfig: Sendable {
     public let defaultRequestFee: UInt64
     public let highBandwidthPeers: Int
     public let sendBytesPerSecond: Int
+    /// Maximum serialized Ivy wire-frame payload this node will send or accept.
+    /// This is node policy, not a consensus rule; operators can raise it for
+    /// chains or applications that need larger wire payloads.
+    public let maxFrameSize: UInt32
     /// Upper bound on distinct in-flight CIDs/volume queries tracked in `pendingRequests` /
     /// `pendingVolumeRequests`. Prevents an attacker (or a runaway local
     /// caller) from allocating unbounded continuations by repeatedly asking
@@ -74,6 +80,7 @@ public struct IvyConfig: Sendable {
         defaultRequestFee: UInt64 = 20,
         highBandwidthPeers: Int = 3,
         sendBytesPerSecond: Int = 1_048_576,
+        maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize,
         maxPendingRequests: Int = 4_096,
         maxWaitersPerPendingCID: Int = 64,
         minPeerKeyBits: Int = 0,
@@ -105,6 +112,7 @@ public struct IvyConfig: Sendable {
         self.defaultRequestFee = defaultRequestFee
         self.highBandwidthPeers = highBandwidthPeers
         self.sendBytesPerSecond = sendBytesPerSecond
+        self.maxFrameSize = maxFrameSize
         self.maxPendingRequests = maxPendingRequests
         self.maxWaitersPerPendingCID = maxWaitersPerPendingCID
         self.minPeerKeyBits = minPeerKeyBits
