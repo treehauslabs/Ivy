@@ -1371,6 +1371,31 @@ public actor Ivy {
     func trackedHealthPeerCountForTesting() async -> Int {
         await healthMonitor?.trackedPeerCount ?? 0
     }
+
+    func registerConnectionForTesting(_ conn: PeerConnection, as peer: PeerID) {
+        connections[peer] = conn
+    }
+
+    func connectionPeersForTesting() -> [PeerID] {
+        Array(connections.keys)
+    }
+
+    @discardableResult
+    func addPendingForwardForTesting(cid: String, requester: PeerID) -> Bool {
+        addPendingForward(cid: cid, requester: requester)
+    }
+
+    func expirePendingForwardForTesting(cid: String, requester: PeerID, generation: UInt64) {
+        expirePendingForward(cid: cid, requester: requester, generation: generation)
+    }
+
+    func pendingForwardGenerationForTesting(cid: String, requester: PeerID) -> UInt64? {
+        pendingForwards[cid]?[requester]
+    }
+
+    func pendingForwardCountForPeerForTesting(_ peer: PeerID) -> Int {
+        pendingForwardCountsByPeer[peer] ?? 0
+    }
 #endif
 
     #if canImport(Network)

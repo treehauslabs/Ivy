@@ -34,6 +34,8 @@ let package = Package(
                 "Acorn",
                 .product(name: "CID", package: "swift-cid"),
                 .product(name: "Multihash", package: "swift-multihash"),
+                .product(name: "NIOCore", package: "swift-nio"),
+                .product(name: "NIOEmbedded", package: "swift-nio"),
             ]
         ),
         .executableTarget(
