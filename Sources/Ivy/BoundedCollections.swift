@@ -129,29 +129,6 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
         storage[key] != nil
     }
 
-    /// Return up to `count` random keys in O(count) — never allocates the full
-    /// key set. Samples with replacement when count >= storage.count.
-    func randomSampleKeys(count sampleCount: Int) -> [Key] {
-        let n = keys_.count
-        guard n > 0, sampleCount > 0 else { return [] }
-        if sampleCount >= n {
-            return Array(keys_)
-        }
-        var result: [Key] = []
-        result.reserveCapacity(sampleCount)
-        var seen: Set<Int> = []
-        seen.reserveCapacity(sampleCount)
-        // Reservoir-free rejection sampling: n is always > sampleCount here,
-        // so collisions are rare.
-        while result.count < sampleCount {
-            let idx = Int.random(in: 0..<n)
-            if seen.insert(idx).inserted {
-                result.append(keys_[idx])
-            }
-        }
-        return result
-    }
-
     private mutating func removeKeyTracking(_ key: Key) {
         guard let idx = keyIndex.removeValue(forKey: key) else { return }
         keys_.remove(at: idx)
