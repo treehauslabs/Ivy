@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import Ivy
 import NIOCore
+import NIOEmbedded
 
 @Suite("STUN Response Parsing")
 struct STUNParsingTests {
@@ -116,6 +117,93 @@ struct STUNParsingTests {
         buf.writeBuffer(&attrBuf)
 
         return buf
+    }
+}
+
+/// TRE-12: STUN responses are only honored when they arrive from the exact
+/// server address we sent the binding request to. A spoofed reply from an
+/// unexpected source — even one carrying a valid transaction ID and a
+/// well-formed XOR-MAPPED-ADDRESS — must be dropped, otherwise an off-path
+/// attacker could inject a bogus public address into NAT discovery.
+@Suite("STUN source-address validation")
+struct STUNSourceAddressTests {
+
+    private func makeSTUNResponse(ip: String, port: UInt16, transactionID: [UInt8]) -> ByteBuffer {
+        let parts = ip.split(separator: ".").compactMap { UInt8($0) }
+        let ipNum = UInt32(parts[0]) << 24 | UInt32(parts[1]) << 16 | UInt32(parts[2]) << 8 | UInt32(parts[3])
+        let magic: UInt32 = 0x2112A442
+        let xPort = port ^ 0x2112
+        let xAddr = ipNum ^ magic
+
+        var attrBuf = ByteBuffer()
+        attrBuf.writeInteger(UInt16(0x0020), endianness: .big)
+        attrBuf.writeInteger(UInt16(8), endianness: .big)
+        attrBuf.writeInteger(UInt8(0))
+        attrBuf.writeInteger(UInt8(0x01))
+        attrBuf.writeInteger(xPort, endianness: .big)
+        attrBuf.writeInteger(xAddr, endianness: .big)
+
+        var buf = ByteBuffer()
+        buf.writeInteger(UInt16(0x0101), endianness: .big)
+        buf.writeInteger(UInt16(attrBuf.readableBytes), endianness: .big)
+        buf.writeInteger(magic, endianness: .big)
+        buf.writeBytes(transactionID)
+        buf.writeBuffer(&attrBuf)
+        return buf
+    }
+
+    @Test("Valid response from the expected server is accepted")
+    func validResponseFromExpectedAddressAccepted() async throws {
+        let txnID = Array(UInt8(1)...UInt8(12))
+        let expected = try SocketAddress(ipAddress: "203.0.113.10", port: 3478)
+        let handler = STUNResponseHandler(
+            expectedTransactionID: txnID,
+            expectedRemoteAddress: expected
+        )
+        let channel = await NIOAsyncTestingChannel(handler: handler)
+
+        let waiter = Task { await handler.waitForResponse() }
+        // Let the continuation install before delivering the datagram.
+        try await Task.sleep(for: .milliseconds(20))
+
+        let payload = makeSTUNResponse(ip: "198.51.100.5", port: 4001, transactionID: txnID)
+        try await channel.writeInbound(AddressedEnvelope(remoteAddress: expected, data: payload))
+
+        let result = await waiter.value
+        #expect(result == ObservedAddress(host: "198.51.100.5", port: 4001))
+        _ = try? await channel.finish()
+    }
+
+    @Test("Valid-looking response from an UNEXPECTED address is dropped")
+    func validResponseFromUnexpectedAddressDropped() async throws {
+        let txnID = Array(UInt8(1)...UInt8(12))
+        let expected = try SocketAddress(ipAddress: "203.0.113.10", port: 3478)
+        let spoofer = try SocketAddress(ipAddress: "203.0.113.99", port: 3478)
+        let handler = STUNResponseHandler(
+            expectedTransactionID: txnID,
+            expectedRemoteAddress: expected
+        )
+        let channel = await NIOAsyncTestingChannel(handler: handler)
+
+        let waiter = Task { await handler.waitForResponse() }
+        try await Task.sleep(for: .milliseconds(20))
+
+        // Same valid txn ID + well-formed mapped address, but from a different
+        // source address. The guard in channelRead must reject it.
+        let spoofed = makeSTUNResponse(ip: "10.0.0.1", port: 4001, transactionID: txnID)
+        try await channel.writeInbound(AddressedEnvelope(remoteAddress: spoofer, data: spoofed))
+
+        // The spoofed datagram must NOT resolve the continuation. Then the
+        // legitimate reply from the expected address must still be accepted,
+        // proving the handler dropped (not consumed) the spoof.
+        try await Task.sleep(for: .milliseconds(30))
+        let legit = makeSTUNResponse(ip: "198.51.100.5", port: 4001, transactionID: txnID)
+        try await channel.writeInbound(AddressedEnvelope(remoteAddress: expected, data: legit))
+
+        let result = await waiter.value
+        #expect(result == ObservedAddress(host: "198.51.100.5", port: 4001),
+                "handler must drop the spoofed reply and accept only the expected-source reply")
+        _ = try? await channel.finish()
     }
 }
 
