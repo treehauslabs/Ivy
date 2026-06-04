@@ -1288,7 +1288,10 @@ public actor Ivy {
             .serverChannelOption(.backlog, value: 256)
             .childChannelInitializer { channel in
                 let decoder = MessageFrameDecoder(maxFrameSize: ivyBox.value.config.maxFrameSize)
-                let acceptor = InboundConnectionAcceptor(ivy: ivyBox.value)
+                let acceptor = InboundConnectionAcceptor(
+                    ivy: ivyBox.value,
+                    maxFrameSize: ivyBox.value.config.maxFrameSize
+                )
                 return channel.pipeline.addHandlers([decoder, acceptor])
             }
 
@@ -1299,37 +1302,25 @@ public actor Ivy {
         self.serverChannel = channel
     }
 
-    func handleNewInboundChannel(_ channel: Channel) {
+    func registerInboundConnection(_ conn: PeerConnection) {
         // Reject if at connection capacity
         if let maxPeers = config.tallyConfig.maxPeers, connections.count >= maxPeers {
-            channel.close(promise: nil)
+            conn.cancel()
             return
         }
 
-        let unknownID = PeerID(publicKey: "inbound-\(UUID().uuidString)")
-        let remoteAddr = channel.remoteAddress
-        let host = remoteAddr?.ipAddress ?? "unknown"
-        let port = UInt16(remoteAddr?.port ?? 0)
-        let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: host, port: port)
-        let conn = PeerConnection(
-            id: unknownID,
-            endpoint: endpoint,
-            channel: channel,
-            maxFrameSize: config.maxFrameSize
-        )
-        let handler = PeerChannelHandler(connection: conn)
-        _ = channel.pipeline.addHandler(handler)
-        connections[unknownID] = conn
+        let peer = conn.id
+        connections[peer] = conn
         if healthMonitor != nil {
-            Task { await self.trackPeerHealth(unknownID) }
+            Task { await self.trackPeerHealth(peer) }
         }
-        delegate?.ivy(self, didConnect: unknownID)
+        delegate?.ivy(self, didConnect: peer)
         Task {
             sendIdentify(to: conn)
             await handleInbound(conn)
         }
         // Disconnect if peer doesn't identify within 30 seconds
-        let peerToTimeout = unknownID
+        let peerToTimeout = peer
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(30))
             await self?.timeoutUnidentifiedPeer(peerToTimeout)

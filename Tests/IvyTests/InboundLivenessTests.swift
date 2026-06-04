@@ -71,25 +71,35 @@ struct InboundLivenessTests {
         return try! key.signature(for: material)
     }
 
+    private func makeInboundConnection(
+        id: PeerID,
+        channel: NIOAsyncTestingChannel
+    ) -> PeerConnection {
+        PeerConnection(
+            id: id,
+            endpoint: PeerEndpoint(publicKey: id.publicKey, host: "127.0.0.1", port: 0),
+            channel: channel,
+            maxFrameSize: IvyConfig.defaultMaxFrameSize
+        )
+    }
+
     @Test("Inbound accept ingress health-tracks the new peer")
     func inboundAcceptIngressTracksPeer() async throws {
         let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-accept-node"))
         await node.installHealthMonitorForTesting()
 
-        // Drive the REAL accept path: handleNewInboundChannel is exactly what the
-        // server bootstrap invokes for each accepted socket. A testing channel
-        // stands in for the accepted NIO channel.
+        // Drive the actor registration path used by the inbound acceptor after
+        // it installs the message handler on the accepted socket.
+        let inbound = PeerID(publicKey: "inbound-test-accept")
         let channel = NIOAsyncTestingChannel()
-        await node.handleNewInboundChannel(channel)
+        let conn = makeInboundConnection(id: inbound, channel: channel)
+        await node.registerInboundConnection(conn)
 
-        // The accept path registers an "inbound-<uuid>" connection and schedules
-        // health tracking on it asynchronously.
+        // The registration path records the temporary inbound connection and
+        // schedules health tracking on it asynchronously.
         try await Task.sleep(for: .milliseconds(50))
 
-        let inboundPeers = await node.connectionPeersForTesting()
-            .filter { $0.publicKey.hasPrefix("inbound-") }
-        #expect(inboundPeers.count == 1)
-        guard let inbound = inboundPeers.first else { return }
+        #expect(await node.connectionPeersForTesting().contains(inbound))
         #expect(await node.healthMonitorTracksPeerForTesting(inbound))
         #expect(await node.trackedHealthPeerCountForTesting() == 1)
 
@@ -101,14 +111,15 @@ struct InboundLivenessTests {
         let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-real-rekey-node"))
         await node.installHealthMonitorForTesting()
 
-        // Register an inbound peer through the real accept ingress.
+        // Register an inbound peer through the same actor path used by the real
+        // accept ingress after the pipeline-level handler has been installed.
+        let inbound = PeerID(publicKey: "inbound-test-rekey")
         let channel = NIOAsyncTestingChannel()
-        await node.handleNewInboundChannel(channel)
+        let conn = makeInboundConnection(id: inbound, channel: channel)
+        await node.registerInboundConnection(conn)
         try await Task.sleep(for: .milliseconds(50))
 
-        let inboundPeers = await node.connectionPeersForTesting()
-            .filter { $0.publicKey.hasPrefix("inbound-") }
-        guard let inbound = inboundPeers.first else {
+        guard await node.connectionPeersForTesting().contains(inbound) else {
             Issue.record("inbound peer was not registered")
             return
         }
