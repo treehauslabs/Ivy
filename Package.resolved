@@ -1,15 +1,6 @@
 {
-  "originHash" : "71d5f024015c69ed6510d3661c8bb597ea9a53889ef901f38bb786bc10f7db5a",
+  "originHash" : "8d992e4ab7ab859a9099c407feab4b4b2e6e33fd4bdd734fac6615c89a2a847a",
   "pins" : [
-    {
-      "identity" : "acorn",
-      "kind" : "remoteSourceControl",
-      "location" : "https://github.com/treehauslabs/Acorn.git",
-      "state" : {
-        "revision" : "a685a022b88dfb7be479e89d91c61f65c6478520",
-        "version" : "2.1.0"
-      }
-    },
     {
       "identity" : "cryptoswift",
       "kind" : "remoteSourceControl",

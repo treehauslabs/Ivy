@@ -2,7 +2,6 @@ import Testing
 import Foundation
 @testable import Ivy
 @testable import Tally
-import Acorn
 
 /// S5: a peer that advertises pin ownership but fails to serve the CID must
 /// be demoted in Tally. Without this wiring, repeated liars stay in the
