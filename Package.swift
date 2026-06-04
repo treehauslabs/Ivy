@@ -8,7 +8,6 @@ let package = Package(
         .library(name: "Ivy", targets: ["Ivy"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/treehauslabs/Acorn.git", from: "2.1.0"),
         .package(url: "https://github.com/treehauslabs/Tally.git", from: "1.3.0"),
         .package(url: "https://github.com/swift-libp2p/swift-cid.git", from: "0.0.1"),
         .package(url: "https://github.com/swift-libp2p/swift-multihash.git", from: "0.0.1"),
@@ -18,7 +17,6 @@ let package = Package(
         .target(
             name: "Ivy",
             dependencies: [
-                "Acorn",
                 "Tally",
                 .product(name: "CID", package: "swift-cid"),
                 .product(name: "Multihash", package: "swift-multihash"),
@@ -31,7 +29,6 @@ let package = Package(
             name: "IvyTests",
             dependencies: [
                 "Ivy",
-                "Acorn",
                 .product(name: "CID", package: "swift-cid"),
                 .product(name: "Multihash", package: "swift-multihash"),
                 .product(name: "NIOCore", package: "swift-nio"),

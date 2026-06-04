@@ -3,7 +3,6 @@ import Foundation
 import Crypto
 @testable import Ivy
 @testable import Tally
-import Acorn
 
 private func generatePinKeyPair() -> (publicKey: String, privateKey: Data) {
     let privateKey = Curve25519.Signing.PrivateKey()

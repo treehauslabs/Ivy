@@ -1,7 +1,6 @@
 import Testing
 import Foundation
 @testable import Ivy
-import Acorn
 import Tally
 import Crypto
 

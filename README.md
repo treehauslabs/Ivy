@@ -215,7 +215,6 @@ Then add `"Ivy"` to your target's dependencies.
 
 | Package | Role |
 |---------|------|
-| [Acorn](https://github.com/treehauslabs/Acorn) | Content-addressed storage types |
 | [Tally](https://github.com/treehauslabs/Tally) | Reputation accounting, rate limiting, distance-scaled credit, `PeerID` |
 | [swift-cid](https://github.com/swift-libp2p/swift-cid) / [swift-multihash](https://github.com/swift-libp2p/swift-multihash) | CID parsing and content-address verification |
 | [SwiftNIO](https://github.com/apple/swift-nio) | Non-blocking TCP/UDP I/O |
