@@ -8,228 +8,57 @@
 
 # Ivy
 
-**Reputation-routed P2P networking for content-addressed blockchains.**
+**Reputation-routed P2P storage and retrieval for content-addressed data.**
 
-Ivy is a full-featured peer-to-peer networking stack that replaces blind peer selection with evidence-based trust. Every routing decision — which peer to query, which connection to keep, who gets served under load — is informed by measured behavior: bytes relayed, latency observed, challenges solved. The result is a self-healing network where honest nodes naturally route through honest nodes.
+Ivy is a cooperative peer-to-peer network that replaces blind peer selection with
+evidence-based trust. Every routing decision — which peer to query, which connection to
+keep, who gets served under load — is informed by measured behavior: bytes relayed, latency
+observed, success delivered. The result is a self-healing network where honest nodes
+naturally route through honest nodes.
 
-Ivy is a standalone networking stack and is not tied to any particular chain — reputation accounting comes from its dependency [Tally](https://github.com/treehauslabs/Tally). It is used in production by [Lattice](https://github.com/treehauslabs/lattice-node) (with Volume-granular storage by [VolumeBroker](https://github.com/treehauslabs/VolumeBroker)) as **one example consumer**; nothing in Ivy is Lattice-specific.
-
----
-
-## Table of Contents
-
-- [Why Ivy](#why-ivy)
-- [Architecture](#architecture)
-- [Transports](#transports)
-- [NAT Traversal](#nat-traversal)
-- [Content Routing](#content-routing)
-- [Gossip & Announcements](#gossip--announcements)
-- [Reputation System](#reputation-system)
-- [Peer Health](#peer-health)
-- [Quick Start](#quick-start)
-- [Wire Protocol](#wire-protocol)
-- [Configuration](#configuration)
-- [Installation](#installation)
-- [Testing](#testing)
+Ivy is standalone and host-agnostic — reputation accounting comes from its dependency
+[Tally](https://github.com/treehauslabs/Tally), and nothing in Ivy is chain-specific. It is
+used in production by [Lattice](https://github.com/treehauslabs/lattice-node) as **one
+example consumer**.
 
 ---
 
 ## Why Ivy
 
-Most P2P networks treat all peers equally. Connect to anyone, serve anyone, hope for the best. This works until it doesn't — Sybil attacks flood routing tables, freeloaders consume bandwidth without contributing, and eclipse attacks isolate honest nodes by surrounding them with adversaries.
-
-Standard mitigations are blunt: proof-of-work barriers, hard-coded rate limits, random peer selection that ignores months of reliable service. A peer that has faithfully relayed data for weeks gets treated the same as one that appeared five seconds ago.
+Most P2P networks treat all peers equally: connect to anyone, serve anyone, hope for the
+best. This works until it doesn't — Sybil floods poison routing tables, freeloaders consume
+bandwidth without contributing, and eclipse attacks isolate honest nodes.
 
 Ivy takes a different approach: **your routing table is a trust graph.**
 
-| Property | Traditional DHT | Ivy |
-|---|---|---|
-| Bucket eviction | Oldest peer | Lowest reputation |
-| Peer selection | Random / nearest | Reputation-ranked nearest |
-| Load shedding | Drop all or none | Serve high-reputation peers first |
-| Caching incentive | None | Distance-scaled reputation credit |
-| Sybil resistance | Proof-of-work only | PoW bootstrap + reputation earned over time |
+- **Honest peers route through honest peers.** Queries travel through nodes that earned
+  their position through direct experience, scored by [Tally](https://github.com/treehauslabs/Tally).
+- **Freeloaders are progressively excluded.** Under load, serving is gated on reputation
+  (`tally.shouldAllow`), so the network degrades gracefully instead of collapsing.
+- **Caching is incentivized.** Serving data far from your DHT zone earns more reputation
+  (distance-scaled credit), naturally forming a distributed cache along well-traveled paths.
+- **New peers can bootstrap.** An optional proof-of-work key floor (`minPeerKeyBits`) raises
+  the cost of Sybil identity creation without requiring an existing social graph.
 
-The network this produces:
-
-- **Honest peers route through honest peers.** Queries travel through nodes that earned their position in your routing table through direct experience.
-- **Freeloaders are progressively excluded.** Under load, only high-reputation peers get served. The system self-balances through reciprocity.
-- **Caching is economically incentivized.** Serving data far from your DHT zone earns more reputation than serving data you're obligated to store, naturally forming a distributed CDN.
-- **New peers can bootstrap.** Proof-of-work challenges let unknown peers earn enough reputation to participate without any existing social graph.
+All data is content-addressed: a CID is the hash of its bytes, and every received
+`(CID, bytes)` pair is verified (`hash(bytes) == CID`) before use.
 
 ---
 
-## Architecture
+## Documentation
 
-```
-┌──────────────────────────────────────────────────────────────┐
-│                       Your Application                        │
-│                (Lattice, cashew, or custom)                    │
-└──────────────────────────┬───────────────────────────────────┘
-                           │ AcornCASWorker protocol
-┌──────────────────────────▼───────────────────────────────────┐
-│   MemoryCASWorker → DiskCASWorker → NetworkCASWorker          │
-│        (L1 cache)     (L2 persist)    (L3 network)            │
-└──────────────────────────────────────────┬───────────────────┘
-                                           │
-┌──────────────────────────────────────────▼───────────────────┐
-│                            Ivy                                │
-│                                                               │
-│  ┌──────────┐  ┌────────────┐  ┌───────────┐  ┌───────────┐ │
-│  │  Router   │  │   Tally    │  │ Transport │  │ Announce  │ │
-│  │  (DHT)    │  │   (rep)    │  │  (paths)  │  │ (gossip)  │ │
-│  └─────┬─────┘  └─────┬──────┘  └─────┬─────┘  └─────┬─────┘ │
-│        │              │              │              │         │
-│  ┌─────▼──────────────▼──────────────▼──────────────▼───────┐ │
-│  │                   Peer Connections                        │ │
-│  │          TCP  ·  UDP  ·  Relay Circuits                   │ │
-│  └──────────────────────────────────────────────────────────┘ │
-│                                                               │
-│  ┌──────────────────────────────────────────────────────────┐ │
-│  │  NAT Traversal: STUN · Hole Punching · AutoNAT           │ │
-│  └──────────────────────────────────────────────────────────┘ │
-│                                                               │
-│  ┌──────────────────────────────────────────────────────────┐ │
-│  │  Discovery: Bonjour/mDNS (LAN) · Bootstrap · FIND_NODE   │ │
-│  └──────────────────────────────────────────────────────────┘ │
-└──────────────────────────────────────────────────────────────┘
-```
-
----
-
-## Transports
-
-Ivy communicates over multiple transport layers simultaneously, selecting the best path for each message.
-
-### TCP
-
-Primary transport for reliable, ordered delivery. Length-prefixed binary framing over persistent connections.
-
-- Default port: `4001`
-- MTU: 512 KB
-- Built on SwiftNIO for non-blocking I/O
-
-### UDP
-
-Lightweight transport for small, latency-sensitive messages (announces, pings, peer discovery).
-
-- Default port: `4002`
-- MTU: 500 bytes
-- Datagram-based, no connection overhead
-
-### Relay Circuits
-
-When direct connectivity is impossible (symmetric NAT, firewalls), Ivy routes traffic through relay peers.
-
-- Up to 4 circuits per peer, 128 total
-- Circuit lifetime: 120 seconds or 128 KB transferred
-- Automatic fallback to direct connection for large data transfers
-- Relay-first DHT: queries forward through closest peers, caching responses along the return path
-
----
-
-## NAT Traversal
-
-Ivy uses a layered approach to establish direct connectivity across NATs and firewalls.
-
-```
-1. STUN     →  Discover public IP and port mapping
-2. AutoNAT  →  Determine reachability from the outside
-3. Hole Punch → Coordinate simultaneous open for cone NATs
-4. Relay     →  Fall back to circuit relay if all else fails
-```
-
-**STUN** queries public servers (Google, Cloudflare) to learn your observed address. **AutoNAT** asks connected peers to verify inbound reachability. **Hole punching** coordinates with a rendezvous peer to establish direct UDP/TCP connectivity. If none of that works, traffic flows through **relay circuits** with automatic upgrade to direct when possible.
-
----
-
-## Content Routing
-
-When your application requests a CID not stored locally, the request cascades through the Acorn CAS worker chain until it reaches Ivy's `NetworkCASWorker`:
-
-1. Find the closest peers to the CID in DHT keyspace
-2. Rank candidates by Tally reputation score
-3. Send a content request to the top candidates in parallel
-4. Return the first valid response
-5. Record bandwidth and latency in Tally for future peer selection
-
-### Volume Fetching
-
-Volumes are fetched by root CID, not by peer. A Volume provider may be schema-blind: it can hold serialized entries for a Volume root without knowing whether those bytes encode a block, transaction, dictionary, array, or some application-specific Cashew structure.
-
-For that reason, Ivy keeps Volume serving opaque. A `WANT` asks for the serialized Volume rooted at a CID, and the responder serves the full Volume it has for that root. Ivy verifies every returned `(CID, bytes)` pair with `hash(bytes) == CID` and requires the root entry to be present. Schema-aware path resolution stays above Ivy in Cashew/Lattice, where the data type is known. Invalid bytes for a claimed CID are slashable; `NOT_HAVE` remains a neutral claim.
-
-### Relay-First DHT
-
-Ivy forwards DHT queries through the closest connected peers rather than requiring direct connections to every node. Each hop caches the response, building a distributed content cache along well-traveled paths.
-
-### Trust-Weighted Routing Table
-
-Standard Kademlia — 256 buckets, one per bit of XOR distance. The difference is eviction: when a bucket is full and a new peer arrives, Ivy evicts the peer with the **lowest Tally reputation** rather than the oldest. Over time, each bucket fills with the fastest, most reliable peers at that distance.
-
----
-
-## Gossip & Announcements
-
-Ivy uses a gossip protocol for content and peer discovery. Announcements carry cryptographic signatures and propagate through the network with TTL-based hop limits (max 128 hops).
-
-### Block Announcements
-
-When a node produces or receives a new block, it gossips a `ANNOUNCE_BLOCK` to connected peers. Receiving peers:
-
-1. Check a fast-path `haveSet` — skip if already known
-2. Cache the block locally
-3. Re-announce to their own peers
-
-This creates rapid, protocol-level block propagation without polling.
-
-### Inline Block Push
-
-The `sendBlock(cid:data:)` method broadcasts block data inline to all connected peers, bypassing Tally rate limiting. The consuming application uses it to push newly produced or received content (e.g. a freshly accepted block) to peers without requiring a round-trip fetch. The payload is identical to a `BLOCK` response but sent unsolicited as a `BLOCK_PUSH` message.
-
-### Peer Announces
-
-Periodic announcements (every 5 minutes) carry the node's public key, name hash, and optional application data. The transport layer maintains a path table (up to 10,000 entries) mapping announced destinations to the best known routes.
-
----
-
-## Reputation System
-
-Every interaction is metered by [Tally](https://github.com/treehauslabs/Tally). Reputation is local to each node — there is no global authority to compromise.
-
-### Distance-Scaled Credit
-
-Not all data serving is equal. Credit scales by the common prefix length (CPL) between the content hash and the serving peer's ID:
-
-```
-credit = bytes × (256 - CPL) / 256
-```
-
-- **CPL ≈ 0** (data far from peer): full credit — the peer is caching content it has no obligation to store
-- **CPL ≈ 200** (data near peer): reduced credit — the peer is serving its DHT zone obligation
-
-This creates an economic flywheel: caching popular content earns reputation, which gets you into more routing tables, which gets you more requests.
-
-### Load Gating
-
-When a peer sends `WANT_BLOCK`, Ivy checks `tally.shouldAllow(peer:)` before responding. Under light load, everyone gets served. Under heavy load, only high-reputation peers get through. The network degrades gracefully rather than collapsing.
-
----
-
-## Peer Health
-
-The `PeerHealthMonitor` continuously monitors connection liveness:
-
-- Keepalive pings every 60 seconds
-- Peer marked stale after 3 missed pongs or 180 seconds of silence
-- Stale peers are automatically removed from the routing table
-- Health events feed back into Tally for reputation adjustments
+- **[Whitepaper](docs/whitepaper.md)** — the conceptual model: identity and Sybil
+  resistance, work-denominated economics, the trust/credit-line system, pinning, and
+  security analysis.
+- **[Architecture](docs/architecture.md)** — how it's built: the actor decomposition,
+  transports, STUN-based NAT discovery, content routing (DHT forwarding, volume fetching),
+  gossip, peer health, the full wire-protocol message catalog, and every config field.
 
 ---
 
 ## Quick Start
 
-### Starting a Node
+### Starting a node
 
 ```swift
 import Ivy
@@ -241,69 +70,67 @@ let config = IvyConfig(
         PeerEndpoint(publicKey: "abc...", host: "seed1.example.com", port: 4001),
     ],
     enableLocalDiscovery: true,
-    enableRelay: true,
-    enableHolePunch: true
+    signingKey: mySigningKey   // 32-byte Curve25519 key; required to sign identify/records
 )
 
 let node = Ivy(config: config)
 try await node.start()
 ```
 
-### CAS Chain Integration
+### Serving local content
+
+Implement `IvyDataSource` so the node can answer requests from its local store:
 
 ```swift
-import Acorn
-import AcornMemoryWorker
-import AcornDiskWorker
+final class MyStore: IvyDataSource {
+    func data(for cid: String) async -> Data? { /* local lookup */ }
+    func volumeData(for rootCID: String, cids: [String]) async -> [(cid: String, data: Data)] { /* … */ }
+    func hasVolume(rootCID: String) async -> Bool { /* … */ }
+}
 
-let memory = MemoryCASWorker()
-let disk = DiskCASWorker(directory: dataPath)
-let network = await node.worker()
-
-let chain = CompositeCASWorker(workers: [
-    ("memory", memory),
-    ("disk", disk),
-    ("network", network),
-])
-
-// Reads cascade: memory → disk → network
-let data = await chain.get(cid: someCID)
+await node.setDataSource(MyStore())
 ```
 
-### Publishing & Announcing Blocks
+### Publishing and fetching
 
 ```swift
-// Store content in CAS, then announce the CID to the network
-await node.publishBlock(cid: newBlock.rawValue)
+// Announce a CID you hold; peers pull it via DHT forwarding.
+await node.publishBlock(cid: blockCID, data: blockData)
 
-// Or announce a CID you already have
-await node.announceBlock(cid: existingBlock.rawValue)
+// Push a content-addressed volume (root + children) to peers.
+await node.publishVolume(rootCID: rootCID, items: items)
+
+// Fetch by CID (local data source first, then the DHT).
+let data = await node.get(cid: someCID)
+
+// Fetch a volume by root CID.
+let volume = await node.fetchVolume(rootCID: rootCID)
 ```
 
-### Event Handling
+### Event handling
 
 ```swift
-class MyHandler: IvyDelegate {
+final class MyHandler: IvyDelegate {
     func ivy(_ ivy: Ivy, didConnect peer: PeerID) {
-        print("Connected to \(peer)")
+        print("Connected to \(peer.publicKey.prefix(16))…")
     }
-
     func ivy(_ ivy: Ivy, didReceiveBlockAnnouncement cid: String, from peer: PeerID) {
-        Task {
-            let data = await chain.get(cid: ContentIdentifier(rawValue: cid))
-        }
+        Task { _ = await ivy.get(cid: cid) }
     }
 }
 
 await node.delegate = MyHandler()
 ```
 
-### Inspecting Network State
+> `delegate` and `dataSource` are actor-isolated `weak` properties: assign the delegate with
+> `await node.delegate = …`, and set the data source via `await node.setDataSource(_:)`.
+
+### Inspecting network state
 
 ```swift
-let peers = await node.connectedPeers
-let rep = node.tally.reputation(for: somePeer)
-let pressure = node.tally.ratePressure()
+let peers   = await node.connectedPeers
+let count   = await node.directPeerCount
+let rep     = node.tally.reputation(for: somePeer)
 let closest = node.router.closestPeers(to: targetHash, count: 10)
 ```
 
@@ -311,51 +138,59 @@ let closest = node.router.closestPeers(to: targetHash, count: 10)
 
 ## Wire Protocol
 
-Binary, length-prefixed messages over TCP:
+Binary, length-prefixed messages over TCP (SwiftNIO):
 
 ```
-┌─────────────────────┬──────────────┬─────────────────┐
-│ 4 bytes: length     │ 1 byte: type │ variable: payload│
-│ (big-endian uint32) │              │                  │
-└─────────────────────┴──────────────┴─────────────────┘
+┌──────────────────────┬──────────────┬────────────────────┐
+│ 4 bytes: length      │ 1 byte: tag  │ variable: payload   │
+│ (big-endian uint32)  │              │                     │
+└──────────────────────┴──────────────┴────────────────────┘
 ```
 
-| Type | Tag | Payload | Direction |
-|------|:---:|---------|:---------:|
-| `PING` | `0x00` | `uint64` nonce | ↔ |
-| `PONG` | `0x01` | `uint64` nonce | ↔ |
-| `BLOCK` | `0x03` | CID + data | ← |
-| `DONT_HAVE` | `0x04` | CID (string) | ← |
-| `FIND_NODE` | `0x05` | 32-byte target hash | → |
-| `NEIGHBORS` | `0x06` | array of (key, host, port) | ← |
-| `ANNOUNCE_BLOCK` | `0x07` | CID (string) | ↔ |
-| `BLOCK_PUSH` | `0x08` | CID + data | ↔ |
-| `WANT` | `0x1A` | array of root CIDs | → |
-| `BLOCKS` | `0x32` | root CID + array of (CID, data) | ← |
-| `ANNOUNCE_VOLUME` | `0x36` | root CID + child CIDs + total size | ↔ |
-| `PUSH_VOLUME` | `0x37` | root CID + array of (CID, data) | ↔ |
-| `NOT_HAVE` | `0x3A` | root CID | ← |
+Selected message types (full catalog in [docs/architecture.md](docs/architecture.md)):
+
+| Message | Tag | Payload |
+|---------|:---:|---------|
+| `ping` / `pong` | 0 / 1 | `uint64` nonce |
+| `block` | 3 | CID + data |
+| `dontHave` | 4 | CID |
+| `findNode` | 5 | target hash + fee + nonce |
+| `neighbors` | 6 | array of (key, host, port) + nonce |
+| `announceBlock` | 7 | CID |
+| `identify` | 8 | publicKey + observed addr + listen addrs + chain ports + signature |
+| `dhtForward` | 16 | CID + ttl + fee + optional target/selector |
+| `want` | 26 | array of root CIDs |
+| `pexRequest` / `pexResponse` | 37 / 38 | nonce (+ peers) |
+| `findPins` / `pins` | 40 / 41 | CID (+ providers) |
+| `pinAnnounce` / `pinStored` | 42 / 43 | rootCID + signature + fee |
+| `blocks` | 50 | rootCID + array of (CID, data) |
+| `wantVolume` | 53 | rootCID + child CIDs |
+| `announceVolume` / `pushVolume` | 54 / 55 | rootCID + items |
+| `nodeRecord` / `getNodeRecord` | 56 / 57 | signed record / publicKey |
+| `notHave` | 58 | rootCID |
+
+Frames are bounded by `maxFrameSize` (default 4 MB); strings are capped at 8 KB and
+collection counts are bounded per message (`MessageLimits`).
 
 ---
 
 ## Configuration
 
-Key parameters in `IvyConfig`:
+Key parameters in `IvyConfig` (full table in [docs/architecture.md](docs/architecture.md)):
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
+| `listenPort` | 4001 | TCP listen port |
 | `kBucketSize` | 20 | Peers per DHT bucket |
 | `maxConcurrentRequests` | 6 | Parallel outbound queries |
 | `requestTimeout` | 15s | Per-request deadline |
-| `relayTimeout` | 5s | Relay circuit setup deadline |
+| `relayTimeout` | 5s | DHT-forward deadline |
 | `defaultTTL` | 7 | Hop limit for forwarded messages |
-| `announceInterval` | 300s | Peer announce frequency |
-| `enableRelay` | `true` | Circuit relay support |
-| `enableAutoNAT` | `true` | Reachability detection |
-| `enableHolePunch` | `true` | NAT hole punching |
-| `enableUDP` | `true` | UDP transport |
-| `enableTransport` | `true` | Path-based transport layer |
-| `enableLocalDiscovery` | `true` | Bonjour/mDNS on LAN |
+| `enablePEX` | `true` | Peer exchange |
+| `pexInterval` | 120s | PEX round interval |
+| `enableLocalDiscovery` | `true` | Bonjour/mDNS on LAN (Apple platforms) |
+| `minPeerKeyBits` | 0 | Required key-PoW trailing-zero bits (0 = off) |
+| `maxFrameSize` | 4 MB | Max wire-frame payload |
 
 ---
 
@@ -380,8 +215,9 @@ Then add `"Ivy"` to your target's dependencies.
 
 | Package | Role |
 |---------|------|
-| [Acorn](https://github.com/treehauslabs/Acorn) | Content-addressed storage protocol and types |
-| [Tally](https://github.com/treehauslabs/Tally) | Reputation accounting, rate limiting, distance-scaled credit |
+| [Acorn](https://github.com/treehauslabs/Acorn) | Content-addressed storage types |
+| [Tally](https://github.com/treehauslabs/Tally) | Reputation accounting, rate limiting, distance-scaled credit, `PeerID` |
+| [swift-cid](https://github.com/swift-libp2p/swift-cid) / [swift-multihash](https://github.com/swift-libp2p/swift-multihash) | CID parsing and content-address verification |
 | [SwiftNIO](https://github.com/apple/swift-nio) | Non-blocking TCP/UDP I/O |
 
 ---
@@ -389,10 +225,13 @@ Then add `"Ivy"` to your target's dependencies.
 ## Testing
 
 ```bash
+swift build
 swift test
 ```
 
-The GitHub Actions pipeline runs release builds, the benchmarks executable build, and the full Swift test suite on macOS and Linux for pull requests and `main` pushes. Pushing a `v*` tag runs the same checks and publishes a GitHub Release with generated notes after both platforms pass.
+The GitHub Actions pipeline runs release builds, the benchmarks executable build, and the
+full Swift test suite on macOS and Linux for pull requests and `main` pushes. Pushing a
+`v*` tag runs the same checks and publishes a GitHub Release after both platforms pass.
 
 ---
 
