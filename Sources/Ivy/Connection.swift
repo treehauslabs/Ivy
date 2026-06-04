@@ -153,18 +153,46 @@ final class InboundConnectionAcceptor: ChannelInboundHandler, @unchecked Sendabl
     typealias InboundIn = Message
 
     let ivy: Ivy
+    private let maxFrameSize: UInt32
     private var registered = false
+    private var connection: PeerConnection?
 
-    init(ivy: Ivy) {
+    init(ivy: Ivy, maxFrameSize: UInt32) {
         self.ivy = ivy
+        self.maxFrameSize = maxFrameSize
     }
 
     func channelActive(context: ChannelHandlerContext) {
         if !registered {
             registered = true
             let channel = context.channel
-            Task { await ivy.handleNewInboundChannel(channel) }
+            let unknownID = PeerID(publicKey: "inbound-\(UUID().uuidString)")
+            let remoteAddr = channel.remoteAddress
+            let host = remoteAddr?.ipAddress ?? "unknown"
+            let port = UInt16(remoteAddr?.port ?? 0)
+            let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: host, port: port)
+            let conn = PeerConnection(
+                id: unknownID,
+                endpoint: endpoint,
+                channel: channel,
+                maxFrameSize: maxFrameSize
+            )
+            connection = conn
+            Task { await ivy.registerInboundConnection(conn) }
         }
         context.fireChannelActive()
+    }
+
+    func channelRead(context: ChannelHandlerContext, data: NIOAny) {
+        let message = unwrapInboundIn(data)
+        connection?.feedMessage(message)
+    }
+
+    func channelInactive(context: ChannelHandlerContext) {
+        connection?.connectionClosed()
+    }
+
+    func errorCaught(context: ChannelHandlerContext, error: Error) {
+        context.close(promise: nil)
     }
 }
