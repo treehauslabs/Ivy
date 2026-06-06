@@ -1285,6 +1285,7 @@ public actor Ivy {
         let ivyBox = UnsafeMutableTransferBox<Ivy>(self)
         let bootstrap = ServerBootstrap(group: group)
             .serverChannelOption(.backlog, value: 256)
+            .serverChannelOption(ChannelOptions.socketOption(.so_reuseaddr), value: 1)
             .childChannelInitializer { channel in
                 let decoder = MessageFrameDecoder(maxFrameSize: ivyBox.value.config.maxFrameSize)
                 let acceptor = InboundConnectionAcceptor(
