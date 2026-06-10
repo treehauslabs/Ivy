@@ -166,7 +166,6 @@ Selected message types (full catalog in [docs/architecture.md](docs/architecture
 | `blocks` | 50 | rootCID + array of (CID, data) |
 | `wantVolume` | 53 | rootCID + child CIDs |
 | `announceVolume` / `pushVolume` | 54 / 55 | rootCID + items |
-| `nodeRecord` / `getNodeRecord` | 56 / 57 | signed record / publicKey |
 | `notHave` | 58 | rootCID |
 
 Frames are bounded by `maxFrameSize` (default 4 MB); strings are capped at 8 KB and

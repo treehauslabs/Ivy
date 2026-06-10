@@ -308,7 +308,7 @@ struct MessageValidationTests {
     @Test("Frame size defaults and can be raised per message")
     func testFrameSizeDefaultsAndCanBeRaisedPerMessage() {
         #expect(IvyConfig.defaultMaxFrameSize == 4 * 1024 * 1024)
-                let raisedFrameSize = IvyConfig.defaultMaxFrameSize + 8_192
+        let raisedFrameSize = IvyConfig.defaultMaxFrameSize + 8_192
         let payload = Data(repeating: 0xAB, count: Int(IvyConfig.defaultMaxFrameSize) + 512)
         let message = Message.block(cid: "cid", data: payload)
 

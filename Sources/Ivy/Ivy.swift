@@ -505,7 +505,7 @@ public actor Ivy {
 
         // A signed identify frame authenticates who sent the claim, not whether
         // its observed address is reachable by us. Only locally verified address
-        // discovery, such as STUN, may mutate publicAddress and NodeRecord.
+        // discovery, such as STUN, may mutate publicAddress.
     }
 
     func firstAdvertisedListenEndpoint(
