@@ -92,4 +92,30 @@ struct MessageFrameDecoderBoundTests {
 
         _ = try channel.finish()
     }
+
+    @Test("Zero-length frame is skipped and subsequent frame is processed")
+    func zeroLengthFrameDoesNotCloseConnection() throws {
+        let (channel, collector) = try makeChannel()
+
+        let message = Message.ping(nonce: 0xF00D)
+        let payload = message.serialize(maxFrameSize: Self.testMaxFrameSize)
+        #expect(!payload.isEmpty)
+
+        var frame = channel.allocator.buffer(capacity: 8 + payload.count)
+        frame.writeInteger(UInt32(0), endianness: .big, as: UInt32.self)
+        frame.writeInteger(UInt32(payload.count), endianness: .big, as: UInt32.self)
+        frame.writeBytes(payload)
+
+        try channel.writeInbound(frame)
+
+        #expect(channel.isActive == true)
+        #expect(collector.messages.count == 1)
+        if case .ping(let nonce) = collector.messages.first {
+            #expect(nonce == 0xF00D)
+        } else {
+            Issue.record("Expected ping after zero-length frame")
+        }
+
+        _ = try channel.finish()
+    }
 }

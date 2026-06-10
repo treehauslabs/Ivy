@@ -24,9 +24,6 @@ extension Ivy {
             tally.recordSent(peer: peer, bytes: data.count, cpl: cpl)
             await meterSent(peer: peer, bytes: data.count)
         } else if ttl > 0 {
-            if advertisedAvailable {
-                haveSet.remove(cid)
-            }
             guard addPendingForward(cid: cid, requester: peer) else { return }
             let cidHash = Router.hash(cid)
             let closest = router.closestPeers(to: cidHash, count: 3)
@@ -36,8 +33,6 @@ extension Ivy {
                 guard reachable else { continue }
                 fireToPeer(entry.id, .dhtForward(cid: cid, ttl: ttl - 1))
             }
-        } else if advertisedAvailable {
-            haveSet.remove(cid)
         }
         // ttl == 0 and not found: silently fail (requester has its own timeout)
     }

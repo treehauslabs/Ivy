@@ -25,6 +25,7 @@ extension Ivy {
             fee: fee,
             signature: signature
         ) else { return }
+        guard shouldStorePinAnnouncement(rootCID: rootCID) else { return }
 
         var existing = pinAnnouncements[rootCID] ?? []
         existing.removeAll { $0.publicKey == publicKey }
@@ -36,6 +37,25 @@ extension Ivy {
         pinAnnouncements[rootCID] = existing
 
         fireToPeer(peer, .pinStored(rootCID: rootCID))
+    }
+
+    func shouldStorePinAnnouncement(rootCID: String) -> Bool {
+        let keyHash = Router.hash(rootCID)
+        let peers = router.allPeers()
+        guard !peers.isEmpty else { return true }
+
+        let keyBucket = min(Router.commonPrefixLength(router.localHash, keyHash), 255)
+        if let deepestPopulatedBucket = peers.map({ min(Router.commonPrefixLength(router.localHash, $0.hash), 255) }).max(),
+           keyBucket >= deepestPopulatedBucket {
+            return true
+        }
+
+        let closest = peers.sorted { Router.isCloser($0.hash, than: $1.hash, to: keyHash) }
+        guard closest.count >= config.kBucketSize,
+              let kth = closest.prefix(config.kBucketSize).last else {
+            return true
+        }
+        return Router.isCloser(router.localHash, than: kth.hash, to: keyHash)
     }
 
     /// Resolve any in-flight findPins waiters with the providers that just
