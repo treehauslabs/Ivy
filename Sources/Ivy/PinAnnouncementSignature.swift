@@ -25,7 +25,7 @@ public enum PinAnnouncementSignature {
 
     public static func verify(rootCID: String, publicKey: String, expiry: UInt64, fee: UInt64, signature: Data) -> Bool {
         guard !signature.isEmpty,
-              let publicKeyBytes = hexDecode(publicKey), publicKeyBytes.count == 32,
+              let publicKeyBytes = Data(hexString: publicKey), publicKeyBytes.count == 32,
               let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: publicKeyBytes) else {
             return false
         }
@@ -38,18 +38,6 @@ public enum PinAnnouncementSignature {
         return expiry <= now.saturatingAdd(maxTTLSeconds)
     }
 
-    private static func hexDecode(_ hex: String) -> Data? {
-        guard hex.count % 2 == 0 else { return nil }
-        var data = Data(capacity: hex.count / 2)
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let nextIndex = hex.index(index, offsetBy: 2)
-            guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
-            data.append(byte)
-            index = nextIndex
-        }
-        return data
-    }
 }
 
 private extension UInt64 {

@@ -72,8 +72,7 @@ struct PinClosenessGateTests {
             bootstrapPeers: [],
             enableLocalDiscovery: false,
             kBucketSize: k,
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
 
         let farCID = cidWithBucket(0, localKey: localKey, prefix: "pin-gate-far")

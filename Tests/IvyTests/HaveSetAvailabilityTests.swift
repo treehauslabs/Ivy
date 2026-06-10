@@ -18,8 +18,7 @@ struct HaveSetAvailabilityTests {
             listenPort: 0,
             bootstrapPeers: [],
             enableLocalDiscovery: false,
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
         let cid = "haveset-transient-miss"
         let requester = PeerID(publicKey: "haveset-requester")

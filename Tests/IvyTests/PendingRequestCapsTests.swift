@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import Ivy
+import Tally
 /// UNSTOPPABLE_LATTICE I11: `pendingRequests` and `pendingVolumeRequests` must
 /// not grow unbounded. A runaway local caller (or peer echoing distinct CIDs
 /// faster than requestTimeout drains) would otherwise allocate continuations
@@ -31,28 +32,38 @@ struct PendingRequestCapsTests {
                 enabled: false
             ),
             enablePEX: false,
-            replicationInterval: .seconds(999),
             maxPendingRequests: maxPending,
             maxWaitersPerPendingCID: maxWaiters
         )
     }
 
-    @Test("fetchBlock returns nil immediately when the pending dict is full")
+    /// Register a silent local peer (never answers) so `get(cid:target:)`
+    /// fires a request and parks a continuation until requestTimeout.
+    private func attachSilentPeer(to node: Ivy, key: String) async -> PeerID {
+        let peer = PeerID(publicKey: key)
+        let silent = LocalPeerConnection(id: await node.localID)
+        await node.registerLocalPeer(silent, as: peer)
+        await node.addToRouter(peer, endpoint: PeerEndpoint(publicKey: key, host: "local", port: 0))
+        return peer
+    }
+
+    @Test("get returns nil immediately when the pending dict is full")
     func testGlobalPendingCap() async throws {
         let node = Ivy(config: cappedConfig(maxPending: 2, maxWaiters: 64))
+        let peer = await attachSilentPeer(to: node, key: "caps-silent-peer")
 
-        // Launch two fetches for distinct CIDs. With no peers they register,
-        // fire to zero targets, and block on relayTimeout.
-        let a = Task { await node.fetchBlock(cid: "cid-a") }
-        let b = Task { await node.fetchBlock(cid: "cid-b") }
+        // Launch two fetches for distinct CIDs. The silent peer never
+        // answers, so they register and block on requestTimeout.
+        let a = Task { await node.get(cid: "cid-a", target: peer) }
+        let b = Task { await node.get(cid: "cid-b", target: peer) }
 
         // Give the two fetches time to register before we probe the cap.
         try await Task.sleep(for: .milliseconds(50))
 
         // Third distinct CID must bounce off the cap; measure wall time to
-        // prove it didn't block on the (30s) request timeout.
+        // prove it didn't block on the request timeout.
         let start = ContinuousClock.now
-        let c = await node.fetchBlock(cid: "cid-c")
+        let c = await node.get(cid: "cid-c", target: peer)
         let elapsed = ContinuousClock.now - start
 
         #expect(c == nil, "third distinct CID should be rejected")
@@ -65,20 +76,21 @@ struct PendingRequestCapsTests {
         _ = await b.value
     }
 
-    @Test("fetchBlock returns nil immediately when per-CID waiter list is full")
+    @Test("get returns nil immediately when per-CID waiter list is full")
     func testPerCIDWaiterCap() async throws {
         let node = Ivy(config: cappedConfig(maxPending: 128, maxWaiters: 2))
+        let peer = await attachSilentPeer(to: node, key: "caps-silent-peer-2")
 
         // Two concurrent calls for the same CID; the second coalesces onto
         // the first's waiter list.
-        let a = Task { await node.fetchBlock(cid: "shared-cid") }
+        let a = Task { await node.get(cid: "shared-cid", target: peer) }
         try await Task.sleep(for: .milliseconds(20))
-        let b = Task { await node.fetchBlock(cid: "shared-cid") }
+        let b = Task { await node.get(cid: "shared-cid", target: peer) }
         try await Task.sleep(for: .milliseconds(30))
 
         // Third call onto the same CID is over the waiter cap.
         let start = ContinuousClock.now
-        let c = await node.fetchBlock(cid: "shared-cid")
+        let c = await node.get(cid: "shared-cid", target: peer)
         let elapsed = ContinuousClock.now - start
 
         #expect(c == nil, "third waiter on the same CID should be rejected")

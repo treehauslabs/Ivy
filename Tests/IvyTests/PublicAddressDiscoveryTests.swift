@@ -25,8 +25,7 @@ struct PublicAddressDiscoveryTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         )
     }
 
@@ -68,6 +67,5 @@ struct PublicAddressDiscoveryTests {
         }
 
         #expect(await node.publicAddress == nil)
-        #expect(await node.nodeRecord(for: nodePublicKey) == nil)
     }
 }

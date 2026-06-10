@@ -86,21 +86,19 @@ struct ContentAddressIngressTests {
 
         Task {
             for await msg in badRemote.messages {
-                if case .dhtForward(let requestedCID, _, _, _, _) = msg, requestedCID == cid {
+                if case .dhtForward(let requestedCID, _) = msg, requestedCID == cid {
                     badRemote.send(.block(cid: requestedCID, data: forgedData))
                 }
             }
         }
+        // The honest peer pushes the block unsolicited (content-addressed
+        // responses are verified by CID, not by who was asked).
         Task {
-            for await msg in goodRemote.messages {
-                if case .dhtForward(let requestedCID, _, _, _, _) = msg, requestedCID == cid {
-                    try? await Task.sleep(for: .milliseconds(30))
-                    goodRemote.send(.block(cid: requestedCID, data: goodData))
-                }
-            }
+            try? await Task.sleep(for: .milliseconds(60))
+            goodRemote.send(.block(cid: cid, data: goodData))
         }
 
-        let result = await node.fetchBlock(cid: cid)
+        let result = await node.get(cid: cid, target: badPeer)
         #expect(result == goodData)
     }
 

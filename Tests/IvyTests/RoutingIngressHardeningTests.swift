@@ -21,7 +21,6 @@ private func routingConfig(
             enabled: false
         ),
         enablePEX: false,
-        replicationInterval: .seconds(999),
         minPeerKeyBits: minPeerKeyBits
     )
 }

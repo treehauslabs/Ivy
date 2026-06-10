@@ -33,8 +33,7 @@ func createNetwork(count: Int, thresholdMultiplier: UInt64 = 1000) async -> [Ivy
             bootstrapPeers: [],
             enableLocalDiscovery: false,
             healthConfig: PeerHealthConfig(keepaliveInterval: .seconds(999), staleTimeout: .seconds(999), maxMissedPongs: 99, enabled: false),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         )
         nodes.append(Ivy(config: config))
     }
@@ -96,7 +95,7 @@ struct PinDiscoveryChainTests {
         try await Task.sleep(for: .milliseconds(100))
 
         // Now B queries for it
-        bSide.send(.findPins(cid: "QmDiscovery", fee: 10))
+        bSide.send(.findPins(cid: "QmDiscovery"))
         try await Task.sleep(for: .milliseconds(100))
 
         // Verify A stored it
@@ -207,7 +206,7 @@ struct EndToEndProtocolTests {
         // C has the content in its haveSet
         let testData = Data("end-to-end content".utf8)
         let cid = testCID(for: testData)
-        await nodeC.publishBlock(cid: cid, data: testData)
+        await nodeC.markAvailable(cids: [cid])
 
         // At minimum: verify the routing table allows B to reach C
         let bClosestToC = await nodeB.allRouterPeers().filter { $0.id == cID }

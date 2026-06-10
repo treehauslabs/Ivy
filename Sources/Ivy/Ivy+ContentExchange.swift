@@ -265,53 +265,6 @@ extension Ivy {
         }
     }
 
-    public func publishVolume(rootCID: String, items: [(cid: String, data: Data)]) async {
-        let childCIDs = items.map(\.cid)
-        let totalSize = UInt64(items.reduce(0) { $0 + $1.data.count })
-
-        for (cid, _) in items {
-            haveSet.insert(cid)
-        }
-
-        // High-bandwidth push: proactively send full volume data to top-reputation peers
-        // (BIP 152 high-bandwidth mode — skip the announce→request round trip)
-        let highBWPayload = Message.pushVolume(rootCID: rootCID, items: items)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        let highBWPeers = selectHighBandwidthPeers(count: config.highBandwidthPeers)
-        var pushedPeers: Set<PeerID> = []
-        for peer in highBWPeers {
-            if let conn = connections[peer] {
-                conn.fireAndForget(highBWPayload)
-                pushedPeers.insert(peer)
-            }
-        }
-
-        // Announce volume metadata to remaining peers
-        let announcePayload = Message.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize)
-            .serialize(maxFrameSize: config.maxFrameSize)
-        for (peer, conn) in connections where !pushedPeers.contains(peer) {
-            guard tally.shouldAllow(peer: peer) else { continue }
-            conn.fireAndForget(announcePayload)
-        }
-        for (_, local) in localPeers {
-            local.send(.announceVolume(rootCID: rootCID, childCIDs: childCIDs, totalSize: totalSize))
-        }
-    }
-
-    /// Select the top N peers by reputation for high-bandwidth proactive push.
-    /// Analogous to Bitcoin's BIP 152 high-bandwidth peer selection.
-    func selectHighBandwidthPeers(count: Int) -> [PeerID] {
-        guard count > 0 else { return [] }
-        let candidates = Array(connections.keys)
-        guard !candidates.isEmpty else { return [] }
-
-        // Sort by reputation (highest first), take top N
-        let sorted = candidates.sorted { a, b in
-            tally.reputation(for: a) > tally.reputation(for: b)
-        }
-        return Array(sorted.prefix(count))
-    }
-
     /// Fetch from all directly connected peers — no DHT lookup.
     /// Registers the continuation before any async work so cleanupAllPending
     /// can cancel it immediately without waiting for a DHT timeout.

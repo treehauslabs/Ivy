@@ -24,8 +24,7 @@ private func inboundLivenessConfig(publicKey: String) -> IvyConfig {
             maxMissedPongs: 99,
             enabled: true
         ),
-        enablePEX: false,
-        replicationInterval: .seconds(999)
+        enablePEX: false
     )
 }
 

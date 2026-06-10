@@ -26,8 +26,7 @@ struct GossipRelayThrottleTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         )
     }
 

@@ -196,11 +196,10 @@ struct EconomicMessageTests {
 
     @Test("findPins roundtrip")
     func testFindPinsRoundtrip() {
-        let msg = Message.findPins(cid: "QmRoot123", fee: 100)
+        let msg = Message.findPins(cid: "QmRoot123")
         let decoded = Message.deserialize(msg.serialize())
-        if case .findPins(let cid, let fee) = decoded {
+        if case .findPins(let cid) = decoded {
             #expect(cid == "QmRoot123")
-            #expect(fee == 100)
         } else {
             Issue.record("Expected findPins")
         }
@@ -271,32 +270,13 @@ struct EconomicMessageTests {
         }
     }
 
-    @Test("dhtForward with fee and target roundtrip")
-    func testDhtForwardWithFeeRoundtrip() {
-        let target = Data([0xAB, 0xCD])
-        let msg = Message.dhtForward(cid: "QmTest", ttl: 7, fee: 50, target: target, selector: "/photos")
-        let decoded = Message.deserialize(msg.serialize())
-        if case .dhtForward(let cid, let ttl, let fee, let t, let sel) = decoded {
-            #expect(cid == "QmTest")
-            #expect(ttl == 7)
-            #expect(fee == 50)
-            #expect(t == target)
-            #expect(sel == "/photos")
-        } else {
-            Issue.record("Expected dhtForward with fee and target")
-        }
-    }
-
-    @Test("dhtForward backward compatible (no fee/target)")
-    func testDhtForwardBackwardCompat() {
+    @Test("dhtForward roundtrip")
+    func testDhtForwardRoundtrip() {
         let msg = Message.dhtForward(cid: "QmOld", ttl: 3)
         let decoded = Message.deserialize(msg.serialize())
-        if case .dhtForward(let cid, let ttl, let fee, let target, let sel) = decoded {
+        if case .dhtForward(let cid, let ttl) = decoded {
             #expect(cid == "QmOld")
             #expect(ttl == 3)
-            #expect(fee == 0)
-            #expect(target == nil)
-            #expect(sel == nil)
         } else {
             Issue.record("Expected dhtForward")
         }

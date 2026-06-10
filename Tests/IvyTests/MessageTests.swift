@@ -133,7 +133,7 @@ struct MessageTests {
     func testDHTForwardRoundtrip() {
         let msg = Message.dhtForward(cid: "QmTest123", ttl: 3)
         let decoded = Message.deserialize(msg.serialize())
-        if case .dhtForward(let cid, let ttl, _, _, _) = decoded {
+        if case .dhtForward(let cid, let ttl) = decoded {
             #expect(cid == "QmTest123")
             #expect(ttl == 3)
         } else {
@@ -145,7 +145,7 @@ struct MessageTests {
     func testDHTForwardZeroTTL() {
         let msg = Message.dhtForward(cid: "abc", ttl: 0)
         let decoded = Message.deserialize(msg.serialize())
-        if case .dhtForward(_, let ttl, _, _, _) = decoded {
+        if case .dhtForward(_, let ttl) = decoded {
             #expect(ttl == 0)
         } else {
             Issue.record("Expected dhtForward")

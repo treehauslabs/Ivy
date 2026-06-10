@@ -140,8 +140,7 @@ struct KademliaConvergenceTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
         let sourceID = await source.localID
         let peerID = PeerID(publicKey: "kad-concurrent-peer")
@@ -195,8 +194,7 @@ struct KademliaConvergenceTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
         let sourceID = await source.localID
         let target = "kad-alpha-target"
@@ -302,8 +300,7 @@ struct KademliaConvergenceTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
         let sourceID = await source.localID
         let queriedID = PeerID(publicKey: "kad-pin-queried")
@@ -327,7 +324,7 @@ struct KademliaConvergenceTests {
             switch message {
             case .findNode(_, _, let nonce):
                 queriedPeerSide.send(.neighbors([], nonce: nonce))
-            case .findPins(let cid, _):
+            case .findPins(let cid):
                 #expect(cid == rootCID)
                 sawFindPins = true
             default:
@@ -365,8 +362,7 @@ private func makeKademliaNodes(count: Int, kBucketSize: Int = 20) -> [Ivy] {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
     }
 }

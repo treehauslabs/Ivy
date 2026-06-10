@@ -8,9 +8,8 @@ import Foundation
 /// fetch pool forever — their reputation is only written by PeerHealthMonitor
 /// pings, not by fetch-outcome.
 ///
-/// These tests cover the two fetch paths that trust a specific peer:
-///   - `getDirect(cid:from:)` — one-hop direct fetch (gossip follow-up / pinner).
-///   - `get(cid:target:)`    — pinner-targeted DHT walk (selected via findPins).
+/// These tests cover the fetch path that trusts a specific peer:
+///   - `get(cid:target:)` — pinner-targeted fetch (selected via findPins).
 private func makeNode(publicKey: String, requestTimeout: Duration = .milliseconds(200)) -> Ivy {
     let config = IvyConfig(
         publicKey: publicKey,
@@ -19,8 +18,7 @@ private func makeNode(publicKey: String, requestTimeout: Duration = .millisecond
         enableLocalDiscovery: false,
         requestTimeout: requestTimeout,
         healthConfig: PeerHealthConfig(keepaliveInterval: .seconds(999), staleTimeout: .seconds(999), maxMissedPongs: 99, enabled: false),
-        enablePEX: false,
-        replicationInterval: .seconds(999)
+        enablePEX: false
     )
     return Ivy(config: config)
 }
@@ -28,30 +26,8 @@ private func makeNode(publicKey: String, requestTimeout: Duration = .millisecond
 @Suite("Pin announce demotion")
 struct PinAnnounceDemotionTests {
 
-    @Test("getDirect records failure when the peer times out")
-    func testGetDirectTimeoutDemotesPeer() async throws {
-        let a = makeNode(publicKey: "demote-a")
-        let b = makeNode(publicKey: "demote-b")
-        await connectNodes(a, b)
-        try await Task.sleep(for: .milliseconds(50))
-
-        let bID = await b.localID
-
-        // Pre-condition: A has never interacted with B at a reputation level,
-        // so the ledger may or may not exist. Either way, after a failed
-        // direct fetch failureCount must be >= 1.
-        let beforeFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
-
-        // B has no record of this CID, so the request will time out.
-        let data = await a.getDirect(cid: "cid-that-does-not-exist", from: bID)
-        #expect(data == nil)
-
-        let afterFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
-        #expect(afterFailures == beforeFailures + 1, "direct-fetch timeout must demote the trusted peer")
-    }
-
-    @Test("getDirect records success when the peer delivers")
-    func testGetDirectSuccessRewardsPeer() async throws {
+    @Test("get(cid:target:) records success when the peer delivers")
+    func testTargetedGetSuccessRewardsPeer() async throws {
         let a = makeNode(publicKey: "reward-a")
         let b = makeNode(publicKey: "reward-b")
         await connectNodes(a, b)
@@ -59,22 +35,22 @@ struct PinAnnounceDemotionTests {
 
         let bID = await b.localID
 
-        // Stash data on B via dataSource + publishBlock so haveSet is populated
-        // and handleDHTForward on B can serve the follow-up request.
+        // Stash data on B via dataSource + markAvailable so haveSet is populated
+        // and handleDHTForward on B can serve the request.
         let payload = Data("hello".utf8)
         let cid = testCID(for: payload)
         let ds = DictDataSource()
         ds[cid] = payload
         await b.setDataSource(ds)
-        await b.publishBlock(cid: cid, data: payload)
+        await b.markAvailable(cids: [cid])
 
         let beforeSuccesses = await a.tally.peerLedger(for: bID)?.successCount.value ?? 0
 
-        let data = await a.getDirect(cid: cid, from: bID)
-        #expect(data == payload, "successful direct fetch must return the payload")
+        let data = await a.get(cid: cid, target: bID)
+        #expect(data == payload, "successful targeted fetch must return the payload")
 
         let afterSuccesses = await a.tally.peerLedger(for: bID)?.successCount.value ?? 0
-        #expect(afterSuccesses >= beforeSuccesses + 1, "successful direct fetch must reward the serving peer")
+        #expect(afterSuccesses >= beforeSuccesses + 1, "successful targeted fetch must reward the serving peer")
     }
 
     @Test("get(cid:target:) records failure when the pinner lies")
