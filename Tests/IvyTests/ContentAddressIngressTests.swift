@@ -62,7 +62,7 @@ struct ContentAddressIngressTests {
         #expect(collector.receivedBlocks.isEmpty)
         // Fail-closed: the serving peer is scored down via Tally.
         let tally = await node.tally
-        #expect(tally.peerLedger(for: peer)?.failureCount == 1)
+        #expect(tally.peerLedger(for: peer)?.failureCount.value == 1)
     }
 
     @Test("mismatched block response does not resolve a pending fetch")

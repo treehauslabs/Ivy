@@ -20,6 +20,7 @@ public struct Router: Sendable {
 
     struct State: Sendable {
         var buckets: [[BucketEntry]] = Array(repeating: [], count: 256)
+        var replacementCaches: [[BucketEntry]] = Array(repeating: [], count: 256)
         var hashCache: [String: [UInt8]] = [:]
     }
 
@@ -60,8 +61,46 @@ public struct Router: Sendable {
                 state.buckets[idx].append(BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now))
                 return
             }
-            // Kademlia keeps old live contacts. A full bucket is only freed by
-            // explicit liveness failure/removal, not by a newcomer's reputation.
+
+            var replacements = state.replacementCaches[idx]
+            if let existing = replacements.firstIndex(where: { $0.id == id }) {
+                replacements.remove(at: existing)
+            }
+            replacements.append(BucketEntry(id: id, hash: peerHash, endpoint: endpoint, lastSeen: .now))
+            while replacements.count > k {
+                replacements.removeFirst()
+            }
+            state.replacementCaches[idx] = replacements
+        }
+    }
+
+    public func pingResult(id: PeerID, alive: Bool) {
+        let peerHash = cachedHash(id.publicKey)
+        let idx = min(Self.commonPrefixLength(localHash, peerHash), 255)
+
+        _state.withLock { state in
+            guard let entryIndex = state.buckets[idx].firstIndex(where: { $0.id == id }) else { return }
+
+            if alive {
+                state.buckets[idx][entryIndex].lastSeen = .now
+                if !state.replacementCaches[idx].isEmpty {
+                    state.replacementCaches[idx].removeFirst()
+                }
+                return
+            }
+
+            state.buckets[idx].remove(at: entryIndex)
+            while !state.replacementCaches[idx].isEmpty {
+                let promoted = state.replacementCaches[idx].removeFirst()
+                guard !state.buckets[idx].contains(where: { $0.id == promoted.id }) else { continue }
+                state.buckets[idx].append(BucketEntry(
+                    id: promoted.id,
+                    hash: promoted.hash,
+                    endpoint: promoted.endpoint,
+                    lastSeen: .now
+                ))
+                break
+            }
         }
     }
 
@@ -70,6 +109,7 @@ public struct Router: Sendable {
         let idx = min(Self.commonPrefixLength(localHash, peerHash), 255)
         _state.withLock { state in
             state.buckets[idx].removeAll { $0.id == id }
+            state.replacementCaches[idx].removeAll { $0.id == id }
         }
     }
 

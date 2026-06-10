@@ -6,6 +6,12 @@ import NIOEmbedded
 @testable import Ivy
 @testable import Tally
 
+extension Ivy {
+    func connectionEndpointForTesting(_ peer: PeerID) -> PeerEndpoint? {
+        connections[peer]?.endpoint
+    }
+}
+
 private func inboundLivenessConfig(publicKey: String) -> IvyConfig {
     IvyConfig(
         publicKey: publicKey,
@@ -104,6 +110,154 @@ struct InboundLivenessTests {
         #expect(await node.trackedHealthPeerCountForTesting() == 1)
 
         _ = try? await channel.finish()
+    }
+
+    @Test("Inbound identify without a listen address does not route the peer")
+    func inboundIdentifyWithoutListenAddrDoesNotRoutePeer() async throws {
+        let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-no-listen-node"))
+
+        let inbound = PeerID(publicKey: "inbound-no-listen")
+        let channel = NIOAsyncTestingChannel()
+        let conn = PeerConnection(
+            id: inbound,
+            endpoint: PeerEndpoint(publicKey: inbound.publicKey, host: "127.0.0.1", port: 49152),
+            channel: channel,
+            maxFrameSize: IvyConfig.defaultMaxFrameSize
+        )
+        await node.registerInboundConnection(conn)
+
+        let (realKey, realPriv) = generateKeyPair()
+        let observedHost = "203.0.113.210"
+        let signature = signIdentify(publicKey: realKey, observedHost: observedHost, privateKey: realPriv)
+        await node.handleMessage(
+            .identify(
+                publicKey: realKey,
+                observedHost: observedHost,
+                observedPort: 4001,
+                listenAddrs: [],
+                chainPorts: [:],
+                signature: signature
+            ),
+            from: inbound
+        )
+
+        let routed = await node.allRouterPeers()
+        #expect(!routed.contains { $0.id.publicKey == realKey })
+        #expect(!routed.contains { $0.id.publicKey == inbound.publicKey })
+
+        _ = try? await channel.finish()
+    }
+
+    @Test("Inbound identify routes by advertised listen address, not source port")
+    func inboundIdentifyRoutesAdvertisedListenAddress() async throws {
+        let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-advertised-node"))
+
+        let inbound = PeerID(publicKey: "inbound-advertised")
+        let sourceEndpoint = PeerEndpoint(publicKey: inbound.publicKey, host: "127.0.0.1", port: 49153)
+        let channel = NIOAsyncTestingChannel()
+        let conn = PeerConnection(
+            id: inbound,
+            endpoint: sourceEndpoint,
+            channel: channel,
+            maxFrameSize: IvyConfig.defaultMaxFrameSize
+        )
+        await node.registerInboundConnection(conn)
+
+        let (realKey, realPriv) = generateKeyPair()
+        let observedHost = "203.0.113.211"
+        let advertised = ("198.51.100.44", UInt16(4100))
+        let signature = signIdentify(publicKey: realKey, observedHost: observedHost, privateKey: realPriv)
+        await node.handleMessage(
+            .identify(
+                publicKey: realKey,
+                observedHost: observedHost,
+                observedPort: 4001,
+                listenAddrs: [advertised],
+                chainPorts: [:],
+                signature: signature
+            ),
+            from: inbound
+        )
+
+        let entries = await node.allRouterPeers().filter { $0.id.publicKey == realKey }
+        #expect(entries.count == 1)
+        #expect(entries.first?.endpoint.host == advertised.0)
+        #expect(entries.first?.endpoint.port == advertised.1)
+        #expect(entries.first?.endpoint.port != sourceEndpoint.port)
+
+        _ = try? await channel.finish()
+    }
+
+    @Test("Default inbound cap is enforced when Tally maxPeers is nil")
+    func defaultInboundCapIsEnforcedWhenMaxPeersNil() async throws {
+        let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-default-cap-node"))
+        var channels: [NIOAsyncTestingChannel] = []
+
+        for i in 0...IvyConfig.defaultMaxInboundConnections {
+            let peer = PeerID(publicKey: "inbound-cap-\(i)")
+            let channel = NIOAsyncTestingChannel()
+            channels.append(channel)
+            let conn = makeInboundConnection(id: peer, channel: channel)
+            await node.registerInboundConnection(conn)
+        }
+
+        let peers = await node.connectionPeersForTesting()
+        #expect(peers.count <= IvyConfig.defaultMaxInboundConnections)
+        #expect(!peers.contains(PeerID(publicKey: "inbound-cap-0")))
+
+        for channel in channels {
+            _ = try? await channel.finish()
+        }
+    }
+
+    @Test("Identify remap keeps an existing live real-ID connection")
+    func identifyRemapKeepsExistingLiveConnection() async throws {
+        let node = Ivy(config: inboundLivenessConfig(publicKey: "inbound-duplicate-node"))
+
+        let (realKey, realPriv) = generateKeyPair()
+        let realID = PeerID(publicKey: realKey)
+        let existingEndpoint = PeerEndpoint(publicKey: realKey, host: "198.51.100.10", port: 7000)
+        let existingChannel = NIOAsyncTestingChannel()
+        let existingConn = PeerConnection(
+            id: realID,
+            endpoint: existingEndpoint,
+            channel: existingChannel,
+            maxFrameSize: IvyConfig.defaultMaxFrameSize
+        )
+        await node.registerConnectionForTesting(existingConn, as: realID)
+
+        let inbound = PeerID(publicKey: "inbound-duplicate")
+        let freshEndpoint = PeerEndpoint(publicKey: inbound.publicKey, host: "127.0.0.1", port: 49154)
+        let freshChannel = NIOAsyncTestingChannel()
+        let freshConn = PeerConnection(
+            id: inbound,
+            endpoint: freshEndpoint,
+            channel: freshChannel,
+            maxFrameSize: IvyConfig.defaultMaxFrameSize
+        )
+        await node.registerInboundConnection(freshConn)
+
+        let observedHost = "203.0.113.212"
+        let signature = signIdentify(publicKey: realKey, observedHost: observedHost, privateKey: realPriv)
+        await node.handleMessage(
+            .identify(
+                publicKey: realKey,
+                observedHost: observedHost,
+                observedPort: 4001,
+                listenAddrs: [("203.0.113.77", 9000)],
+                chainPorts: [:],
+                signature: signature
+            ),
+            from: inbound
+        )
+
+        let peers = await node.connectionPeersForTesting()
+        #expect(peers.contains(realID))
+        #expect(!peers.contains(inbound))
+        #expect(await node.connectionEndpointForTesting(realID) == existingEndpoint)
+
+        _ = try? await existingChannel.finish()
+        _ = try? await freshChannel.finish()
     }
 
     @Test("Real identify re-key over the live connection moves health tracking")

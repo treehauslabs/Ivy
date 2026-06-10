@@ -42,6 +42,8 @@ public actor Ivy {
     var peerChainPorts: [PeerID: [String: UInt16]] = [:]
 
     var connections: [PeerID: PeerConnection] = [:]
+    var inboundConnectionIDs: Set<PeerID> = []
+    var inboundConnectionOrder: [PeerID] = []
     var pendingRequests: [String: [CheckedContinuation<Data?, Never>]] = [:]
     var serverChannel: Channel?
     #if canImport(Network)
@@ -187,6 +189,8 @@ public actor Ivy {
             conn.cancel()
         }
         connections.removeAll()
+        inboundConnectionIDs.removeAll()
+        inboundConnectionOrder.removeAll()
         connectingPeers.removeAll()
         connectingEndpoints.removeAll()
         for (_, task) in reconnectTasks {
@@ -307,6 +311,7 @@ public actor Ivy {
         if let conn = connections.removeValue(forKey: peer) {
             conn.cancel()
         }
+        untrackInboundConnection(peer)
         router.removePeer(peer)
         peerChainPorts.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
@@ -528,9 +533,18 @@ public actor Ivy {
     func sendIdentify(to conn: PeerConnection) {
         let observedHost = conn.endpoint.host
         let observedPort = conn.endpoint.port
-        var listenAddrs: [(String, UInt16)] = [("0.0.0.0", config.listenPort)]
+        var listenAddrs: [(String, UInt16)] = []
         if let pub = publicAddress {
             listenAddrs.append((pub.host, pub.port))
+        }
+        if let localHost = conn.channel.localAddress?.ipAddress,
+           localHost != "0.0.0.0",
+           localHost != "::",
+           !listenAddrs.contains(where: { $0.0 == localHost && $0.1 == config.listenPort }) {
+            listenAddrs.append((localHost, config.listenPort))
+        }
+        if listenAddrs.isEmpty {
+            listenAddrs.append(("0.0.0.0", config.listenPort))
         }
 
         var signature = Data()
@@ -593,18 +607,44 @@ public actor Ivy {
             }
         }
 
+        let advertisedEndpoint = firstAdvertisedListenEndpoint(
+            publicKey: publicKey,
+            listenAddrs: listenAddrs,
+            from: peer
+        )
+
         if peer != realID {
+            if let existing = connections[realID], existing.isLive {
+                if let duplicate = connections.removeValue(forKey: peer) {
+                    duplicate.cancel()
+                }
+                untrackInboundConnection(peer)
+                await healthMonitor?.removePeer(peer)
+                peerChainPorts.removeValue(forKey: peer)
+                delegate?.ivy(self, didDisconnect: peer)
+                return
+            }
+
             if let conn = connections.removeValue(forKey: peer) {
+                if let deadExisting = connections.removeValue(forKey: realID) {
+                    deadExisting.cancel()
+                }
                 conn.id = realID
                 connections[realID] = conn
-                let endpoint = PeerEndpoint(publicKey: publicKey, host: conn.endpoint.host, port: conn.endpoint.port)
+                remapInboundConnection(from: peer, to: realID)
                 router.removePeer(peer)
-                router.addPeer(realID, endpoint: endpoint, tally: tally)
+                if let endpoint = advertisedEndpoint {
+                    conn.endpoint = endpoint
+                    router.addPeer(realID, endpoint: endpoint, tally: tally)
+                }
                 Task { await self.creditLedger.establish(with: realID) }
             }
             await movePeerHealthTracking(from: peer, to: realID)
             // Migrate chainPorts from old key to real key.
             peerChainPorts.removeValue(forKey: peer)
+        } else if let endpoint = advertisedEndpoint, let conn = connections[realID] {
+            conn.endpoint = endpoint
+            router.addPeer(realID, endpoint: endpoint, tally: tally)
         }
 
         if !chainPorts.isEmpty {
@@ -614,6 +654,20 @@ public actor Ivy {
         // A signed identify frame authenticates who sent the claim, not whether
         // its observed address is reachable by us. Only locally verified address
         // discovery, such as STUN, may mutate publicAddress and NodeRecord.
+    }
+
+    func firstAdvertisedListenEndpoint(
+        publicKey: String,
+        listenAddrs: [(String, UInt16)],
+        from peer: PeerID
+    ) -> PeerEndpoint? {
+        for (host, port) in listenAddrs {
+            let endpoint = PeerEndpoint(publicKey: publicKey, host: host, port: port)
+            if isAcceptableDiscoveredEndpoint(endpoint, source: "identify", from: peer) {
+                return endpoint
+            }
+        }
+        return nil
     }
 
     func hexDecode(_ hex: String) -> Data? {
@@ -637,15 +691,26 @@ public actor Ivy {
         }
         let peer = conn.id
         let endpoint = conn.endpoint
-        connections.removeValue(forKey: peer)
-        connectingPeers.remove(peer)
-        connectingEndpoints.removeValue(forKey: peer)
-        router.removePeer(peer)
-        cleanupPendingForPeer(peer)
-        delegate?.ivy(self, didDisconnect: peer)
+        if let current = connections[peer], current !== conn {
+            return
+        }
+
+        let wasCurrentConnection = connections[peer] != nil
+        if wasCurrentConnection {
+            connections.removeValue(forKey: peer)
+            untrackInboundConnection(peer)
+            connectingPeers.remove(peer)
+            connectingEndpoints.removeValue(forKey: peer)
+            router.removePeer(peer)
+            cleanupPendingForPeer(peer)
+            delegate?.ivy(self, didDisconnect: peer)
+        } else {
+            untrackInboundConnection(peer)
+        }
 
         let wasIntentionalDisconnect = intentionallyDisconnectedPeers.remove(peer) != nil
-        if !peer.publicKey.hasPrefix("inbound-"),
+        if wasCurrentConnection,
+           !peer.publicKey.hasPrefix("inbound-"),
            running,
            !wasIntentionalDisconnect {
             scheduleReconnect(to: endpoint, peer: peer)
@@ -1302,14 +1367,14 @@ public actor Ivy {
     }
 
     func registerInboundConnection(_ conn: PeerConnection) {
-        // Reject if at connection capacity
-        if let maxPeers = config.tallyConfig.maxPeers, connections.count >= maxPeers {
+        let peer = conn.id
+        guard admitInboundConnection(peer) else {
             conn.cancel()
             return
         }
 
-        let peer = conn.id
         connections[peer] = conn
+        trackInboundConnection(peer)
         if healthMonitor != nil {
             Task { await self.trackPeerHealth(peer) }
         }
@@ -1323,6 +1388,57 @@ public actor Ivy {
         Task { [weak self] in
             try? await Task.sleep(for: .seconds(30))
             await self?.timeoutUnidentifiedPeer(peerToTimeout)
+        }
+    }
+
+    func admitInboundConnection(_ peer: PeerID) -> Bool {
+        if let maxPeers = config.tallyConfig.maxPeers, connections.count >= maxPeers {
+            return false
+        }
+
+        let inboundCap = config.tallyConfig.maxPeers ?? IvyConfig.defaultMaxInboundConnections
+        guard inboundCap > 0 else { return false }
+        if inboundConnectionIDs.count >= inboundCap {
+            evictOldestInboundConnection(excluding: peer)
+        }
+        return inboundConnectionIDs.count < inboundCap
+    }
+
+    func evictOldestInboundConnection(excluding peer: PeerID) {
+        while !inboundConnectionOrder.isEmpty {
+            let candidate = inboundConnectionOrder.removeFirst()
+            guard candidate != peer else { continue }
+            guard inboundConnectionIDs.remove(candidate) != nil else { continue }
+            if let conn = connections.removeValue(forKey: candidate) {
+                conn.cancel()
+            }
+            router.removePeer(candidate)
+            peerChainPorts.removeValue(forKey: candidate)
+            cleanupPendingForPeer(candidate)
+            if let monitor = healthMonitor {
+                Task { await monitor.removePeer(candidate) }
+            }
+            delegate?.ivy(self, didDisconnect: candidate)
+            return
+        }
+    }
+
+    func trackInboundConnection(_ peer: PeerID) {
+        if inboundConnectionIDs.insert(peer).inserted {
+            inboundConnectionOrder.append(peer)
+        }
+    }
+
+    func untrackInboundConnection(_ peer: PeerID) {
+        guard inboundConnectionIDs.remove(peer) != nil else { return }
+        inboundConnectionOrder.removeAll { $0 == peer }
+    }
+
+    func remapInboundConnection(from oldPeer: PeerID, to newPeer: PeerID) {
+        guard inboundConnectionIDs.remove(oldPeer) != nil else { return }
+        inboundConnectionIDs.insert(newPeer)
+        for i in inboundConnectionOrder.indices where inboundConnectionOrder[i] == oldPeer {
+            inboundConnectionOrder[i] = newPeer
         }
     }
 

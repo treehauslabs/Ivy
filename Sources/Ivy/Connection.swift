@@ -8,9 +8,10 @@ public final class PeerConnection: @unchecked Sendable {
     static let inboundBufferLimit = 256
 
     public internal(set) var id: PeerID
-    public let endpoint: PeerEndpoint
+    public internal(set) var endpoint: PeerEndpoint
     let channel: Channel
     private let maxFrameSize: UInt32
+    private var closed = false
     private let inbound: AsyncStream<Message>
     private let inboundContinuation: AsyncStream<Message>.Continuation
 
@@ -74,15 +75,21 @@ public final class PeerConnection: @unchecked Sendable {
 
     public var messages: AsyncStream<Message> { inbound }
 
+    var isLive: Bool {
+        channel.isActive || !closed
+    }
+
     func feedMessage(_ message: Message) {
         inboundContinuation.yield(message)
     }
 
     func connectionClosed() {
+        closed = true
         inboundContinuation.finish()
     }
 
     public func cancel() {
+        closed = true
         channel.close(promise: nil)
         inboundContinuation.finish()
     }
@@ -105,7 +112,11 @@ final class MessageFrameDecoder: ChannelInboundHandler, RemovableChannelHandler,
 
         while buffer.readableBytes >= 4 {
             guard let length = buffer.getInteger(at: buffer.readerIndex, endianness: .big, as: UInt32.self) else { break }
-            guard length > 0, length <= maxFrameSize else {
+            if length == 0 {
+                buffer.moveReaderIndex(forwardBy: 4)
+                continue
+            }
+            guard length <= maxFrameSize else {
                 context.close(promise: nil)
                 return
             }
@@ -167,10 +178,7 @@ final class InboundConnectionAcceptor: ChannelInboundHandler, @unchecked Sendabl
             registered = true
             let channel = context.channel
             let unknownID = PeerID(publicKey: "inbound-\(UUID().uuidString)")
-            let remoteAddr = channel.remoteAddress
-            let host = remoteAddr?.ipAddress ?? "unknown"
-            let port = UInt16(remoteAddr?.port ?? 0)
-            let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: host, port: port)
+            let endpoint = PeerEndpoint(publicKey: unknownID.publicKey, host: "unknown", port: 0)
             let conn = PeerConnection(
                 id: unknownID,
                 endpoint: endpoint,

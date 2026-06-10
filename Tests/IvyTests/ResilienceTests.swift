@@ -72,6 +72,27 @@ struct BoundedSetTests {
         #expect(!set.contains("a"))
         #expect(set.contains("b"))
     }
+
+    @Test("Bulk arbitrary removals and refill stay correct")
+    func testBulkRemoveAndRefill() {
+        let capacity = 10_000
+        var set = BoundedSet<Int>(capacity: capacity)
+        for i in 0..<capacity {
+            set.insert(i)
+        }
+        for i in stride(from: 0, to: capacity, by: 2) {
+            let removed = set.remove(i)
+            #expect(removed)
+        }
+        for i in capacity..<(capacity + capacity / 2) {
+            set.insert(i)
+        }
+
+        #expect(set.count == capacity)
+        #expect(!set.contains(0))
+        #expect(set.contains(1))
+        #expect(set.contains(capacity + capacity / 2 - 1))
+    }
 }
 
 @Suite("BoundedDictionary")
@@ -158,6 +179,26 @@ struct BoundedDictionaryTests {
         #expect(dict[1] == nil)
         #expect(dict[5] == "five")
         #expect(dict.count <= 4)
+    }
+
+    @Test("Bulk arbitrary removals and refill stay correct")
+    func testBulkRemoveAndRefill() {
+        let capacity = 10_000
+        var dict = BoundedDictionary<Int, Int>(capacity: capacity)
+        for i in 0..<capacity {
+            dict[i] = i
+        }
+        for i in stride(from: 0, to: capacity, by: 2) {
+            #expect(dict.removeValue(forKey: i) == i)
+        }
+        for i in capacity..<(capacity + capacity / 2) {
+            dict[i] = i
+        }
+
+        #expect(dict.count == capacity)
+        #expect(dict[0] == nil)
+        #expect(dict[1] == 1)
+        #expect(dict[capacity + capacity / 2 - 1] == capacity + capacity / 2 - 1)
     }
 }
 

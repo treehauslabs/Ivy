@@ -201,7 +201,7 @@ struct RoutingIngressHardeningTests {
 
         let routedKeys = await Set(node.allRouterPeers().map { $0.id.publicKey })
         #expect(!routedKeys.contains(advertised.publicKey))
-        #expect(tally.peerLedger(for: peerID)?.successCount == 0)
+        #expect((tally.peerLedger(for: peerID)?.successCount.value ?? 0) == 0)
 
         peerSide.close()
     }
@@ -231,8 +231,8 @@ struct RoutingIngressHardeningTests {
 
         #expect(discovered.isEmpty)
         let ledger = tally.peerLedger(for: peerID)
-        #expect(ledger?.successCount == 0)
-        #expect(ledger?.failureCount == 1)
+        #expect((ledger?.successCount.value ?? 0) == 0)
+        #expect(ledger?.failureCount.value == 1)
 
         peerSide.close()
     }

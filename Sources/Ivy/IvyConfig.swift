@@ -3,6 +3,7 @@ import Tally
 
 public struct IvyConfig: Sendable {
     public static let defaultMaxFrameSize: UInt32 = 4 * 1024 * 1024
+    public static let defaultMaxInboundConnections: Int = 256
 
     public let publicKey: String
     public let listenPort: UInt16

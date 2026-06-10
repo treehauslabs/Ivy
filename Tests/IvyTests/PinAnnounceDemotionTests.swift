@@ -40,13 +40,13 @@ struct PinAnnounceDemotionTests {
         // Pre-condition: A has never interacted with B at a reputation level,
         // so the ledger may or may not exist. Either way, after a failed
         // direct fetch failureCount must be >= 1.
-        let beforeFailures = await a.tally.peerLedger(for: bID)?.failureCount ?? 0
+        let beforeFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
 
         // B has no record of this CID, so the request will time out.
         let data = await a.getDirect(cid: "cid-that-does-not-exist", from: bID)
         #expect(data == nil)
 
-        let afterFailures = await a.tally.peerLedger(for: bID)?.failureCount ?? 0
+        let afterFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
         #expect(afterFailures == beforeFailures + 1, "direct-fetch timeout must demote the trusted peer")
     }
 
@@ -68,12 +68,12 @@ struct PinAnnounceDemotionTests {
         await b.setDataSource(ds)
         await b.publishBlock(cid: cid, data: payload)
 
-        let beforeSuccesses = await a.tally.peerLedger(for: bID)?.successCount ?? 0
+        let beforeSuccesses = await a.tally.peerLedger(for: bID)?.successCount.value ?? 0
 
         let data = await a.getDirect(cid: cid, from: bID)
         #expect(data == payload, "successful direct fetch must return the payload")
 
-        let afterSuccesses = await a.tally.peerLedger(for: bID)?.successCount ?? 0
+        let afterSuccesses = await a.tally.peerLedger(for: bID)?.successCount.value ?? 0
         #expect(afterSuccesses >= beforeSuccesses + 1, "successful direct fetch must reward the serving peer")
     }
 
@@ -86,13 +86,13 @@ struct PinAnnounceDemotionTests {
 
         let bID = await b.localID
 
-        let beforeFailures = await a.tally.peerLedger(for: bID)?.failureCount ?? 0
+        let beforeFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
 
         // B never stored this CID — classic "lied in a pin announce" scenario.
         let data = await a.get(cid: "cid-announced-but-not-held", target: bID)
         #expect(data == nil)
 
-        let afterFailures = await a.tally.peerLedger(for: bID)?.failureCount ?? 0
+        let afterFailures = await a.tally.peerLedger(for: bID)?.failureCount.value ?? 0
         #expect(afterFailures == beforeFailures + 1, "targeted-get timeout must demote the announcing peer")
     }
 }

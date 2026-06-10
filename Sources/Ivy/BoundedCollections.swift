@@ -1,15 +1,20 @@
 import Foundation
+import DequeModule
 
 struct BoundedSet<Element: Hashable & Sendable>: Sendable {
     private var storage: Set<Element>
-    private var insertionOrder: [Element]
+    private var insertionOrder: Deque<Element>
+    private var tombstones: [Element: Int]
+    private var tombstoneCount: Int
     let capacity: Int
 
     init(capacity: Int) {
         self.capacity = capacity
         self.storage = Set(minimumCapacity: min(capacity, 1024))
-        self.insertionOrder = []
+        self.insertionOrder = Deque()
         self.insertionOrder.reserveCapacity(min(capacity, 1024))
+        self.tombstones = Dictionary(minimumCapacity: min(capacity, 1024))
+        self.tombstoneCount = 0
     }
 
     var count: Int { storage.count }
@@ -21,15 +26,16 @@ struct BoundedSet<Element: Hashable & Sendable>: Sendable {
 
     @discardableResult
     mutating func insert(_ element: Element) -> Bool {
+        guard capacity > 0 else { return false }
         if storage.contains(element) { return false }
 
         if storage.count >= capacity {
-            let evictCount = capacity / 4
-            let toRemove = insertionOrder.prefix(evictCount)
-            for item in toRemove {
-                storage.remove(item)
+            let evictCount = max(capacity / 4, 1)
+            var evicted = 0
+            while storage.count >= capacity || evicted < evictCount {
+                guard removeOldestTracked() else { break }
+                evicted += 1
             }
-            insertionOrder.removeFirst(min(evictCount, insertionOrder.count))
         }
 
         storage.insert(element)
@@ -40,30 +46,80 @@ struct BoundedSet<Element: Hashable & Sendable>: Sendable {
     mutating func removeAll() {
         storage.removeAll()
         insertionOrder.removeAll()
+        tombstones.removeAll()
+        tombstoneCount = 0
     }
 
     @discardableResult
     mutating func remove(_ element: Element) -> Bool {
         guard storage.remove(element) != nil else { return false }
-        insertionOrder.removeAll { $0 == element }
+        markRemoved(element)
         return true
+    }
+
+    private mutating func markRemoved(_ element: Element) {
+        tombstones[element, default: 0] += 1
+        tombstoneCount += 1
+        compactOrderIfNeeded()
+    }
+
+    @discardableResult
+    private mutating func removeOldestTracked() -> Bool {
+        while let oldest = insertionOrder.popFirst() {
+            if let count = tombstones[oldest], count > 0 {
+                if count == 1 {
+                    tombstones.removeValue(forKey: oldest)
+                } else {
+                    tombstones[oldest] = count - 1
+                }
+                tombstoneCount -= 1
+                continue
+            }
+            if storage.remove(oldest) != nil {
+                return true
+            }
+        }
+        return false
+    }
+
+    private mutating func compactOrderIfNeeded() {
+        guard tombstoneCount > Swift.max(insertionOrder.count / 2, capacity) else { return }
+        var pending = tombstones
+        var compacted = Deque<Element>()
+        compacted.reserveCapacity(min(storage.count, 1024))
+        while let element = insertionOrder.popFirst() {
+            if let count = pending[element], count > 0 {
+                if count == 1 {
+                    pending.removeValue(forKey: element)
+                } else {
+                    pending[element] = count - 1
+                }
+                continue
+            }
+            if storage.contains(element) {
+                compacted.append(element)
+            }
+        }
+        insertionOrder = compacted
+        tombstones.removeAll()
+        tombstoneCount = 0
     }
 }
 
 struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     private var storage: [Key: Value]
-    // Parallel insertion-order array of keys for O(1) random sampling and
-    // bounded oldest-first overflow eviction.
-    private var keys_: ContiguousArray<Key>
-    private var keyIndex: [Key: Int]
+    private var keyOrder: Deque<Key>
+    private var tombstones: [Key: Int]
+    private var tombstoneCount: Int
     let capacity: Int
 
     init(capacity: Int) {
         self.capacity = capacity
         self.storage = Dictionary(minimumCapacity: min(capacity, 1024))
-        self.keys_ = []
-        self.keys_.reserveCapacity(min(capacity, 1024))
-        self.keyIndex = Dictionary(minimumCapacity: min(capacity, 1024))
+        self.keyOrder = Deque()
+        self.keyOrder.reserveCapacity(min(capacity, 1024))
+        self.tombstones = Dictionary(minimumCapacity: min(capacity, 1024))
+        self.tombstoneCount = 0
     }
 
     var count: Int { storage.count }
@@ -75,6 +131,7 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
         get { storage[key] }
         set {
             if let value = newValue {
+                guard capacity > 0 else { return }
                 if storage[key] == nil {
                     if storage.count >= capacity {
                         // Fallback eviction: shed oldest entries to make room.
@@ -82,31 +139,35 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
                         // room via `removeValue` before inserting; this path is a
                         // safety valve.
                         let evictCount = Swift.max(capacity / 4, 1)
-                        for _ in 0..<Swift.min(evictCount, keys_.count) {
-                            removeOldestKeyTracking()
+                        var evicted = 0
+                        while storage.count >= capacity || evicted < evictCount {
+                            guard removeOldestKeyTracking() else { break }
+                            evicted += 1
                         }
                     }
-                    keyIndex[key] = keys_.count
-                    keys_.append(key)
+                    keyOrder.append(key)
                 }
                 storage[key] = value
             } else {
-                removeKeyTracking(key)
-                storage.removeValue(forKey: key)
+                if storage.removeValue(forKey: key) != nil {
+                    removeKeyTracking(key)
+                }
             }
         }
     }
 
     @discardableResult
     mutating func removeValue(forKey key: Key) -> Value? {
+        guard let removed = storage.removeValue(forKey: key) else { return nil }
         removeKeyTracking(key)
-        return storage.removeValue(forKey: key)
+        return removed
     }
 
     mutating func removeAll() {
         storage.removeAll()
-        keys_.removeAll()
-        keyIndex.removeAll()
+        keyOrder.removeAll()
+        tombstones.removeAll()
+        tombstoneCount = 0
     }
 
     mutating func removeAll(where predicate: (Key, Value) -> Bool) {
@@ -130,23 +191,51 @@ struct BoundedDictionary<Key: Hashable & Sendable, Value: Sendable>: Sendable {
     }
 
     private mutating func removeKeyTracking(_ key: Key) {
-        guard let idx = keyIndex.removeValue(forKey: key) else { return }
-        keys_.remove(at: idx)
-        if idx < keys_.count {
-            for shiftedIdx in idx..<keys_.count {
-                keyIndex[keys_[shiftedIdx]] = shiftedIdx
-            }
-        }
+        tombstones[key, default: 0] += 1
+        tombstoneCount += 1
+        compactOrderIfNeeded()
     }
 
-    private mutating func removeOldestKeyTracking() {
-        guard !keys_.isEmpty else { return }
-        let evicted = keys_.removeFirst()
-        storage.removeValue(forKey: evicted)
-        keyIndex.removeValue(forKey: evicted)
-        for idx in keys_.indices {
-            keyIndex[keys_[idx]] = idx
+    @discardableResult
+    private mutating func removeOldestKeyTracking() -> Bool {
+        while let oldest = keyOrder.popFirst() {
+            if let count = tombstones[oldest], count > 0 {
+                if count == 1 {
+                    tombstones.removeValue(forKey: oldest)
+                } else {
+                    tombstones[oldest] = count - 1
+                }
+                tombstoneCount -= 1
+                continue
+            }
+            if storage.removeValue(forKey: oldest) != nil {
+                return true
+            }
         }
+        return false
+    }
+
+    private mutating func compactOrderIfNeeded() {
+        guard tombstoneCount > Swift.max(keyOrder.count / 2, capacity) else { return }
+        var pending = tombstones
+        var compacted = Deque<Key>()
+        compacted.reserveCapacity(min(storage.count, 1024))
+        while let key = keyOrder.popFirst() {
+            if let count = pending[key], count > 0 {
+                if count == 1 {
+                    pending.removeValue(forKey: key)
+                } else {
+                    pending[key] = count - 1
+                }
+                continue
+            }
+            if storage[key] != nil {
+                compacted.append(key)
+            }
+        }
+        keyOrder = compacted
+        tombstones.removeAll()
+        tombstoneCount = 0
     }
 }
 
