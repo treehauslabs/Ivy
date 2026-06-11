@@ -182,8 +182,11 @@ extension Ivy {
             return false
         }
 
+        // Measure the canonical raw key form (ed01 Multikey prefix stripped)
+        // so a key ground to the threshold passes regardless of which
+        // spelling the endpoint record carries.
         if config.minPeerKeyBits > 0 {
-            let bits = KeyDifficulty.trailingZeroBits(of: endpoint.publicKey)
+            let bits = KeyDifficulty.trailingZeroBits(of: Self.canonicalKeyHex(endpoint.publicKey))
             guard bits >= config.minPeerKeyBits else {
                 config.logger.warning("Rejecting \(source) endpoint \(endpoint.publicKey.prefix(16))… from \(peer.publicKey.prefix(16))…: \(bits) key PoW bits, need \(config.minPeerKeyBits)")
                 return false
