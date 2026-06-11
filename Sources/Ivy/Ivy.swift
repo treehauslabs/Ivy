@@ -514,6 +514,15 @@ public actor Ivy {
             peerChainPorts[realID] = chainPorts
         }
 
+        // Identify passed the signature + key-PoW gate and the connection is now
+        // keyed to its real identity in connections/router/tally. Notify the
+        // delegate so it can gate admission on the AUTHENTICATED identity — the
+        // inbound `didConnect` only ever saw the temporary `inbound-<uuid>` id and
+        // never re-fires here, so a durable ban can only be enforced at this point.
+        // Fired for both the temp/dialed→realID re-key path and the matching-id
+        // path; never reached on a rejected/disconnected identify (those return early).
+        delegate?.ivy(self, didIdentifyPeer: realID, previous: peer)
+
         // A signed identify frame authenticates who sent the claim, not whether
         // its observed address is reachable by us. Only locally verified address
         // discovery, such as STUN, may mutate publicAddress.
