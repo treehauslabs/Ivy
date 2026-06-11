@@ -1,5 +1,5 @@
 {
-  "originHash" : "c23b3a010d811127be8a54d140c9a91c5a25fa9acc6615e40fb30653220c8fb2",
+  "originHash" : "1e80b5ec2bdb0673a2d8bf820197356eb58350a658959bf17e230c6f2b744845",
   "pins" : [
     {
       "identity" : "cryptoswift",
@@ -123,8 +123,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/treehauslabs/Tally.git",
       "state" : {
-        "revision" : "e6dd8afa478d338018157dd789c2288722716d28",
-        "version" : "1.5.0"
+        "revision" : "99c873d40823a358975fe77aeed4cf21ab213fcd",
+        "version" : "2.0.0"
       }
     }
   ],
