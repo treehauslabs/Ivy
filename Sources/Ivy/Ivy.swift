@@ -310,6 +310,10 @@ public actor Ivy {
         router.removePeer(peer)
         peerChainPorts.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
+        // Drop the per-peer Tally ledger at the teardown choke point so every
+        // embedder gets the cleanup for free (a removal — harmless if the
+        // delegate also calls resetPeer from didDisconnect).
+        tally.resetPeer(peer)
         if let monitor = healthMonitor {
             Task { await monitor.removePeer(peer) }
         }
@@ -427,12 +431,7 @@ public actor Ivy {
         // any peer to claim any public key — reject it outright.
         // Strip the 2-byte Multikey ed25519 prefix (ed01) if present so that
         // both raw 32-byte hex keys and Multikey-encoded keys are accepted.
-        let rawPublicKey: String
-        if publicKey.hasPrefix("ed01") && publicKey.count == 68 {
-            rawPublicKey = String(publicKey.dropFirst(4))
-        } else {
-            rawPublicKey = publicKey
-        }
+        let rawPublicKey = Self.canonicalKeyHex(publicKey)
         guard !signature.isEmpty,
               let pubKeyBytes = Data(hexString: rawPublicKey), pubKeyBytes.count == 32,
               let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubKeyBytes) else {
@@ -450,8 +449,12 @@ public actor Ivy {
         // poisoning. Each bit doubles the expected key-generation work, making
         // it progressively harder to generate keys that XOR-cluster near a
         // target CID for DHT capture.
+        // Measure the canonical raw form, not the presented spelling: the same
+        // key would otherwise score differently when presented ed01-prefixed
+        // vs raw, and a key ground to the threshold on its raw form would be
+        // wrongly rejected when presented prefixed.
         if config.minPeerKeyBits > 0 {
-            let bits = KeyDifficulty.trailingZeroBits(of: publicKey)
+            let bits = KeyDifficulty.trailingZeroBits(of: rawPublicKey)
             guard bits >= config.minPeerKeyBits else {
                 config.logger.warning("Peer \(publicKey.prefix(16))… has \(bits) key PoW bits, need \(config.minPeerKeyBits) — disconnecting")
                 disconnect(peer)
@@ -473,6 +476,7 @@ public actor Ivy {
                 untrackInboundConnection(peer)
                 await healthMonitor?.removePeer(peer)
                 peerChainPorts.removeValue(forKey: peer)
+                tally.resetPeer(peer)
                 delegate?.ivy(self, didDisconnect: peer)
                 return
             }
@@ -542,6 +546,7 @@ public actor Ivy {
             connectingEndpoints.removeValue(forKey: peer)
             router.removePeer(peer)
             cleanupPendingForPeer(peer)
+            tally.resetPeer(peer)
             delegate?.ivy(self, didDisconnect: peer)
         } else {
             untrackInboundConnection(peer)
@@ -988,8 +993,40 @@ public actor Ivy {
         return nonce
     }
 
-    /// Generate a Curve25519 key pair with target difficulty.
+    /// Canonical raw-hex form of a presented public key: strips the `ed01`
+    /// Multikey prefix (68 hex → 64-hex raw), passthrough otherwise. Identity-
+    /// PoW gates must measure this form so both spellings of the same key
+    /// score identically.
+    ///
+    /// Mirrors `KeyDifficulty.canonicalRawHex` — collapse onto it when the
+    /// Tally pin reaches 2.1+.
+    static func canonicalKeyHex(_ presented: String) -> String {
+        if presented.hasPrefix("ed01") && presented.count == 68 {
+            return String(presented.dropFirst(4))
+        }
+        return presented
+    }
+
+    /// Generate a Curve25519 key pair whose raw-hex public key has at least
+    /// `targetDifficulty` trailing-zero work bits. Total: grinds until a
+    /// conforming key is found (expected ~2^targetDifficulty keygens), so
+    /// callers never need a retry loop or a force-unwrap.
+    public static func generateKey(targetDifficulty: Int) -> (publicKey: String, privateKey: Data) {
+        while true {
+            if let key = grindKey(targetDifficulty: targetDifficulty, maxAttempts: 100_000_000) {
+                return key
+            }
+        }
+    }
+
+    /// Generate a Curve25519 key pair with target difficulty, giving up after
+    /// `maxAttempts` keygens.
+    @available(*, deprecated, message: "Use generateKey(targetDifficulty:) — it is total and never returns nil")
     public static func generateKey(targetDifficulty: Int, maxAttempts: Int = 100_000_000) -> (publicKey: String, privateKey: Data)? {
+        grindKey(targetDifficulty: targetDifficulty, maxAttempts: maxAttempts)
+    }
+
+    private static func grindKey(targetDifficulty: Int, maxAttempts: Int) -> (publicKey: String, privateKey: Data)? {
         for _ in 0..<maxAttempts {
             let privateKey = Crypto.Curve25519.Signing.PrivateKey()
             let publicKeyBytes = privateKey.publicKey.rawRepresentation
@@ -1192,6 +1229,7 @@ public actor Ivy {
             router.removePeer(candidate)
             peerChainPorts.removeValue(forKey: candidate)
             cleanupPendingForPeer(candidate)
+            tally.resetPeer(candidate)
             if let monitor = healthMonitor {
                 Task { await monitor.removePeer(candidate) }
             }
