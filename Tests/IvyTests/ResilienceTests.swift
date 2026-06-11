@@ -226,26 +226,6 @@ struct InventorySetTests {
         #expect(!inventory.contains("cid"))
     }
 
-    @Test("Bloom filter hash positions tolerate Int.min")
-    func testBloomHashPositionsTolerateIntMin() {
-        let positions = BloomFilter.bitPositions(
-            h1: Int.min,
-            h2: -1,
-            hashCount: 8,
-            bitCount: 64
-        )
-
-        #expect(positions.count == 8)
-        #expect(positions.allSatisfy { (0..<64).contains($0) })
-    }
-
-    @Test("Bloom filter membership stays bounded")
-    func testBloomFilterMembership() {
-        var filter = BloomFilter(bits: 64, hashCount: 4)
-        filter.insert("bafy-intmin-boundary")
-
-        #expect(filter.mightContain("bafy-intmin-boundary"))
-    }
 }
 
 @Suite("Message Validation")
@@ -320,7 +300,7 @@ struct MessageValidationTests {
         let longString = String(repeating: "x", count: Int(MessageLimits.maxStringLength) + 1)
         #expect(Message.dontHave(cid: longString).serialize().isEmpty)
 
-        let largePayload = Data(repeating: 0, count: Int(MessageLimits.maxDataPayload) + 1)
+        let largePayload = Data(repeating: 0, count: Int(IvyConfig.defaultMaxFrameSize) + 1)
         #expect(Message.block(cid: "cid", data: largePayload).serialize().isEmpty)
         #expect(Message.frame(.block(cid: "cid", data: largePayload)).isEmpty)
     }
@@ -328,8 +308,6 @@ struct MessageValidationTests {
     @Test("Frame size defaults and can be raised per message")
     func testFrameSizeDefaultsAndCanBeRaisedPerMessage() {
         #expect(IvyConfig.defaultMaxFrameSize == 4 * 1024 * 1024)
-        #expect(MessageLimits.maxDataPayload == IvyConfig.defaultMaxFrameSize)
-
         let raisedFrameSize = IvyConfig.defaultMaxFrameSize + 8_192
         let payload = Data(repeating: 0xAB, count: Int(IvyConfig.defaultMaxFrameSize) + 512)
         let message = Message.block(cid: "cid", data: payload)

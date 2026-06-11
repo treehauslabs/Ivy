@@ -10,7 +10,7 @@ public enum Message: Sendable {
     case announceBlock(cid: String)
 
     case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data)
-    case dhtForward(cid: String, ttl: UInt8, fee: UInt64 = 0, target: Data? = nil, selector: String? = nil)
+    case dhtForward(cid: String, ttl: UInt8)
 
     case want(rootCIDs: [String])
     case wantVolume(rootCID: String, cids: [String])
@@ -19,7 +19,7 @@ public enum Message: Sendable {
     case pexResponse(nonce: UInt64, peers: [PeerEndpoint])
 
     // Ivy economic layer
-    case findPins(cid: String, fee: UInt64)
+    case findPins(cid: String)
     case pins(cid: String, providers: [String])
     case pinAnnounce(rootCID: String, publicKey: String, expiry: UInt64, signature: Data, fee: UInt64)
     case pinStored(rootCID: String)
@@ -34,10 +34,6 @@ public enum Message: Sendable {
     case notHave(rootCID: String)
     case announceVolume(rootCID: String, childCIDs: [String], totalSize: UInt64)
     case pushVolume(rootCID: String, items: [(cid: String, data: Data)])
-
-    // Node records (ENR-style identity-to-endpoint mapping)
-    case nodeRecord(record: NodeRecord)
-    case getNodeRecord(publicKey: String)
 
     private enum Tag: UInt8 {
         case ping = 0
@@ -72,9 +68,7 @@ public enum Message: Sendable {
         case notHave = 58
         case announceVolume = 54
         case pushVolume = 55
-        // Node records
-        case nodeRecord = 56
-        case getNodeRecord = 57
+        // tags 56, 57 removed (nodeRecord, getNodeRecord — node-record subsystem deleted)
     }
 
     /// True for messages that keep the connection alive — always sent regardless of budget.
@@ -94,7 +88,7 @@ public enum Message: Sendable {
         case .want(let rootCIDs): return 3 + rootCIDs.reduce(0) { $0 + 2 + $1.utf8.count }
         case .wantVolume(let rootCID, let cids):
             return 5 + rootCID.utf8.count + cids.reduce(0) { $0 + 2 + $1.utf8.count }
-        case .dhtForward(let cid, _, _, _, _): return 4 + cid.utf8.count
+        case .dhtForward(let cid, _): return 4 + cid.utf8.count
         case .blocks(let rootCID, let items):
             return 5 + rootCID.utf8.count + items.reduce(0) { $0 + 6 + $1.cid.utf8.count + $1.data.count }
         case .pushVolume(let rootCID, let items):
@@ -160,19 +154,10 @@ public enum Message: Sendable {
                 buf.appendUInt16(port)
             }
             guard buf.appendLengthPrefixedData(signature, maxDataPayload: maxDataPayload) else { return false }
-        case .dhtForward(let cid, let ttl, let fee, let target, let selector):
+        case .dhtForward(let cid, let ttl):
             buf.append(Tag.dhtForward.rawValue)
             guard buf.appendLengthPrefixedString(cid) else { return false }
             buf.appendUInt8(ttl)
-            buf.appendUInt64(fee)
-            buf.appendUInt8(target != nil ? 1 : 0)
-            if let target {
-                guard buf.appendLengthPrefixedData(target, maxDataPayload: maxDataPayload) else { return false }
-            }
-            buf.appendUInt8(selector != nil ? 1 : 0)
-            if let selector {
-                guard buf.appendLengthPrefixedString(selector) else { return false }
-            }
         case .want(let rootCIDs):
             buf.append(Tag.want.rawValue)
             guard buf.appendCount(rootCIDs.count, max: MessageLimits.maxTxCIDCount) else { return false }
@@ -198,10 +183,9 @@ public enum Message: Sendable {
                       buf.appendLengthPrefixedString(peer.host) else { return false }
                 buf.appendUInt16(peer.port)
             }
-        case .findPins(let cid, let fee):
+        case .findPins(let cid):
             buf.append(Tag.findPins.rawValue)
             guard buf.appendLengthPrefixedString(cid) else { return false }
-            buf.appendUInt64(fee)
         case .pins(let cid, let providers):
             buf.append(Tag.pins.rawValue)
             guard buf.appendLengthPrefixedString(cid),
@@ -253,14 +237,6 @@ public enum Message: Sendable {
                 guard buf.appendLengthPrefixedString(item.cid),
                       buf.appendLengthPrefixedData(item.data, maxDataPayload: maxDataPayload) else { return false }
             }
-        case .nodeRecord(let record):
-            buf.append(Tag.nodeRecord.rawValue)
-            let encoded = record.serialize()
-            guard !encoded.isEmpty else { return false }
-            buf.append(encoded)
-        case .getNodeRecord(let publicKey):
-            buf.append(Tag.getNodeRecord.rawValue)
-            guard buf.appendLengthPrefixedString(publicKey) else { return false }
         }
         return true
     }
@@ -330,12 +306,7 @@ public enum Message: Sendable {
         case .dhtForward:
             guard let cid = reader.readString(),
                   let ttl = reader.readUInt8() else { return nil }
-            let fee = reader.readUInt64() ?? 0
-            var target: Data? = nil
-            if let hasTarget = reader.readUInt8(), hasTarget == 1 { target = reader.readData() }
-            var selector: String? = nil
-            if let hasSel = reader.readUInt8(), hasSel == 1 { selector = reader.readString() }
-            return .dhtForward(cid: cid, ttl: ttl, fee: fee, target: target, selector: selector)
+            return .dhtForward(cid: cid, ttl: ttl)
         case .want:
             guard let count = reader.readUInt16(), count <= MessageLimits.maxTxCIDCount else { return nil }
             var cids = [String]()
@@ -371,9 +342,8 @@ public enum Message: Sendable {
             }
             return .pexResponse(nonce: nonce, peers: peers)
         case .findPins:
-            guard let cid = reader.readString(),
-                  let fee = reader.readUInt64() else { return nil }
-            return .findPins(cid: cid, fee: fee)
+            guard let cid = reader.readString() else { return nil }
+            return .findPins(cid: cid)
         case .pins:
             guard let cid = reader.readString(),
                   let count = reader.readUInt16(), count <= MessageLimits.maxNeighborCount else { return nil }
@@ -437,12 +407,6 @@ public enum Message: Sendable {
                 items.append((cid: cid, data: data))
             }
             return .pushVolume(rootCID: rootCID, items: items)
-        case .nodeRecord:
-            guard let record = NodeRecord.deserialize(&reader) else { return nil }
-            return .nodeRecord(record: record)
-        case .getNodeRecord:
-            guard let publicKey = reader.readString() else { return nil }
-            return .getNodeRecord(publicKey: publicKey)
         }
     }
 
@@ -470,6 +434,21 @@ public struct PeerEndpoint: Sendable, Equatable, Hashable {
 }
 
 extension Data {
+    /// Strict hex decoding: requires an even-length string of hex digits.
+    /// Single shared implementation for all key/signature decoding in Ivy.
+    init?(hexString: String) {
+        guard hexString.count % 2 == 0 else { return nil }
+        var data = Data(capacity: hexString.count / 2)
+        var index = hexString.startIndex
+        while index < hexString.endIndex {
+            let nextIndex = hexString.index(index, offsetBy: 2)
+            guard let byte = UInt8(hexString[index..<nextIndex], radix: 16) else { return nil }
+            data.append(byte)
+            index = nextIndex
+        }
+        self = data
+    }
+
     @inline(__always)
     mutating func appendUInt8(_ value: UInt8) {
         append(value)

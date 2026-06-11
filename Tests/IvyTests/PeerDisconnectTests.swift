@@ -19,8 +19,7 @@ struct PeerDisconnectTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
         let peer = PeerID(publicKey: "disconnect-router-peer")
         await node.addToRouter(
@@ -60,8 +59,7 @@ struct PeerDisconnectTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
 
         // Create a silent peer: LocalPeerConnection without a paired remote end.
@@ -120,8 +118,7 @@ struct PeerDisconnectTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         )
         let node = Ivy(config: config)
         let silentPeerID = PeerID(publicKey: "silent-keymigrate0")
@@ -166,8 +163,7 @@ struct PeerDisconnectTests {
                 maxMissedPongs: 99,
                 enabled: false
             ),
-            enablePEX: false,
-            replicationInterval: .seconds(999)
+            enablePEX: false
         ))
 
         let silentPeerID = PeerID(publicKey: "silent-peer-cleanup00")

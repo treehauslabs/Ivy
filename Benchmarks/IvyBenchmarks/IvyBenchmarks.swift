@@ -161,24 +161,6 @@ struct IvyBenchmarks {
             results.append(BenchmarkResult(name: "router CPL", iterations: opsPerSample, samples: timings))
         }
 
-        // --- Router: XOR distance ---
-        do {
-            var timings: [Double] = []
-            let hashes = (0..<100).map { Router.hash("xor-\($0)") }
-            for _ in 0..<samples {
-                let start = clock.now
-                for i in 0..<opsPerSample {
-                    let a = hashes[i % hashes.count]
-                    let b = hashes[(i + 1) % hashes.count]
-                    _ = Router.xorDistance(a, b)
-                }
-                let elapsed = start.duration(to: clock.now)
-                let us = Double(elapsed.components.attoseconds) / 1e12 + Double(elapsed.components.seconds) * 1e6
-                timings.append(us / Double(opsPerSample))
-            }
-            results.append(BenchmarkResult(name: "router XOR distance", iterations: opsPerSample, samples: timings))
-        }
-
         // --- Router: addPeer ---
         do {
             var timings: [Double] = []

@@ -108,7 +108,6 @@ private func makeNode(
             enabled: false
         ),
         enablePEX: false,
-        replicationInterval: .seconds(999),
         maxWantCandidates: maxWantCandidates
     ))
 }

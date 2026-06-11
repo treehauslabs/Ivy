@@ -12,8 +12,7 @@ func testConfig(publicKey: String, port: UInt16 = 0) -> IvyConfig {
         bootstrapPeers: [],
         enableLocalDiscovery: false,
         healthConfig: PeerHealthConfig(keepaliveInterval: .seconds(999), staleTimeout: .seconds(999), maxMissedPongs: 99, enabled: false),
-        enablePEX: false,
-        replicationInterval: .seconds(999)
+        enablePEX: false
     )
 }
 

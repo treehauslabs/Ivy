@@ -21,16 +21,10 @@ public struct IvyConfig: Sendable {
     public let enablePEX: Bool
     public let pexInterval: Duration
     public let pexMaxPeers: Int
-    public let replicationInterval: Duration
-    public let replicationMinCopies: Int
-    public let replicationSampleSize: Int
     public let signingKey: Data
     public let logger: any IvyLogger
     public let relayFee: UInt64
     public let baseThresholdMultiplier: UInt64
-    public let defaultRequestFee: UInt64
-    public let highBandwidthPeers: Int
-    public let sendBytesPerSecond: Int
     /// Maximum serialized Ivy wire-frame payload this node will send or accept.
     /// This is node policy, not a consensus rule; operators can raise it for
     /// chains or applications that need larger wire payloads.
@@ -71,16 +65,10 @@ public struct IvyConfig: Sendable {
         enablePEX: Bool = true,
         pexInterval: Duration = .seconds(120),
         pexMaxPeers: Int = 16,
-        replicationInterval: Duration = .seconds(300),
-        replicationMinCopies: Int = 3,
-        replicationSampleSize: Int = 32,
         signingKey: Data = Data(),
         logger: any IvyLogger = NullLogger(),
         relayFee: UInt64 = 0,
         baseThresholdMultiplier: UInt64 = 100,
-        defaultRequestFee: UInt64 = 20,
-        highBandwidthPeers: Int = 3,
-        sendBytesPerSecond: Int = 1_048_576,
         maxFrameSize: UInt32 = IvyConfig.defaultMaxFrameSize,
         maxPendingRequests: Int = 4_096,
         maxWaitersPerPendingCID: Int = 64,
@@ -103,16 +91,10 @@ public struct IvyConfig: Sendable {
         self.enablePEX = enablePEX
         self.pexInterval = pexInterval
         self.pexMaxPeers = pexMaxPeers
-        self.replicationInterval = replicationInterval
-        self.replicationMinCopies = replicationMinCopies
-        self.replicationSampleSize = replicationSampleSize
         self.signingKey = signingKey
         self.logger = logger
         self.relayFee = relayFee
         self.baseThresholdMultiplier = baseThresholdMultiplier
-        self.defaultRequestFee = defaultRequestFee
-        self.highBandwidthPeers = highBandwidthPeers
-        self.sendBytesPerSecond = sendBytesPerSecond
         self.maxFrameSize = maxFrameSize
         self.maxPendingRequests = maxPendingRequests
         self.maxWaitersPerPendingCID = maxWaitersPerPendingCID
