@@ -103,10 +103,64 @@ struct IdentityPoWAndLedgerHygieneTests {
         )
 
         let peers = await node.connectionPeersForTesting()
-        #expect(peers.contains(PeerID(publicKey: prefixed)))
+        // Identity derives from the CANONICAL raw form — a prefixed
+        // presentation is admitted but collapses onto the raw PeerID.
+        #expect(peers.contains(PeerID(publicKey: rawKey)))
+        #expect(!peers.contains(PeerID(publicKey: prefixed)))
         #expect(!peers.contains(inbound))
 
         _ = try? await channel.finish()
+    }
+
+    @Test("Both spellings of one ground key collapse to ONE identity (no 2x Sybil amplification)")
+    func bothSpellingsCollapseToOneIdentity() async throws {
+        let requiredBits = 4
+        let node = Ivy(config: hygieneConfig(publicKey: "pow-collapse-node", minPeerKeyBits: requiredBits))
+
+        let (rawKey, privateKey) = grindGateKeyPair(minBits: requiredBits)
+        let prefixed = "ed01" + rawKey
+        let canonicalID = PeerID(publicKey: rawKey)
+
+        // First connection identifies with the RAW spelling.
+        let inboundA = PeerID(publicKey: "inbound-collapse-a")
+        let channelA = NIOAsyncTestingChannel()
+        await node.registerInboundConnection(makeInboundConnection(id: inboundA, channel: channelA))
+        let hostA = "203.0.113.20"
+        await node.handleMessage(
+            .identify(
+                publicKey: rawKey, observedHost: hostA, observedPort: 4001,
+                listenAddrs: [], chainPorts: [:],
+                signature: signIdentify(publicKey: rawKey, observedHost: hostA, privateKey: privateKey)
+            ),
+            from: inboundA
+        )
+
+        // Second connection identifies with the PREFIXED spelling of the SAME
+        // key. Pre-fix this minted a second live identity off one grind; now it
+        // must collapse onto the canonical PeerID and be torn down as a
+        // duplicate of the live connection.
+        let inboundB = PeerID(publicKey: "inbound-collapse-b")
+        let channelB = NIOAsyncTestingChannel()
+        await node.registerInboundConnection(makeInboundConnection(id: inboundB, channel: channelB))
+        let hostB = "203.0.113.21"
+        await node.handleMessage(
+            .identify(
+                publicKey: prefixed, observedHost: hostB, observedPort: 4002,
+                listenAddrs: [], chainPorts: [:],
+                signature: signIdentify(publicKey: prefixed, observedHost: hostB, privateKey: privateKey)
+            ),
+            from: inboundB
+        )
+
+        let peers = await node.connectionPeersForTesting()
+        #expect(peers.contains(canonicalID), "the canonical identity must be live")
+        #expect(!peers.contains(PeerID(publicKey: prefixed)), "the prefixed spelling must not be a second identity")
+        #expect(!peers.contains(inboundA))
+        #expect(!peers.contains(inboundB))
+        #expect(peers.count == 1, "one grind must yield exactly ONE admitted identity, got \(peers)")
+
+        _ = try? await channelA.finish()
+        _ = try? await channelB.finish()
     }
 
     @Test("Identify gate still rejects a key below the threshold on its raw form")

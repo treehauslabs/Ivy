@@ -425,13 +425,20 @@ public actor Ivy {
     }
 
     func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) async {
-        let realID = PeerID(publicKey: publicKey)
+        // Canonicalize FIRST and derive the identity from the canonical raw
+        // form: the PoW gate below measures the canonical form, so if identity
+        // (and the router/ledger/chainPort keys derived from it) used the
+        // PRESENTED spelling, one key ground on its raw form would mint TWO
+        // live identities (raw + ed01-prefixed) off a single grind. Both
+        // spellings must collapse to one PeerID; a second-spelling connection
+        // then hits the duplicate-teardown path like any other duplicate.
+        let rawPublicKey = Self.canonicalKeyHex(publicKey)
+        let realID = PeerID(publicKey: rawPublicKey)
 
         // Require a valid identity signature. An empty or missing signature allows
-        // any peer to claim any public key — reject it outright.
-        // Strip the 2-byte Multikey ed25519 prefix (ed01) if present so that
-        // both raw 32-byte hex keys and Multikey-encoded keys are accepted.
-        let rawPublicKey = Self.canonicalKeyHex(publicKey)
+        // any peer to claim any public key — reject it outright. The signature
+        // binds the PRESENTED string (that is what the peer signed); only
+        // identity derivation canonicalizes.
         guard !signature.isEmpty,
               let pubKeyBytes = Data(hexString: rawPublicKey), pubKeyBytes.count == 32,
               let verifyKey = try? Curve25519.Signing.PublicKey(rawRepresentation: pubKeyBytes) else {
@@ -463,7 +470,7 @@ public actor Ivy {
         }
 
         let advertisedEndpoint = firstAdvertisedListenEndpoint(
-            publicKey: publicKey,
+            publicKey: rawPublicKey,
             listenAddrs: listenAddrs,
             from: peer
         )
