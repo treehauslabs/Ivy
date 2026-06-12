@@ -73,6 +73,52 @@ struct SpawnCertificateTests {
             chain: chain, leaf: PeerID(publicKey: "ed01" + c.publicKey), trustedRoot: "ed01" + root.publicKey))
     }
 
+    @Test("UPPERCASE-hex spelling of an honest key still verifies (no false-federate)")
+    func testUppercaseKeySpellingVerifies() {
+        // A key presented in uppercase hex is the SAME identity (hex decodes
+        // case-insensitively). It must classify trusted, not be wrongly federated.
+        let chain = depth3Chain()
+        #expect(SpawnCertificateChain.verify(
+            chain: chain,
+            leaf: PeerID(publicKey: c.publicKey.uppercased()),
+            trustedRoot: root.publicKey.uppercased()))
+    }
+
+    @Test("Attack: mixed-case self-sign cannot split the issuer != child guard")
+    func testMixedCaseSelfSignRejected() {
+        // Same key K spelled upper as issuer and lower as child: a string compare
+        // would see two identities and pass the self-sign guard, while the
+        // signature (case-insensitive decode) verifies under K. Cert-local
+        // lowercasing must collapse both to K so the self-sign guard fires.
+        let material = SpawnCertificate.signingMaterial(
+            childPublicKey: a.publicKey.lowercased(),
+            chainPath: pathA,
+            issuerPublicKey: a.publicKey.uppercased())
+        let priv = try! Curve25519.Signing.PrivateKey(rawRepresentation: a.privateKey)
+        let sig = try! priv.signature(for: material)
+        let selfSigned = SpawnCertificate(
+            childPublicKey: a.publicKey.lowercased(),
+            chainPath: pathA,
+            issuerPublicKey: a.publicKey.uppercased(),
+            signature: sig)
+        // Rooting it would need K to be the trusted root; even then the self-sign
+        // guard must reject the link.
+        #expect(!SpawnCertificateChain.verify(
+            chain: [selfSigned], leaf: PeerID(publicKey: a.publicKey), trustedRoot: a.publicKey))
+    }
+
+    @Test("verifiedScope returns the leaf's proven scope (callers must enforce it)")
+    func testVerifiedScopeReturnsProvenPath() {
+        #expect(SpawnCertificateChain.verifiedScope(
+            chain: depth3Chain(), leaf: PeerID(publicKey: c.publicKey), trustedRoot: root.publicKey) == pathC)
+        // Empty-chain root case proves the root's (empty) scope, not nil.
+        #expect(SpawnCertificateChain.verifiedScope(
+            chain: [], leaf: PeerID(publicKey: root.publicKey), trustedRoot: root.publicKey) == [])
+        // Invalid chain → nil (no scope to enforce).
+        #expect(SpawnCertificateChain.verifiedScope(
+            chain: depth3Chain(), leaf: PeerID(publicKey: mallory.publicKey), trustedRoot: root.publicKey) == nil)
+    }
+
     // MARK: - Forged signatures
 
     @Test("Attack: bit-flipped signature is rejected")
