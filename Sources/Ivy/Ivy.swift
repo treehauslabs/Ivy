@@ -100,7 +100,7 @@ public actor Ivy {
     // (who to ask), never for demultiplexing responses (what was asked).
     // ─────────────────────────────────────────────────────────────────────────
     struct PendingVolumeRequest {
-        var continuations: [CheckedContinuation<[String: Data], Never>]
+        var continuations: [CheckedContinuation<AttributedVolumeResponse, Never>]
         var candidates: Set<PeerID>
     }
 
@@ -1100,7 +1100,7 @@ public actor Ivy {
             for cont in continuations { cont.resume(returning: nil) }
         }
         for (_, request) in pendingVolumeRequests {
-            for cont in request.continuations { cont.resume(returning: [:]) }
+            for cont in request.continuations { cont.resume(returning: .empty) }
         }
         for (_, cont) in pendingPEX {
             cont.resume(returning: [])

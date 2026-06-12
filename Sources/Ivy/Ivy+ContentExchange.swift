@@ -3,6 +3,23 @@ import NIOCore
 import Tally
 import Crypto
 
+/// A volume fetch result carrying WHO served it. Volumes are locality bundles,
+/// not completeness claims: their completeness/correctness is verified lazily
+/// by the consumer's resolution (JIT). When resolution finds the bundle
+/// deficient or falsified, the consumer reports the serving peer back via
+/// `reportDeficientVolume(rootCID:peer:)` — trust is local.
+public struct AttributedVolumeResponse: Sendable {
+    public let entries: [String: Data]
+    public let servedBy: PeerID?
+
+    public static let empty = AttributedVolumeResponse(entries: [:], servedBy: nil)
+
+    public init(entries: [String: Data], servedBy: PeerID?) {
+        self.entries = entries
+        self.servedBy = servedBy
+    }
+}
+
 extension Ivy {
     // MARK: - DHT Forwarding
 
@@ -191,7 +208,7 @@ extension Ivy {
         if totalReceived > 0 { await meterReceived(peer: peer, bytes: totalReceived) }
         tally.recordSuccess(peer: peer)
         recordVolumeProvider(rootCID: rootCID, peer: peer)
-        resolveVolumeRequest(key: rootCID, result: result)
+        resolveVolumeRequest(key: rootCID, result: result, servedBy: peer)
     }
 
     // MARK: - Volume-Aware Fetching
@@ -269,8 +286,24 @@ extension Ivy {
     /// Registers the continuation before any async work so cleanupAllPending
     /// can cancel it immediately without waiting for a DHT timeout.
     public func fetchVolumeFromAllPeers(rootCID: String) async -> [String: Data] {
-        let candidates = Array(connections.keys) + Array(localPeers.keys)
-        guard !candidates.isEmpty else { return [:] }
+        await fetchVolumeFromAllPeersAttributed(rootCID: rootCID).entries
+    }
+
+    /// Attributed variant: returns WHO served the bundle so the consumer's
+    /// resolution can report a deficient/falsified volume back to its server
+    /// (`reportDeficientVolume`), and lets a retry exclude peers already found
+    /// deficient for this root. Exclusion is advisory routing, not a ban: when
+    /// it would empty the candidate set (single-peer topologies), fall back to
+    /// all peers — retrying through a once-deficient peer can succeed (their
+    /// miss may have been transient) and is strictly better than guaranteed
+    /// failure; Tally demotion already happened and compounds for repeat liars.
+    public func fetchVolumeFromAllPeersAttributed(
+        rootCID: String, excluding: Set<PeerID> = []
+    ) async -> AttributedVolumeResponse {
+        let all = Array(connections.keys) + Array(localPeers.keys)
+        var candidates = all.filter { !excluding.contains($0) }
+        if candidates.isEmpty { candidates = all }
+        guard !candidates.isEmpty else { return .empty }
         return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
     }
 
@@ -280,7 +313,7 @@ extension Ivy {
             for item in entries { result[item.cid] = item.data }
             return result
         }
-        return await fetchVolumeFromNetwork(rootCID: rootCID)
+        return await fetchVolumeFromNetwork(rootCID: rootCID).entries
     }
 
     /// Single-phase content fetch. Sends `want([rootCID])` to candidates and
@@ -290,13 +323,13 @@ extension Ivy {
     ///
     /// Coalescing: if a waiter for this rootCID already exists, joins it without
     /// sending new messages. First responder wakes all coalesced waiters.
-    func fetchVolumeFromNetwork(rootCID: String, requestedCIDs: [String] = []) async -> [String: Data] {
+    func fetchVolumeFromNetwork(rootCID: String, requestedCIDs: [String] = []) async -> AttributedVolumeResponse {
         // Coalesce: join an existing in-flight request for the same content.
         if let existing = pendingVolumeRequests[rootCID] {
-            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
+            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return .empty }
             return await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
+                    guard !Task.isCancelled else { continuation.resume(returning: .empty); return }
                     pendingVolumeRequests[rootCID]?.continuations.append(continuation)
                 }
             } onCancel: {
@@ -337,7 +370,7 @@ extension Ivy {
             }
         }
 
-        guard !candidates.isEmpty else { return [:] }
+        guard !candidates.isEmpty else { return .empty }
         return await fetchWithCandidates(rootCID: rootCID, candidates: candidates, requestedCIDs: requestedCIDs)
     }
 
@@ -345,13 +378,13 @@ extension Ivy {
     /// first `blocks` response wins. Re-checks coalescing inside the continuation
     /// to handle races where a concurrent fetch registered while we were in async
     /// candidate discovery (e.g., the DHT lookup in fetchVolumeFromNetwork).
-    func fetchWithCandidates(rootCID: String, candidates: [PeerID], requestedCIDs: [String] = []) async -> [String: Data] {
+    func fetchWithCandidates(rootCID: String, candidates: [PeerID], requestedCIDs: [String] = []) async -> AttributedVolumeResponse {
         // Coalesce: join an existing in-flight request for this content.
         if let existing = pendingVolumeRequests[rootCID] {
-            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return [:] }
+            guard existing.continuations.count < config.maxWaitersPerPendingCID else { return .empty }
             return await withTaskCancellationHandler {
                 await withCheckedContinuation { continuation in
-                    guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
+                    guard !Task.isCancelled else { continuation.resume(returning: .empty); return }
                     pendingVolumeRequests[rootCID]?.continuations.append(continuation)
                 }
             } onCancel: {
@@ -359,10 +392,10 @@ extension Ivy {
             }
         }
 
-        guard pendingVolumeRequests.count < config.maxPendingRequests else { return [:] }
+        guard pendingVolumeRequests.count < config.maxPendingRequests else { return .empty }
         return await withTaskCancellationHandler {
             await withCheckedContinuation { continuation in
-                guard !Task.isCancelled else { continuation.resume(returning: [:]); return }
+                guard !Task.isCancelled else { continuation.resume(returning: .empty); return }
                 // Re-check: a concurrent fetch may have registered while we were in async work.
                 if pendingVolumeRequests[rootCID] != nil {
                     pendingVolumeRequests[rootCID]?.continuations.append(continuation)
@@ -424,7 +457,7 @@ extension Ivy {
         }
         guard !missing.isEmpty else { return result }
         let requested = orderedRequestedCIDs(rootCID: rootCID, requestedCIDs: missing)
-        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID, requestedCIDs: requested)
+        let networkResult = await fetchVolumeFromNetwork(rootCID: rootCID, requestedCIDs: requested).entries
         if let data = networkResult[rootCID] {
             result[rootCID] = data
         }
@@ -460,10 +493,29 @@ extension Ivy {
         }
     }
 
-    func resolveVolumeRequest(key: String, result: [String: Data]) {
+    func resolveVolumeRequest(key: String, result: [String: Data], servedBy: PeerID? = nil) {
         guard let request = pendingVolumeRequests.removeValue(forKey: key) else { return }
+        let response = AttributedVolumeResponse(entries: result, servedBy: servedBy)
         for cont in request.continuations {
-            cont.resume(returning: result)
+            cont.resume(returning: response)
+        }
+    }
+
+    /// JIT resolution verdict from the consumer: the volume `peer` served for
+    /// `rootCID` did not resolve — entries the closure needed were missing, or
+    /// content was falsified at a level only typed resolution can see. Demote
+    /// the peer in Tally and forget it as a provider for this root, so future
+    /// fetches prefer peers whose bundles actually resolve. Trust is local:
+    /// nothing is stored about the volume itself — only about the peer.
+    public func reportDeficientVolume(rootCID: String, peer: PeerID) {
+        tally.recordFailure(peer: peer)
+        if var providers = providerRecords[rootCID] {
+            providers.removeAll { $0 == peer }
+            if providers.isEmpty {
+                providerRecords.removeValue(forKey: rootCID)
+            } else {
+                providerRecords[rootCID] = providers
+            }
         }
     }
 
