@@ -749,6 +749,11 @@ public actor Ivy {
             } else {
                 peerSpawnCertChains[peer] = chain
             }
+            // The chain is a SEPARATE frame from identify, so a node that classified
+            // on `didIdentifyPeer` may have read an empty chain (under-trust). Notify
+            // it now that the chain is stored so it can (re)classify against this
+            // authenticated identity. Fires on clear (empty) too, to drop stale trust.
+            delegate?.ivy(self, didReceiveSpawnCertChain: peer)
 
         case .dhtForward(let cid, let ttl):
             await handleDHTForward(cid: cid, ttl: ttl, from: peer)
