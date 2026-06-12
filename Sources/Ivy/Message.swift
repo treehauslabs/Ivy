@@ -10,6 +10,11 @@ public enum Message: Sendable {
     case announceBlock(cid: String)
 
     case identify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data)
+    /// Spawn-tree provenance presented right after `identify`: the chain of
+    /// spawn certificates from a trusted root down to THIS connection's
+    /// authenticated identity. Transport only — the receiver verifies it with
+    /// its own `trustedRoot` (TRE-278 step 2a). Absent ⇒ federated peer.
+    case spawnCertPresentation(chain: [SpawnCertificate])
     case dhtForward(cid: String, ttl: UInt8)
 
     case want(rootCIDs: [String])
@@ -69,6 +74,7 @@ public enum Message: Sendable {
         case announceVolume = 54
         case pushVolume = 55
         // tags 56, 57 removed (nodeRecord, getNodeRecord — node-record subsystem deleted)
+        case spawnCertPresentation = 59
     }
 
     /// True for messages that keep the connection alive — always sent regardless of budget.
@@ -154,6 +160,18 @@ public enum Message: Sendable {
                 buf.appendUInt16(port)
             }
             guard buf.appendLengthPrefixedData(signature, maxDataPayload: maxDataPayload) else { return false }
+        case .spawnCertPresentation(let chain):
+            buf.append(Tag.spawnCertPresentation.rawValue)
+            guard buf.appendCount(chain.count, max: MessageLimits.maxSpawnCertChain) else { return false }
+            for cert in chain {
+                guard buf.appendLengthPrefixedString(cert.childPublicKey),
+                      buf.appendCount(cert.chainPath.count, max: UInt16(SpawnCertificate.maxChainPathDepth)) else { return false }
+                for element in cert.chainPath {
+                    guard buf.appendLengthPrefixedString(element) else { return false }
+                }
+                guard buf.appendLengthPrefixedString(cert.issuerPublicKey),
+                      buf.appendLengthPrefixedData(cert.signature, maxDataPayload: maxDataPayload) else { return false }
+            }
         case .dhtForward(let cid, let ttl):
             buf.append(Tag.dhtForward.rawValue)
             guard buf.appendLengthPrefixedString(cid) else { return false }
@@ -303,6 +321,22 @@ public enum Message: Sendable {
             }
             guard let signature = reader.readData() else { return nil }
             return .identify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: addrs, chainPorts: chainPorts, signature: signature)
+        case .spawnCertPresentation:
+            guard let count = reader.readUInt16(), count <= MessageLimits.maxSpawnCertChain else { return nil }
+            var chain: [SpawnCertificate] = []
+            for _ in 0..<count {
+                guard let childPublicKey = reader.readString(),
+                      let pathCount = reader.readUInt16(), pathCount <= UInt16(SpawnCertificate.maxChainPathDepth) else { return nil }
+                var chainPath: [String] = []
+                for _ in 0..<pathCount {
+                    guard let element = reader.readString() else { return nil }
+                    chainPath.append(element)
+                }
+                guard let issuerPublicKey = reader.readString(),
+                      let sig = reader.readData() else { return nil }
+                chain.append(SpawnCertificate(childPublicKey: childPublicKey, chainPath: chainPath, issuerPublicKey: issuerPublicKey, signature: sig))
+            }
+            return .spawnCertPresentation(chain: chain)
         case .dhtForward:
             guard let cid = reader.readString(),
                   let ttl = reader.readUInt8() else { return nil }
