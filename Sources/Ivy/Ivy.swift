@@ -100,9 +100,19 @@ public actor Ivy {
     // (who to ask), never for demultiplexing responses (what was asked).
     // ─────────────────────────────────────────────────────────────────────────
     struct PendingVolumeRequest {
-        var continuations: [CheckedContinuation<[String: Data], Never>]
+        var continuations: [CheckedContinuation<AttributedVolumeResponse, Never>]
         var candidates: Set<PeerID>
     }
+
+    /// Per-root, short-lived suppression of peers that served a deficient bundle
+    /// for that root (`reportDeficientVolume`). Candidate selection skips a
+    /// suppressed peer, so a JIT-deficiency retry routes around it WITHOUT any
+    /// per-call exclusion parameter — the punish call IS the routing change.
+    /// Self-healing: the entry expires after `deficiencySuppressionWindow`, so a
+    /// peer whose miss was transient becomes selectable again. Distinct from
+    /// Tally reputation (gradual, global): this is immediate and root-scoped.
+    var deficientPeerSuppression: [String: [String: ContinuousClock.Instant]] = [:]
+    static let deficiencySuppressionWindow: Duration = .seconds(30)
 
     var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
     var pendingFindPins: [String: PendingFindPins] = [:]
@@ -1100,7 +1110,7 @@ public actor Ivy {
             for cont in continuations { cont.resume(returning: nil) }
         }
         for (_, request) in pendingVolumeRequests {
-            for cont in request.continuations { cont.resume(returning: [:]) }
+            for cont in request.continuations { cont.resume(returning: .empty) }
         }
         for (_, cont) in pendingPEX {
             cont.resume(returning: [])
