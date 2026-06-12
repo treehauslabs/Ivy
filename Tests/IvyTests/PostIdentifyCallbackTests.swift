@@ -50,10 +50,16 @@ private final class IdentifyRecorder: IvyDelegate, @unchecked Sendable {
     struct Event: Sendable { let realID: PeerID; let previous: PeerID }
     private let lock = NSLock()
     private var _events: [Event] = []
+    private var _spawnCertEvents: [PeerID] = []
     var events: [Event] { lock.withLock { _events } }
+    var spawnCertEvents: [PeerID] { lock.withLock { _spawnCertEvents } }
 
     func ivy(_ ivy: Ivy, didIdentifyPeer realID: PeerID, previous: PeerID) {
         lock.withLock { _events.append(Event(realID: realID, previous: previous)) }
+    }
+
+    func ivy(_ ivy: Ivy, didReceiveSpawnCertChain peer: PeerID) {
+        lock.withLock { _spawnCertEvents.append(peer) }
     }
 }
 
@@ -164,5 +170,53 @@ struct PostIdentifyCallbackTests {
         #expect(!peers.contains(inbound))
 
         _ = try? await channel.finish()
+    }
+
+    @Test("didReceiveSpawnCertChain fires after a presentation; chain is queryable (TRE-278 2c)")
+    func spawnCertPresentationFiresCallback() async throws {
+        let node = Ivy(config: postIdentifyConfig(publicKey: "spawn-cert-node"))
+        let recorder = IdentifyRecorder()
+        await node.setDelegate(recorder)
+
+        let inbound = PeerID(publicKey: "inbound-spawn-cert")
+        let channel = NIOAsyncTestingChannel()
+        await node.registerInboundConnection(makeConnection(id: inbound, channel: channel))
+
+        let (rawKey, privateKey) = makeKeyPair()
+        let realID = PeerID(publicKey: rawKey)
+        let observedHost = "203.0.113.60"
+        await node.handleMessage(
+            .identify(publicKey: rawKey, observedHost: observedHost, observedPort: 4001,
+                      listenAddrs: [], chainPorts: [:],
+                      signature: signIdentifyFrame(publicKey: rawKey, observedHost: observedHost, privateKey: privateKey)),
+            from: inbound)
+
+        // A real chain whose leaf is THIS connection's authenticated key.
+        let rootKP = makeKeyPair()
+        let chain = [SpawnCertificate.issue(childPublicKey: rawKey, chainPath: ["Nexus", "x"], issuerKeyPair: rootKP)!]
+        await node.handleMessage(.spawnCertPresentation(chain: chain), from: realID)
+
+        #expect(recorder.spawnCertEvents == [realID])
+        let stored = await node.spawnCertChain(for: realID)
+        #expect(stored == chain)
+    }
+
+    @Test("a presentation under a still-unauthenticated inbound id is ignored (no callback, not stored)")
+    func spawnCertPresentationIgnoredPreIdentify() async throws {
+        let node = Ivy(config: postIdentifyConfig(publicKey: "spawn-cert-preid-node"))
+        let recorder = IdentifyRecorder()
+        await node.setDelegate(recorder)
+
+        let inbound = PeerID(publicKey: "inbound-preid")
+        let channel = NIOAsyncTestingChannel()
+        await node.registerInboundConnection(makeConnection(id: inbound, channel: channel))
+
+        let rootKP = makeKeyPair(), leaf = makeKeyPair()
+        let chain = [SpawnCertificate.issue(childPublicKey: leaf.publicKey, chainPath: ["Nexus", "x"], issuerKeyPair: rootKP)!]
+        await node.handleMessage(.spawnCertPresentation(chain: chain), from: inbound) // temp inbound- id
+
+        #expect(recorder.spawnCertEvents.isEmpty)
+        let stored = await node.spawnCertChain(for: inbound)
+        #expect(stored.isEmpty)
     }
 }
