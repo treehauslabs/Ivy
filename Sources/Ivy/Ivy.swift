@@ -601,6 +601,13 @@ public actor Ivy {
             connectingEndpoints.removeValue(forKey: peer)
             router.removePeer(peer)
             cleanupPendingForPeer(peer)
+            // Clear per-peer transient state so a later session that re-uses this
+            // identity can't inherit it. Critical for spawn-cert trust: a stale
+            // chain would mis-classify a reconnecting cert-less peer as trusted,
+            // breaking "absent ⇒ federated". (peerChainPorts had the same gap on
+            // this natural socket-close teardown path.)
+            peerSpawnCertChains.removeValue(forKey: peer)
+            peerChainPorts.removeValue(forKey: peer)
             tally.resetPeer(peer)
             delegate?.ivy(self, didDisconnect: peer)
         } else {
@@ -732,6 +739,10 @@ public actor Ivy {
             // Sent right after identify, so `peer` is the connection's
             // authenticated identity. Store as transport only (bounded); the node
             // verifies/classifies via spawnCertChain(for:). An empty chain clears.
+            // Only bind under an AUTHENTICATED id — ignore a chain presented before
+            // identify (still keyed to the temp `inbound-<uuid>`), so a chain can
+            // never be stored against an unauthenticated identity.
+            guard !peer.publicKey.hasPrefix("inbound-") else { return }
             guard chain.count <= Int(MessageLimits.maxSpawnCertChain) else { return }
             if chain.isEmpty {
                 peerSpawnCertChains.removeValue(forKey: peer)
