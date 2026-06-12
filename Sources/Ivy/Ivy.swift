@@ -40,6 +40,13 @@ public actor Ivy {
     public func setDataSource(_ ds: IvyDataSource?) { dataSource = ds }
     public var chainPorts: [String: UInt16] = [:]
     var peerChainPorts: [PeerID: [String: UInt16]] = [:]
+    /// Spawn-cert chains peers presented after identify (TRE-278 step 2a).
+    /// Transport store only — verification/classification against a `trustedRoot`
+    /// is the consuming node's policy, via `spawnCertChain(for:)`.
+    var peerSpawnCertChains: [PeerID: [SpawnCertificate]] = [:]
+    /// This node's own spawn-cert chain, presented right after our identify.
+    /// Empty until the node is issued a chain by its spawn-tree parent.
+    var ownSpawnCertChain: [SpawnCertificate] = []
 
     var connections: [PeerID: PeerConnection] = [:]
     var inboundConnectionIDs: Set<PeerID> = []
@@ -319,6 +326,7 @@ public actor Ivy {
         untrackInboundConnection(peer)
         router.removePeer(peer)
         peerChainPorts.removeValue(forKey: peer)
+        peerSpawnCertChains.removeValue(forKey: peer)
         cleanupPendingForPeer(peer)
         // Drop the per-peer Tally ledger at the teardown choke point so every
         // embedder gets the cleanup for free (a removal — harmless if the
@@ -432,6 +440,25 @@ public actor Ivy {
             chainPorts: chainPorts,
             signature: signature
         ))
+        // Present spawn-tree provenance immediately after identify so the peer
+        // (which has just bound our authenticated identity) can verify the chain
+        // against its trusted root and classify this connection trusted/federated.
+        if !ownSpawnCertChain.isEmpty {
+            conn.fireAndForgetMessage(.spawnCertPresentation(chain: ownSpawnCertChain))
+        }
+    }
+
+    /// Configure this node's spawn-cert chain (root→…→self), presented after
+    /// identify. Set once the spawn-tree parent has issued the chain. (TRE-278.)
+    public func setSpawnCertChain(_ chain: [SpawnCertificate]) {
+        ownSpawnCertChain = chain
+    }
+
+    /// The spawn-cert chain a peer presented (empty if none). The caller verifies
+    /// it with `SpawnCertificateChain.verifiedScope(chain:leaf:trustedRoot:)`,
+    /// passing the peer's authenticated `PeerID` as `leaf`.
+    public func spawnCertChain(for peer: PeerID) -> [SpawnCertificate] {
+        peerSpawnCertChains[peer] ?? []
     }
 
     func handleIdentify(publicKey: String, observedHost: String, observedPort: UInt16, listenAddrs: [(String, UInt16)], chainPorts: [String: UInt16], signature: Data, from peer: PeerID) async {
@@ -493,6 +520,7 @@ public actor Ivy {
                 untrackInboundConnection(peer)
                 await healthMonitor?.removePeer(peer)
                 peerChainPorts.removeValue(forKey: peer)
+        peerSpawnCertChains.removeValue(forKey: peer)
                 tally.resetPeer(peer)
                 delegate?.ivy(self, didDisconnect: peer)
                 return
@@ -515,6 +543,7 @@ public actor Ivy {
             await movePeerHealthTracking(from: peer, to: realID)
             // Migrate chainPorts from old key to real key.
             peerChainPorts.removeValue(forKey: peer)
+        peerSpawnCertChains.removeValue(forKey: peer)
         } else if let endpoint = advertisedEndpoint, let conn = connections[realID] {
             conn.endpoint = endpoint
             router.addPeer(realID, endpoint: endpoint, tally: tally)
@@ -699,6 +728,16 @@ public actor Ivy {
 
         case .identify(let publicKey, let observedHost, let observedPort, let listenAddrs, let chainPorts, let signature):
             await handleIdentify(publicKey: publicKey, observedHost: observedHost, observedPort: observedPort, listenAddrs: listenAddrs, chainPorts: chainPorts, signature: signature, from: peer)
+        case .spawnCertPresentation(let chain):
+            // Sent right after identify, so `peer` is the connection's
+            // authenticated identity. Store as transport only (bounded); the node
+            // verifies/classifies via spawnCertChain(for:). An empty chain clears.
+            guard chain.count <= Int(MessageLimits.maxSpawnCertChain) else { return }
+            if chain.isEmpty {
+                peerSpawnCertChains.removeValue(forKey: peer)
+            } else {
+                peerSpawnCertChains[peer] = chain
+            }
 
         case .dhtForward(let cid, let ttl):
             await handleDHTForward(cid: cid, ttl: ttl, from: peer)
@@ -1254,6 +1293,7 @@ public actor Ivy {
             }
             router.removePeer(candidate)
             peerChainPorts.removeValue(forKey: candidate)
+            peerSpawnCertChains.removeValue(forKey: candidate)
             cleanupPendingForPeer(candidate)
             tally.resetPeer(candidate)
             if let monitor = healthMonitor {
