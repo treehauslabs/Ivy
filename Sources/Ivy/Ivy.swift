@@ -104,6 +104,16 @@ public actor Ivy {
         var candidates: Set<PeerID>
     }
 
+    /// Per-root, short-lived suppression of peers that served a deficient bundle
+    /// for that root (`reportDeficientVolume`). Candidate selection skips a
+    /// suppressed peer, so a JIT-deficiency retry routes around it WITHOUT any
+    /// per-call exclusion parameter — the punish call IS the routing change.
+    /// Self-healing: the entry expires after `deficiencySuppressionWindow`, so a
+    /// peer whose miss was transient becomes selectable again. Distinct from
+    /// Tally reputation (gradual, global): this is immediate and root-scoped.
+    var deficientPeerSuppression: [String: [String: ContinuousClock.Instant]] = [:]
+    static let deficiencySuppressionWindow: Duration = .seconds(30)
+
     var pendingVolumeRequests: [String: PendingVolumeRequest] = [:]
     var pendingFindPins: [String: PendingFindPins] = [:]
     var nextFindPinsGeneration: UInt64 = 0

@@ -291,17 +291,16 @@ extension Ivy {
 
     /// Attributed variant: returns WHO served the bundle so the consumer's
     /// resolution can report a deficient/falsified volume back to its server
-    /// (`reportDeficientVolume`), and lets a retry exclude peers already found
-    /// deficient for this root. Exclusion is advisory routing, not a ban: when
-    /// it would empty the candidate set (single-peer topologies), fall back to
-    /// all peers — retrying through a once-deficient peer can succeed (their
-    /// miss may have been transient) and is strictly better than guaranteed
-    /// failure; Tally demotion already happened and compounds for repeat liars.
+    /// (`reportDeficientVolume`). A retry routes around recently-deficient peers
+    /// automatically — candidate selection skips suppressed peers for this root.
+    /// Advisory: if suppression would empty the candidate set (single-peer
+    /// topologies), fall back to all peers — a deficiency may have been transient
+    /// and retrying the only peer beats guaranteed failure.
     public func fetchVolumeFromAllPeersAttributed(
-        rootCID: String, excluding: Set<PeerID> = []
+        rootCID: String
     ) async -> AttributedVolumeResponse {
         let all = Array(connections.keys) + Array(localPeers.keys)
-        var candidates = all.filter { !excluding.contains($0) }
+        var candidates = all.filter { !isDeficiencySuppressed(rootCID: rootCID, peer: $0) }
         if candidates.isEmpty { candidates = all }
         guard !candidates.isEmpty else { return .empty }
         return await fetchWithCandidates(rootCID: rootCID, candidates: candidates)
@@ -344,12 +343,14 @@ extension Ivy {
         for p in providerRecords[rootCID] ?? [] {
             guard connections[p] != nil || localPeers[p] != nil else { continue }
             guard tally.shouldAllow(peer: p) else { continue }
+            guard !isDeficiencySuppressed(rootCID: rootCID, peer: p) else { continue }
             if seen.insert(p.publicKey).inserted { candidates.append(p) }
         }
         for pk in storedPinAnnouncements(for: rootCID) {
             let pid = PeerID(publicKey: pk)
             guard connections[pid] != nil || localPeers[pid] != nil else { continue }
             guard tally.shouldAllow(peer: pid) else { continue }
+            guard !isDeficiencySuppressed(rootCID: rootCID, peer: pid) else { continue }
             if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
         }
         if candidates.count < 2 {
@@ -357,10 +358,24 @@ extension Ivy {
             for pid in discovered {
                 guard connections[pid] != nil || localPeers[pid] != nil else { continue }
                 guard tally.shouldAllow(peer: pid) else { continue }
+                guard !isDeficiencySuppressed(rootCID: rootCID, peer: pid) else { continue }
                 if seen.insert(pid.publicKey).inserted { candidates.append(pid) }
             }
         }
         // Broadcast fallback: direct peers capped at maxWantCandidates
+        if candidates.isEmpty {
+            let allPeers = Array(connections.keys) + Array(localPeers.keys)
+            for p in allPeers {
+                guard tally.shouldAllow(peer: p) else { continue }
+                guard !isDeficiencySuppressed(rootCID: rootCID, peer: p) else { continue }
+                if seen.insert(p.publicKey).inserted { candidates.append(p) }
+                if candidates.count >= config.maxWantCandidates { break }
+            }
+        }
+        // Advisory last resort: suppression emptied the candidate set (every
+        // holder is recently-deficient for this root). Don't strand — retry the
+        // suppressed peers; a deficiency may have been transient, and this beats
+        // guaranteed failure. Tally demotion still compounds for repeat liars.
         if candidates.isEmpty {
             let allPeers = Array(connections.keys) + Array(localPeers.keys)
             for p in allPeers {
@@ -517,6 +532,26 @@ extension Ivy {
                 providerRecords[rootCID] = providers
             }
         }
+        // Short-lived per-root suppression: the next fetch for this root routes
+        // around `peer` without any per-call exclusion parameter. Self-healing
+        // via the window so a transient miss doesn't permanently strand a peer.
+        deficientPeerSuppression[rootCID, default: [:]][peer.publicKey] =
+            ContinuousClock.Instant.now + Self.deficiencySuppressionWindow
+    }
+
+    /// True iff `peer` is within its deficiency-suppression window for `rootCID`.
+    /// Lazily prunes expired entries so the map can't grow unbounded.
+    func isDeficiencySuppressed(rootCID: String, peer: PeerID) -> Bool {
+        guard var byPeer = deficientPeerSuppression[rootCID] else { return false }
+        let now = ContinuousClock.Instant.now
+        if let until = byPeer[peer.publicKey], now < until { return true }
+        byPeer = byPeer.filter { _, until in now < until }
+        if byPeer.isEmpty {
+            deficientPeerSuppression.removeValue(forKey: rootCID)
+        } else {
+            deficientPeerSuppression[rootCID] = byPeer
+        }
+        return false
     }
 
     /// Get known providers for a volume.
